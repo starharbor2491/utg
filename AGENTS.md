@@ -16,3 +16,9 @@
 - **Performance & Thermal Discipline (`src/main.ts`)**:
   - Renders directly to the native WebGL2 backbuffer (`antialias: true`) so Apple Silicon uses zero-bandwidth on-chip tile MSAA rather than offscreen multi-pass `EffectComposer` resolves.
   - Frame pacing is capped at `60 FPS` during active play, `15 FPS` on the pause/start overlay, and `0 FPS` when `document.hidden` is true; directional shadow maps update at `30 Hz`.
+
+## Battle simulator (TDM) notes
+- **Vehicle showroom (dev only)**: `http://127.0.0.1:5173/showroom.html?v=<normal|heavy|ifv|humvee|rocket>&team=<blue|red>&view=<front|side|34|top|rear|close-wheel|close-pod|close-gun>&pitch=<rad>` — runs `auditThreeObject` on every rig; not shipped by `npm run build`.
+- **QA hooks** (`window.__tankQA`): `engageForTest()`, `fastForward(seconds)` (headless sim steps), `getMatchState()` (score, `friendlyFireEvents` must stay 0), `killForTest(id, catastrophic)`, `setWreckFxVisible(bool)`, `setCameraForTest(...)`, `physicsSelfTest()`, `getRenderStats()`.
+- Screenshot harness lives outside the repo (`/tmp/shots/shoot.mjs`, playwright 1.63 + cached chromium-1243, flags `--use-angle=metal`).
+- Rocket launcher is procedural three.js (`src/game/models/RocketLauncher.ts`); Humvee/IFV are tevy.dev CC0 LOD1 GLBs.
