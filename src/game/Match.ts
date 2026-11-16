@@ -60,6 +60,19 @@ export class Match {
     return this.tanks[0];
   }
 
+  /** Every Tank instance that can ever be killed: current roster + prebuilt human vehicles. */
+  public forEachTankEver(fn: (t: Tank) => void): void {
+    const seen = new Set<Tank>();
+    for (const t of this.tanks) {
+      seen.add(t);
+      fn(t);
+    }
+    for (const cls of Object.keys(this.humanVehicles) as VehicleClass[]) {
+      const t = this.humanVehicles[cls];
+      if (!seen.has(t)) fn(t);
+    }
+  }
+
   baseCenter(team: Team): { x: number; z: number } {
     return team === 'blue' ? BASE_BLUE : BASE_RED;
   }

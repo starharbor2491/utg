@@ -745,42 +745,6 @@ export function instantiateTankRig(
   coaxNode.position.set(0.24, 0.03, 1.45);
   gunRecoilGroup.add(coaxNode);
 
-  if (!isBlue) {
-    const markerMat = new THREE.MeshStandardMaterial({
-      color: new THREE.Color('#a62820'),
-      roughness: 0.68,
-      metalness: 0.12,
-      polygonOffset: true,
-      polygonOffsetFactor: -1,
-      polygonOffsetUnits: -4,
-    });
-    // Stripes hug the turret cheeks: measure the turret bbox in pivot space so
-    // they sit on the surface for both MBT and HEAVY silhouettes. The gun
-    // subtree is excluded so barrel length doesn't stretch the stripe.
-    turretPivot.updateWorldMatrix(true, false);
-    const invPivot = new THREE.Matrix4().copy(turretPivot.matrixWorld).invert();
-    const turretLocal = new THREE.Box3();
-    for (const child of turretPivot.children) {
-      if (child === gunPivot || child === gunRecoilGroup) continue;
-      turretLocal.union(new THREE.Box3().setFromObject(child).applyMatrix4(invPivot));
-    }
-    if (turretLocal.isEmpty()) turretLocal.setFromObject(turretPivot).applyMatrix4(invPivot);
-    const stripeGeo = new THREE.BoxGeometry(
-      0.05,
-      Math.min(0.34, turretLocal.max.y - turretLocal.min.y - 0.15),
-      turretLocal.max.z - turretLocal.min.z - 0.7
-    );
-    const stripeY = turretLocal.max.y - 0.32;
-    const leftStripe = new THREE.Mesh(stripeGeo, markerMat);
-    leftStripe.name = 'opfor_id_L';
-    leftStripe.position.set(turretLocal.max.x + 0.02, stripeY, 0);
-    const rightStripe = new THREE.Mesh(stripeGeo, markerMat);
-    rightStripe.name = 'opfor_id_R';
-    rightStripe.position.set(turretLocal.min.x - 0.02, stripeY, 0);
-    turretPivot.add(leftStripe, rightStripe);
-    hullMeshes.push(leftStripe, rightStripe);
-  }
-
   for (let i = 1; i <= 7; i++) {
     const wl = visualRoot.getObjectByName(`road_wheel_L${i}`);
     const wr = visualRoot.getObjectByName(`road_wheel_R${i}`);

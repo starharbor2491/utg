@@ -209,6 +209,16 @@ export class World implements TerrainQuery {
     return Math.max(roadNS, roadEW, roadLoop);
   }
 
+  /** Register a runtime obstacle (e.g. a settled wreck). Returns nothing; pass the same object to removeObstacle. */
+  public addObstacle(obs: ObstacleCollider): void {
+    this.obstacles.push(obs);
+  }
+
+  public removeObstacle(obs: ObstacleCollider): void {
+    const idx = this.obstacles.indexOf(obs);
+    if (idx >= 0) this.obstacles.splice(idx, 1);
+  }
+
   public getObstacles(): readonly ObstacleCollider[] {
     return this.obstacles;
   }

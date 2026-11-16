@@ -12,6 +12,7 @@ import type {
   Team,
   TerrainQuery,
   VehicleClass,
+  WreckKillInfo,
   XRayModuleHitEntry,
   XRaySpallRay,
 } from './types';
@@ -504,8 +505,7 @@ export class Tank implements TankEntity {
   private engineFireTimer = 0;
   private fireSmokeAccum = 0;
 
-  private readonly rig: InstantiatedTankRig;
-  private readonly originalColors = new Map<THREE.MeshStandardMaterial, THREE.Color>();
+  public readonly rig: InstantiatedTankRig;
 
   private suspPitch = 0;
   private suspRoll = 0;
@@ -516,7 +516,16 @@ export class Tank implements TankEntity {
   private barrelRecoilZ = 0;
   private barrelRecoilVel = 0;
   private dustAccum = 0;
-  private wreckSmokeAccum = 0;
+
+  // Last-hit context captured in takeDamage for the destruction manager
+  private readonly _dkHitPoint = new THREE.Vector3();
+  private readonly _dkShellDir = new THREE.Vector3();
+  private _dkHasDir = false;
+  private _dkWeapon: 'cannon' | 'mg' = 'cannon';
+  private _dkDamage = 0;
+  private _dkShellSpec: ShellSpec | null = null;
+  /** Wired by main.ts — spawns the persistent physical wreck on kill */
+  public onDestroyed: ((info: WreckKillInfo) => void) | null = null;
 
   // Wheeled drive state
   private steerAngle = 0;
@@ -549,16 +558,6 @@ export class Tank implements TankEntity {
 
     this.rig = instantiateTankRig(assets, vehicleClass, team);
     this.root = this.rig.root;
-
-    for (const mesh of this.rig.hullMeshes) {
-      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      for (const m of mats) {
-        const std = m as THREE.MeshStandardMaterial;
-        if (std?.isMeshStandardMaterial && !this.originalColors.has(std)) {
-          this.originalColors.set(std, std.color.clone());
-        }
-      }
-    }
 
     this.respawnAt(spawnPos, spawnYaw);
   }
@@ -604,13 +603,6 @@ export class Tank implements TankEntity {
         this.alignHullToTerrain(world, safeDt, 0);
       }
 
-      this.wreckSmokeAccum += safeDt;
-      if (this.wreckSmokeAccum >= 0.14) {
-        this.wreckSmokeAccum = 0;
-        _tmpVecA.copy(this.position);
-        _tmpVecA.y += 1.65;
-        callbacks?.onWreckSmoke?.(_tmpVecA);
-      }
       return;
     }
 
@@ -1156,6 +1148,17 @@ export class Tank implements TankEntity {
   ): boolean {
     if (!this.alive || amount <= 0 || this.spawnProtect > 0) return false;
 
+    this._dkHitPoint.copy(hitWorldPos);
+    if (shellDirWorld) {
+      this._dkShellDir.copy(shellDirWorld);
+      this._dkHasDir = true;
+    } else {
+      this._dkHasDir = false;
+    }
+    this._dkWeapon = weapon;
+    this._dkDamage = amount;
+    this._dkShellSpec = shellSpec ?? null;
+
     const scaledAmt = amount * this.stats.armorDamageMult;
 
     if (shellDirWorld && this.stats.drive === 'tracked') {
@@ -1506,10 +1509,29 @@ export class Tank implements TankEntity {
     this.alive = false;
     this.engineFireTimer = 0;
     this.respawnTimer = this.isHuman ? 5.0 : 7.0;
-    this.applyWreckAppearance(true);
-    this.rig.turretPivot.rotation.z = (Math.random() - 0.5) * (ammoBlowout ? 0.45 : 0.22);
-    this.rig.turretPivot.position.y = this.rig.turretRestPos.y + (ammoBlowout ? 0.32 : 0.08);
-    this.rig.gunPivot.rotation.x = 0.16;
+
+    // Catastrophic kill: ammo rack, rocket/HE blast >= 400 dmg, any cannon/rocket
+    // kill on wheeled hulls, or 25% of other cannon kills.
+    const spec = this._dkShellSpec;
+    const isRocket = !!spec?.rocket;
+    const isCannon = this._dkWeapon === 'cannon';
+    const catastrophic =
+      ammoBlowout ||
+      ((isRocket || (spec?.splashRadius ?? 0) > 0) && this._dkDamage >= 400) ||
+      (this.stats.drive === 'wheeled' && (isCannon || isRocket)) ||
+      (isCannon && Math.random() < 0.25);
+
+    if (this.onDestroyed) {
+      this.onDestroyed({
+        tank: this,
+        hitPoint: this._dkHitPoint,
+        shellDir: this._dkHasDir ? this._dkShellDir : null,
+        weapon: this._dkWeapon,
+        damage: this._dkDamage,
+        catastrophic,
+      });
+    }
+    this.root.visible = false;
   }
 
   public respawnAt(pos: THREE.Vector3, yaw: number): void {
@@ -1552,25 +1574,31 @@ export class Tank implements TankEntity {
     this._rocketsLeft = this.stats.salvoSize ?? 0;
     this._setRocketMeshesVisible(true);
 
+    this.root.visible = true;
     this.rig.turretPivot.rotation.set(0, 0, 0);
     this.rig.turretPivot.position.copy(this.rig.turretRestPos);
     this.rig.gunPivot.rotation.set(0, 0, 0);
     this.rig.gunRecoilGroup.position.set(0, 0, 0);
-    this.applyWreckAppearance(false);
 
     this.root.position.copy(pos);
     this.root.rotation.set(0, this.hullYaw, 0);
     this.root.updateMatrixWorld(true);
   }
 
-  private applyWreckAppearance(isWreck: boolean): void {
-    for (const [mat, origColor] of this.originalColors.entries()) {
-      if (isWreck) {
-        mat.color.copy(origColor).multiplyScalar(0.24);
-        mat.roughness = Math.min(1.0, mat.roughness + 0.3);
-      } else {
-        mat.color.copy(origColor);
-      }
-    }
+  /** QA hook: kill as if hit by a cannon round from the vehicle's front. */
+  public debugKill(catastrophic: boolean): void {
+    if (!this.alive) return;
+    const fwd = _tmpVecA.set(Math.sin(this.hullYaw), 0, Math.cos(this.hullYaw));
+    this._dkHitPoint.set(
+      this.position.x + fwd.x * this.stats.collisionRadius,
+      this.position.y + 1.4,
+      this.position.z + fwd.z * this.stats.collisionRadius
+    );
+    this._dkShellDir.copy(fwd).negate();
+    this._dkHasDir = true;
+    this._dkWeapon = 'cannon';
+    this._dkDamage = 9999;
+    this._dkShellSpec = this.stats.shells[0];
+    this.killTank(catastrophic);
   }
 }

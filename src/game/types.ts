@@ -254,6 +254,16 @@ export interface TankEntity {
   respawnAt(pos: THREE.Vector3, yaw: number): void;
 }
 
+export interface WreckKillInfo {
+  tank: TankEntity;
+  hitPoint: THREE.Vector3;
+  shellDir: THREE.Vector3 | null;
+  weapon: 'cannon' | 'mg';
+  damage: number;
+  /** Ammo detonation / heavy catastrophic kill: turret launches, cook-off chain */
+  catastrophic: boolean;
+}
+
 export interface DamageEvent {
   victim: TankEntity;
   attacker: TankEntity | null;

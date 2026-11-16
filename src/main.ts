@@ -4,6 +4,7 @@ import { loadAllGameAssets } from './game/AssetLoader';
 import { World } from './game/World';
 import { Tank } from './game/Tank';
 import { EffectsManager } from './game/Effects';
+import { DestructionManager } from './game/Destruction';
 import { BallisticsManager, predictBarrelImpact } from './game/Ballistics';
 import { PlayerController } from './game/PlayerController';
 import { BotAIManager } from './game/BotAI';
@@ -146,8 +147,15 @@ async function bootstrap(): Promise<void> {
 
   const world = new World(scene, assets);
   const effects = new EffectsManager(scene);
+  effects.groundProbe = (x, z) => world.getHeightAt(x, z);
   const ballistics = new BallisticsManager(scene, effects);
+  const destruction = new DestructionManager(scene, world, effects);
   const match = new Match(scene, world, assets);
+
+  // Persistent physical wrecks for every kill (current roster + prebuilt human vehicles)
+  match.forEachTankEver((t) => {
+    t.onDestroyed = (info) => destruction.spawnWreck(info);
+  });
 
   // Bots = every tank except the human (tanks[0]); stable for the whole match
   const allTanks: Tank[] = match.tanks;
@@ -274,6 +282,10 @@ async function bootstrap(): Promise<void> {
     if (!victim.isHuman && ev.xrayReport && attacker?.isHuman) {
       hitCam.showHit(ev.xrayReport);
     }
+    if (killedNow) {
+      // Heavy kills jolt nearby sleeping wreck bodies back to life
+      destruction.applyBlast(ev.hitPoint, ev.weapon === 'cannon' ? 7 : 3, 14);
+    }
     if (!victim.isHuman) {
       botAI.notifyDamaged(victim.id, attacker?.id ?? null);
     }
@@ -317,6 +329,7 @@ async function bootstrap(): Promise<void> {
   let fpsSmooth = 60;
   let cameraOverrideActive = false;
   let forceHideBriefing = false;
+  const perfProbe = { active: false, target: 0, frames: 0, simMs: 0, renderMs: 0 };
 
   const tankCallbacks = {
     onFireCannon: (shooter: Tank, pos: THREE.Vector3, dir: THREE.Vector3, shell: ShellSpec) => {
@@ -439,6 +452,7 @@ async function bootstrap(): Promise<void> {
     match.update(dt);
     world.update(dt, human.position);
     effects.update(dt, camera);
+    destruction.update(dt, camera.position);
 
     // Minimap unit telemetry + enemy spotting (red visible only within 220m of a live blue tank)
     activeEnemyCount = 0;
@@ -496,7 +510,9 @@ async function bootstrap(): Promise<void> {
       hud.setBriefingVisible(!controller.pointerLocked);
     }
 
+    const _perfS0 = perfProbe.active ? performance.now() : 0;
     stepSimulation(dt);
+    if (perfProbe.active) perfProbe.simMs += performance.now() - _perfS0;
     const playerTank = match.human;
 
     const vw = window.innerWidth;
@@ -656,7 +672,13 @@ async function bootstrap(): Promise<void> {
 
     const hideOwnTankInOptic = controller.sniperZoom && !cameraOverrideActive && playerTank.alive;
     if (hideOwnTankInOptic) playerTank.root.visible = false;
+    const _perfR0 = perfProbe.active ? performance.now() : 0;
     renderer.render(scene, camera);
+    if (perfProbe.active) {
+      perfProbe.renderMs += performance.now() - _perfR0;
+      perfProbe.frames++;
+      if (perfProbe.frames >= perfProbe.target) perfProbe.active = false;
+    }
     if (hideOwnTankInOptic) playerTank.root.visible = true;
   }
 
@@ -680,6 +702,34 @@ async function bootstrap(): Promise<void> {
     clearCameraForTest: () => {
       cameraOverrideActive = false;
     },
+    setWreckFxVisible: (v: boolean) => effects.setWreckFxVisible(v),
+    killForTest: (tankId: string, catastrophic: boolean) => {
+      const t = allTanks.find((x) => x.id === tankId);
+      if (!t || !t.alive) return false;
+      const fx = Math.sin(t.hullYaw);
+      const fz = Math.cos(t.hullYaw);
+      _markerWorldPos.set(t.position.x + fx * t.stats.collisionRadius, t.position.y + 1.4, t.position.z + fz * t.stats.collisionRadius);
+      effects.spawnExplosion(_markerWorldPos, _projScratch.set(0, 1, 0), 1.3, 'tank_kill');
+      destruction.applyBlast(_markerWorldPos, 6, 12);
+      t.debugKill(catastrophic);
+      return true;
+    },
+    physicsSelfTest: () => destruction.selfTest(),
+    getWreckState: () => destruction.getWreckState(),
+    probeWreckClearance: () => destruction.probeClearance(),
+    perfSample: (frames: number) => {
+      perfProbe.active = true;
+      perfProbe.target = Math.max(1, Math.round(frames));
+      perfProbe.frames = 0;
+      perfProbe.simMs = 0;
+      perfProbe.renderMs = 0;
+    },
+    getPerfResult: () => ({
+      frames: perfProbe.frames,
+      simMsAvg: perfProbe.frames ? perfProbe.simMs / perfProbe.frames : 0,
+      renderMsAvg: perfProbe.frames ? perfProbe.renderMs / perfProbe.frames : 0,
+      active: perfProbe.active,
+    }),
     getRenderStats: () => ({
       calls: renderer.info.render.calls,
       triangles: renderer.info.render.triangles,

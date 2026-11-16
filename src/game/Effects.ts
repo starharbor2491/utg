@@ -8,6 +8,7 @@ const FLASH_CAPACITY = 128;
 const SPARK_CAPACITY = 192;
 const RING_CAPACITY = 32;
 const SCORCH_CAPACITY = 32;
+const FIRE_CAPACITY = 320;
 const POINT_LIGHT_POOL_SIZE = 1;
 const COOKOFF_POOL_SIZE = 6;
 const SHAKE_QUEUE_SIZE = 12;
@@ -125,6 +126,28 @@ interface PooledLight {
   peakIntensity: number;
 }
 
+interface FireParticle {
+  active: boolean;
+  age: number;
+  maxAge: number;
+  px: number;
+  py: number;
+  pz: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  s0: number;
+  s1: number;
+  seed: number;
+  r0: number;
+  g0: number;
+  b0: number;
+  r1: number;
+  g1: number;
+  b1: number;
+  alpha0: number;
+}
+
 interface CookoffSite {
   active: boolean;
   x: number;
@@ -209,39 +232,17 @@ function createStarFlashTexture(): THREE.CanvasTexture {
   const cx = size * 0.5;
   const cy = size * 0.5;
 
-  // Soft radial bloom halo
+  // Soft radial bloom halo — no diffraction spikes: they read as blown-out
+  // starbursts on detonations. Muzzle flashes keep their star look via the
+  // separate oriented fin quads.
   const core = ctx.createRadialGradient(cx, cy, 0, cx, cy, size * 0.48);
   core.addColorStop(0.0, 'rgba(255,255,255,1.0)');
-  core.addColorStop(0.18, 'rgba(255,248,230,0.92)');
-  core.addColorStop(0.45, 'rgba(255,215,160,0.38)');
-  core.addColorStop(0.78, 'rgba(255,170,90,0.09)');
-  core.addColorStop(1.0, 'rgba(255,140,60,0.0)');
+  core.addColorStop(0.15, 'rgba(255,246,225,0.95)');
+  core.addColorStop(0.38, 'rgba(255,205,140,0.55)');
+  core.addColorStop(0.65, 'rgba(255,160,80,0.18)');
+  core.addColorStop(1.0, 'rgba(255,130,60,0.0)');
   ctx.fillStyle = core;
   ctx.fillRect(0, 0, size, size);
-
-  // Star-burst diffraction spikes for crisp muzzle & detonation flashes
-  ctx.globalCompositeOperation = 'lighter';
-  const spikes = 8;
-  for (let i = 0; i < spikes; i++) {
-    const angle = (i / spikes) * Math.PI * 2 + (i % 2 === 0 ? 0 : 0.12);
-    const len = (i % 2 === 0 ? 0.48 : 0.34) * size;
-    const width = (i % 2 === 0 ? 0.055 : 0.038) * size;
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate(angle);
-    const sg = ctx.createLinearGradient(0, 0, len, 0);
-    sg.addColorStop(0.0, 'rgba(255,255,255,0.85)');
-    sg.addColorStop(0.4, 'rgba(255,235,195,0.35)');
-    sg.addColorStop(1.0, 'rgba(255,200,120,0.0)');
-    ctx.fillStyle = sg;
-    ctx.beginPath();
-    ctx.moveTo(0, -width);
-    ctx.lineTo(len, 0);
-    ctx.lineTo(0, width);
-    ctx.closePath();
-    ctx.fill();
-    ctx.restore();
-  }
 
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.NoColorSpace;
@@ -428,6 +429,14 @@ export class EffectsManager {
   private readonly ringOpacityAttr: THREE.InstancedBufferAttribute;
   private readonly ringPool: RingParticle[] = [];
   private ringCursor = 0;
+
+  // 4b. Procedural wreck-fire billboard InstancedMesh (camera-facing noise flames)
+  private readonly fireMesh: THREE.InstancedMesh;
+  private readonly fireOpacityAttr: THREE.InstancedBufferAttribute;
+  private readonly fireSeedAttr: THREE.InstancedBufferAttribute;
+  private readonly firePool: FireParticle[] = [];
+  private fireCursor = 0;
+  private readonly fireTimeUniform = { value: 0 };
 
   // 5. Persistent Scorch Crater Decal Ring Buffer (48 slots)
   private readonly scorchMesh: THREE.InstancedMesh;
@@ -684,6 +693,108 @@ export class EffectsManager {
       });
     }
 
+    // --- 4b. Wreck Fire Billboard Pool (procedural scrolling-noise flames) ---
+    const fireGeo = new THREE.PlaneGeometry(1, 1);
+    this.geometries.push(fireGeo);
+    const fireOpacityArr = new Float32Array(FIRE_CAPACITY);
+    this.fireOpacityAttr = new THREE.InstancedBufferAttribute(fireOpacityArr, 1);
+    this.fireOpacityAttr.setUsage(THREE.DynamicDrawUsage);
+    fireGeo.setAttribute('instanceOpacity', this.fireOpacityAttr);
+    const fireSeedArr = new Float32Array(FIRE_CAPACITY);
+    this.fireSeedAttr = new THREE.InstancedBufferAttribute(fireSeedArr, 1);
+    fireGeo.setAttribute('aSeed', this.fireSeedAttr);
+    for (let i = 0; i < FIRE_CAPACITY; i++) fireSeedArr[i] = Math.random() * 100;
+
+    const fireMat = new THREE.MeshBasicMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    });
+    fireMat.customProgramCacheKey = () => 'fx-fire-noise-v1';
+    fireMat.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = this.fireTimeUniform;
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          '#include <common>',
+          `#include <common>
+          attribute float instanceOpacity;
+          attribute float aSeed;
+          varying float vFireOpacity;
+          varying float vFireSeed;
+          varying vec2 vFireUv;`
+        )
+        .replace(
+          '#include <begin_vertex>',
+          `#include <begin_vertex>
+          vFireOpacity = instanceOpacity;
+          vFireSeed = aSeed;
+          vFireUv = uv;`
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          '#include <common>',
+          `#include <common>
+          uniform float uTime;
+          varying float vFireOpacity;
+          varying float vFireSeed;
+          varying vec2 vFireUv;
+          float fireHash(vec2 p) {
+            return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+          }
+          float fireNoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            vec2 u = f * f * (3.0 - 2.0 * f);
+            return mix(
+              mix(fireHash(i), fireHash(i + vec2(1.0, 0.0)), u.x),
+              mix(fireHash(i + vec2(0.0, 1.0)), fireHash(i + vec2(1.0, 1.0)), u.x),
+              u.y
+            );
+          }
+          float fireFbm(vec2 p) {
+            float v = 0.0;
+            float a = 0.5;
+            for (int o = 0; o < 3; o++) {
+              v += a * fireNoise(p);
+              p = p * 2.03 + vec2(17.3, 9.1);
+              a *= 0.5;
+            }
+            return v;
+          }`
+        )
+        .replace(
+          '#include <color_fragment>',
+          `#include <color_fragment>
+          vec2 fc = vFireUv - 0.5;
+          float fn = fireFbm(vFireUv * 2.6 + vec2(vFireSeed * 0.37, -uTime * 2.4 + vFireSeed * 0.11));
+          float fd = length(fc) * 2.0;
+          float fmask = 1.0 - smoothstep(0.22, 0.62, fd + (fn - 0.5) * 0.9);
+          fmask = pow(fmask, 1.6);
+          float fcore = 1.0 - smoothstep(0.0, 0.5, fd + (fn - 0.5) * 0.6);
+          diffuseColor.rgb *= (0.4 + 1.4 * fn) * (0.75 + 0.9 * fcore);
+          diffuseColor.a *= vFireOpacity * fmask;`
+        );
+    };
+    this.materials.push(fireMat);
+    this.fireMesh = new THREE.InstancedMesh(fireGeo, fireMat, FIRE_CAPACITY);
+    this.fireMesh.name = 'fx_fire_instanced';
+    this.fireMesh.frustumCulled = false;
+    this.fireMesh.renderOrder = 4;
+    this.fireMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this._initInstancedMesh(this.fireMesh, FIRE_CAPACITY);
+    this.scene.add(this.fireMesh);
+    for (let i = 0; i < FIRE_CAPACITY; i++) {
+      this.firePool.push({
+        active: false, age: 0, maxAge: 0.6,
+        px: 0, py: -1000, pz: 0, vx: 0, vy: 0, vz: 0,
+        s0: 0.4, s1: 1.0, seed: Math.random() * 100,
+        r0: 2, g0: 1.4, b0: 0.5, r1: 0.6, g1: 0.1, b1: 0.02,
+        alpha0: 0.9,
+      });
+    }
+
     // --- 5. Persistent Scorch Crater Decals (48-slot ring buffer) ---
     const scorchGeo = new THREE.PlaneGeometry(2, 2);
     scorchGeo.rotateX(-Math.PI * 0.5); // Local +Y is surface normal
@@ -804,6 +915,19 @@ export class EffectsManager {
     }
     const fallback = this.sparkPool[this.sparkCursor];
     this.sparkCursor = (this.sparkCursor + 1) % SPARK_CAPACITY;
+    return fallback;
+  }
+
+  private _allocFire(): FireParticle {
+    for (let n = 0; n < FIRE_CAPACITY; n++) {
+      const idx = (this.fireCursor + n) % FIRE_CAPACITY;
+      if (!this.firePool[idx].active) {
+        this.fireCursor = (idx + 1) % FIRE_CAPACITY;
+        return this.firePool[idx];
+      }
+    }
+    const fallback = this.firePool[this.fireCursor];
+    this.fireCursor = (this.fireCursor + 1) % FIRE_CAPACITY;
     return fallback;
   }
 
@@ -1169,49 +1293,56 @@ export class EffectsManager {
     const isGround = kind === 'he_ground';
     const s = Math.max(0.4, scale) * (isKill ? 1.45 : 1.0);
 
+    // Ground-aligned kill FX (rings + scorch) snap to terrain, not the armor hit point
+    let killGroundY = pos.y;
+    if (isKill && this.groundProbe) {
+      const gy = this.groundProbe(pos.x, pos.z);
+      if (gy < pos.y - 0.2) killGroundY = gy;
+    }
+
     // 1. Searing initial HDR detonation flash core
     const core = this._allocFlash();
     core.active = true;
     core.age = 0;
-    core.maxAge = isKill ? 0.22 : 0.14;
+    core.maxAge = isKill ? 0.18 : 0.14;
     core.px = pos.x + nrm.x * 0.35;
     core.py = pos.y + nrm.y * 0.35 + 0.25;
     core.pz = pos.z + nrm.z * 0.35;
     core.vx = 0;
     core.vy = 1.5;
     core.vz = 0;
-    core.startScaleX = 3.8 * s;
-    core.startScaleY = 3.8 * s;
-    core.endScaleX = (isKill ? 13.5 : 9.2) * s;
-    core.endScaleY = (isKill ? 13.5 : 9.2) * s;
+    core.startScaleX = isKill ? 2.2 * s : 3.8 * s;
+    core.startScaleY = isKill ? 2.2 * s : 3.8 * s;
+    core.endScaleX = (isKill ? 6.8 : 9.2) * s;
+    core.endScaleY = (isKill ? 6.8 : 9.2) * s;
     core.rot = Math.random() * Math.PI * 2;
     core.rotSpeed = 0;
     core.billboard = true;
-    core.r = 9.0;
-    core.g = 5.6;
-    core.b = 2.0;
+    core.r = isKill ? 4.4 : 9.0;
+    core.g = isKill ? 2.5 : 5.6;
+    core.b = isKill ? 0.85 : 2.0;
 
     // Secondary lingering warm fireball glow
     const glow = this._allocFlash();
     glow.active = true;
     glow.age = 0;
-    glow.maxAge = isKill ? 0.52 : 0.32;
+    glow.maxAge = isKill ? 0.34 : 0.32;
     glow.px = pos.x;
     glow.py = pos.y + 0.8 * s;
     glow.pz = pos.z;
     glow.vx = 0;
     glow.vy = 3.0;
     glow.vz = 0;
-    glow.startScaleX = 2.5 * s;
-    glow.startScaleY = 2.5 * s;
-    glow.endScaleX = 7.4 * s;
-    glow.endScaleY = 7.4 * s;
+    glow.startScaleX = isKill ? 1.5 * s : 2.5 * s;
+    glow.startScaleY = isKill ? 1.5 * s : 2.5 * s;
+    glow.endScaleX = (isKill ? 3.6 : 7.4) * s;
+    glow.endScaleY = (isKill ? 3.6 : 7.4) * s;
     glow.rot = Math.random() * Math.PI * 2;
     glow.rotSpeed = 0.6;
     glow.billboard = true;
-    glow.r = 4.8;
-    glow.g = 1.85;
-    glow.b = 0.35;
+    glow.r = 3.4;
+    glow.g = 1.4;
+    glow.b = 0.28;
 
     // 2. Rolling orange-to-charcoal fireball spheres rising into a dark smoke column
     const fireballCount = isKill ? 20 : 12;
@@ -1240,9 +1371,9 @@ export class EffectsManager {
 
       if (coreBall) {
         // White-gold HDR -> fiery orange -> oily charcoal smoke
-        fb.r0 = 6.5;
-        fb.g0 = 3.4;
-        fb.b0 = 0.85;
+        fb.r0 = isKill ? 4.4 : 6.5;
+        fb.g0 = isKill ? 2.5 : 3.4;
+        fb.b0 = isKill ? 0.62 : 0.85;
         fb.rMid = 2.8;
         fb.gMid = 0.72;
         fb.bMid = 0.10;
@@ -1324,16 +1455,17 @@ export class EffectsManager {
       sp.vz = Math.sin(az) * cosE * spd + nrm.z * 5;
       sp.drag = 0.85;
       sp.gravity = 12.5;
-      sp.width = randRange(0.08, 0.16) * (isKill ? 1.25 : 1.0);
-      sp.baseLen = randRange(0.28, 0.55);
-      sp.stretch = 0.048;
+      // Kill sparks: thin and short — long white streaks read as white-out
+      sp.width = isKill ? randRange(0.045, 0.085) : randRange(0.08, 0.16);
+      sp.baseLen = isKill ? randRange(0.13, 0.28) : randRange(0.28, 0.55);
+      sp.stretch = isKill ? 0.02 : 0.048;
       sp.floorY = isGround ? pos.y + 0.05 : -999;
-      sp.r0 = 8.0;
-      sp.g0 = 5.0;
-      sp.b0 = 1.6;
-      sp.r1 = 3.8;
-      sp.g1 = 0.75;
-      sp.b1 = 0.08;
+      sp.r0 = isKill ? 5.2 : 8.0;
+      sp.g0 = isKill ? 3.0 : 5.0;
+      sp.b0 = isKill ? 0.9 : 1.6;
+      sp.r1 = isKill ? 2.4 : 3.8;
+      sp.g1 = isKill ? 0.5 : 0.75;
+      sp.b1 = isKill ? 0.05 : 0.08;
     }
 
     // 4. Expanding supersonic ground shockwave ring(s)
@@ -1343,12 +1475,19 @@ export class EffectsManager {
     ring.age = 0;
     ring.maxAge = isKill ? 0.52 : 0.38;
     ring.px = pos.x + nrm.x * 0.09;
-    ring.py = pos.y + nrm.y * 0.09;
+    ring.py = (isKill ? killGroundY : pos.y) + nrm.y * 0.09 + 0.05;
     ring.pz = pos.z + nrm.z * 0.09;
-    ring.qx = this._quat.x;
-    ring.qy = this._quat.y;
-    ring.qz = this._quat.z;
-    ring.qw = this._quat.w;
+    if (isKill) {
+      ring.qx = 0;
+      ring.qy = 0;
+      ring.qz = 0;
+      ring.qw = 1;
+    } else {
+      ring.qx = this._quat.x;
+      ring.qy = this._quat.y;
+      ring.qz = this._quat.z;
+      ring.qw = this._quat.w;
+    }
     ring.startRadius = 0.9 * s;
     ring.endRadius = (isKill ? 15.5 : 9.8) * scale;
     ring.r = isKill ? 3.2 : 1.8;
@@ -1363,7 +1502,7 @@ export class EffectsManager {
       wave2.age = 0;
       wave2.maxAge = 0.72;
       wave2.px = pos.x;
-      wave2.py = pos.y + 0.12;
+      wave2.py = killGroundY + 0.12;
       wave2.pz = pos.z;
       wave2.qx = 0;
       wave2.qy = 0;
@@ -1381,7 +1520,12 @@ export class EffectsManager {
     if (isGround || isKill || nrm.y > 0.55) {
       const decalNormal = isKill ? this._up : nrm;
       const scorchRadius = (isKill ? 4.6 : 3.1) * scale;
-      this._placeScorchDecal(pos, decalNormal, scorchRadius, isKill ? 0.92 : 0.82);
+      if (isKill) {
+        this._v2.set(pos.x, killGroundY + 0.03, pos.z);
+        this._placeScorchDecal(this._v2, decalNormal, scorchRadius, 0.92);
+      } else {
+        this._placeScorchDecal(pos, decalNormal, scorchRadius, 0.82);
+      }
     }
 
     // 6. Dynamic warm blast PointLight
@@ -1690,24 +1834,93 @@ export class EffectsManager {
   }
 
   /**
+   * One procedural flame lick for a burning wreck (white-yellow core -> deep red).
+   */
+  public spawnWreckFire(x: number, y: number, z: number, scale = 1): void {
+    if (!this.wreckFxVisible) return;
+    const f = this._allocFire();
+    f.active = true;
+    f.age = 0;
+    f.maxAge = randRange(0.35, 0.7);
+    f.px = x + randRange(-0.22, 0.22) * scale;
+    f.py = y + randRange(-0.08, 0.15) * scale;
+    f.pz = z + randRange(-0.22, 0.22) * scale;
+    f.vx = randRange(-0.5, 0.5);
+    f.vy = randRange(0.9, 2.0) * scale;
+    f.vz = randRange(-0.5, 0.5);
+    f.s0 = randRange(0.18, 0.32) * scale;
+    f.s1 = randRange(0.5, 0.9) * scale;
+    f.seed = Math.random() * 100;
+    f.alpha0 = randRange(0.65, 0.95);
+  }
+
+  /** Rising orange ember/spark shower from a burning wreck. */
+  public spawnEmbers(x: number, y: number, z: number, count: number): void {
+    if (!this.wreckFxVisible) return;
+    for (let i = 0; i < count; i++) {
+      const sp = this._allocSpark();
+      sp.active = true;
+      sp.age = 0;
+      sp.maxAge = randRange(0.5, 1.4);
+      sp.px = x + randRange(-0.7, 0.7);
+      sp.py = y + randRange(0, 0.5);
+      sp.pz = z + randRange(-0.7, 0.7);
+      sp.vx = randRange(-1.6, 1.6);
+      sp.vy = randRange(2.5, 7.0);
+      sp.vz = randRange(-1.6, 1.6);
+      sp.drag = 0.7;
+      sp.gravity = 6.5;
+      sp.width = 0.05;
+      sp.baseLen = 0.15;
+      sp.stretch = 0.035;
+      sp.floorY = -999;
+      sp.r0 = 7.0;
+      sp.g0 = 3.4;
+      sp.b0 = 0.9;
+      sp.r1 = 2.6;
+      sp.g1 = 0.45;
+      sp.b1 = 0.04;
+    }
+  }
+
+  /** Terrain height probe for snapping ground-aligned FX (set by main.ts). */
+  public groundProbe: ((x: number, z: number) => number) | null = null;
+  /** QA flag: hide wreck fire/smoke/ember/flare emission + clear live pools. */
+  public wreckFxVisible = true;
+
+  public setWreckFxVisible(v: boolean): void {
+    this.wreckFxVisible = v;
+    if (v) return;
+    for (const p of this.firePool) p.active = false;
+    for (const p of this.smokePool) p.active = false;
+    for (const p of this.sparkPool) p.active = false;
+    for (const p of this.flashPool) p.active = false;
+    this.fireMesh.visible = false;
+    this.smokeMesh.visible = false;
+    this.sparkMesh.visible = false;
+    this.flashMesh.visible = false;
+  }
+
+  /**
    * Called periodically by dead tank wrecks for rising black oil smoke + flickering ember glow.
    */
   public spawnWreckSmoke(pos: THREE.Vector3): void {
-    // Rising thick black oil smoke puff
+    if (!this.wreckFxVisible) return;
+    // Rising thick black oil smoke puff — big, long-lived, billowing column
     const smoke = this._allocSmoke();
     smoke.active = true;
     smoke.age = 0;
-    smoke.maxAge = randRange(2.2, 3.6);
-    smoke.px = pos.x + randRange(-0.55, 0.55);
-    smoke.py = pos.y + randRange(0.6, 1.2);
-    smoke.pz = pos.z + randRange(-0.55, 0.55);
-    smoke.vx = randRange(-0.7, 0.7);
-    smoke.vy = randRange(2.0, 3.6);
-    smoke.vz = randRange(-0.7, 0.7);
-    smoke.drag = 0.65;
-    smoke.buoyancy = 1.35;
-    smoke.startScale = randRange(0.85, 1.35);
-    smoke.endScale = randRange(3.8, 6.0);
+    smoke.maxAge = randRange(4.5, 7.0);
+    smoke.px = pos.x + randRange(-0.9, 0.9);
+    smoke.py = pos.y + randRange(0.4, 1.4);
+    smoke.pz = pos.z + randRange(-0.9, 0.9);
+    smoke.vx = randRange(-0.3, 1.7);
+    smoke.vy = randRange(3.2, 5.2);
+    smoke.vz = randRange(-0.3, 1.3);
+    smoke.drag = 0.5;
+    smoke.buoyancy = 1.05;
+    smoke.startScale = randRange(2.4, 3.4);
+    smoke.endScale = randRange(9.0, 13.0);
     smoke.rot = Math.random() * Math.PI * 2;
     smoke.rotSpeed = randRange(-0.85, 0.85);
     smoke.r0 = 2.6;
@@ -1720,7 +1933,7 @@ export class EffectsManager {
     smoke.r1 = 0.065;
     smoke.g1 = 0.065;
     smoke.b1 = 0.07;
-    smoke.peakAlpha = 0.74;
+    smoke.peakAlpha = 0.8;
     smoke.fadeInFrac = 0.12;
 
     // Flickering turret-ring fire tongue
@@ -1734,10 +1947,10 @@ export class EffectsManager {
     ember.vx = randRange(-0.4, 0.4);
     ember.vy = randRange(1.2, 2.4);
     ember.vz = randRange(-0.4, 0.4);
-    ember.startScaleX = randRange(1.1, 1.8);
-    ember.startScaleY = randRange(1.2, 2.0);
-    ember.endScaleX = randRange(0.6, 1.1);
-    ember.endScaleY = randRange(1.6, 2.5);
+    ember.startScaleX = randRange(0.5, 0.9);
+    ember.startScaleY = randRange(0.6, 1.0);
+    ember.endScaleX = randRange(0.3, 0.6);
+    ember.endScaleY = randRange(0.9, 1.4);
     ember.rot = Math.random() * Math.PI * 2;
     ember.rotSpeed = randRange(-2, 2);
     ember.billboard = true;
@@ -1795,6 +2008,104 @@ export class EffectsManager {
   // -------------------------------------------------------------------------
   // Per-frame GPU Instance Buffer Update
   // -------------------------------------------------------------------------
+  /** Camera-facing procedural fire licks for burning wrecks. */
+  private _updateFire(stepDt: number): void {
+    this.fireTimeUniform.value += stepDt;
+    const rx = this._camRight.x;
+    const ry = this._camRight.y;
+    const rz = this._camRight.z;
+    const ux = this._camUp.x;
+    const uy = this._camUp.y;
+    const uz = this._camUp.z;
+    const bx = this._camBack.x;
+    const by = this._camBack.y;
+    const bz = this._camBack.z;
+    const matE = this._mat4.elements;
+
+    let fireActive = 0;
+    for (let i = 0; i < FIRE_CAPACITY; i++) {
+      const p = this.firePool[i];
+      if (!p.active) continue;
+      p.age += stepDt;
+      if (p.age >= p.maxAge) {
+        p.active = false;
+        continue;
+      }
+      const t = p.age / p.maxAge;
+      const damp = Math.exp(-1.6 * stepDt);
+      p.vx *= damp;
+      p.vy *= damp;
+      p.vz *= damp;
+      p.px += p.vx * stepDt;
+      p.py += p.vy * stepDt;
+      p.pz += p.vz * stepDt;
+
+      // Fast attack, slow shrink
+      const grow = Math.min(1, t * 5);
+      const shrink = 1 - t * t * 0.55;
+      const scale = (p.s0 + (p.s1 - p.s0) * (1 - (1 - t) * (1 - t))) * grow * shrink;
+
+      // White-yellow core -> orange -> deep red
+      let cr: number;
+      let cg: number;
+      let cb: number;
+      if (t < 0.35) {
+        const k = t / 0.35;
+        cr = p.r0 + (1.9 - p.r0) * k;
+        cg = p.g0 + (0.85 - p.g0) * k;
+        cb = p.b0 + (0.22 - p.b0) * k;
+      } else {
+        const k = (t - 0.35) / 0.65;
+        cr = 1.9 + (p.r1 - 1.9) * k;
+        cg = 0.85 + (p.g1 - 0.85) * k;
+        cb = 0.22 + (p.b1 - 0.22) * k;
+      }
+      const fade = t < 0.12 ? t / 0.12 : 1 - (t - 0.12) / 0.88;
+      const alpha = p.alpha0 * Math.max(0, fade) * (1 - t * 0.4);
+
+      matE[0] = rx * scale;
+      matE[1] = ry * scale;
+      matE[2] = rz * scale;
+      matE[3] = 0;
+      matE[4] = ux * scale;
+      matE[5] = uy * scale;
+      matE[6] = uz * scale;
+      matE[7] = 0;
+      matE[8] = bx * scale;
+      matE[9] = by * scale;
+      matE[10] = bz * scale;
+      matE[11] = 0;
+      matE[12] = p.px;
+      matE[13] = p.py;
+      matE[14] = p.pz;
+      matE[15] = 1;
+
+      const outIdx = fireActive++;
+      this.fireMesh.setMatrixAt(outIdx, this._mat4);
+      this._color.setRGB(cr, cg, cb);
+      this.fireMesh.setColorAt(outIdx, this._color);
+      this.fireOpacityAttr.setX(outIdx, alpha);
+    }
+
+    if (fireActive === 0) {
+      this.fireMesh.visible = false;
+    } else {
+      this.fireMesh.visible = true;
+      this.fireMesh.count = fireActive;
+      this.fireMesh.instanceMatrix.clearUpdateRanges();
+      this.fireMesh.instanceMatrix.addUpdateRange(0, fireActive * 16);
+      this.fireMesh.instanceMatrix.needsUpdate = true;
+      if (this.fireMesh.instanceColor) {
+        this.fireMesh.instanceColor.clearUpdateRanges();
+        this.fireMesh.instanceColor.addUpdateRange(0, fireActive * 3);
+        this.fireMesh.instanceColor.needsUpdate = true;
+      }
+      this.fireOpacityAttr.clearUpdateRanges();
+      this.fireOpacityAttr.addUpdateRange(0, fireActive);
+      this.fireOpacityAttr.needsUpdate = true;
+    }
+  }
+
   public update(dt: number, camera: THREE.Camera): void {
     const stepDt = Math.min(Math.max(dt, 0), 0.08);
     if (stepDt === 0) return;
@@ -1817,9 +2128,9 @@ export class EffectsManager {
       while (site.emitAccum >= 0.13) {
         site.emitAccum -= 0.13;
         this._v1.set(site.x, site.y, site.z);
-        this.spawnWreckSmoke(this._v1);
+        if (this.wreckFxVisible) this.spawnWreckSmoke(this._v1);
         // Extra molten cookoff sparks shooting out of turret ring
-        for (let k = 0; k < 3; k++) {
+        for (let k = 0; this.wreckFxVisible && k < 3; k++) {
           const sp = this._allocSpark();
           sp.active = true;
           sp.age = 0;
@@ -1845,6 +2156,8 @@ export class EffectsManager {
         }
       }
     }
+
+    this._updateFire(stepDt);
 
     // 1. Update Smoke / Fireball-to-Smoke / Dust Pool
     let smokeActive = 0;
