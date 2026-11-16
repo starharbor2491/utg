@@ -940,16 +940,19 @@ export class World implements TerrainQuery {
   public getSafeSpawnPoint(
     preferRadiusMin: number,
     preferRadiusMax: number,
-    avoidPoints: readonly THREE.Vector3[]
+    avoidPoints: readonly THREE.Vector3[],
+    center?: { x: number; z: number }
   ): THREE.Vector3 {
-    const best = new THREE.Vector3(0, 0, -82);
+    const cx0 = center?.x ?? 0;
+    const cz0 = center?.z ?? 0;
+    const best = new THREE.Vector3(cx0, 0, cz0);
     let bestScore = -Infinity;
 
     for (let attempt = 0; attempt < 42; attempt++) {
       const ang = Math.random() * Math.PI * 2;
       const rad = THREE.MathUtils.lerp(preferRadiusMin, preferRadiusMax, Math.random());
-      const cx = THREE.MathUtils.clamp(Math.cos(ang) * rad, -this.worldHalfSize + 24, this.worldHalfSize - 24);
-      const cz = THREE.MathUtils.clamp(Math.sin(ang) * rad, -this.worldHalfSize + 24, this.worldHalfSize - 24);
+      const cx = THREE.MathUtils.clamp(cx0 + Math.cos(ang) * rad, -this.worldHalfSize + 24, this.worldHalfSize - 24);
+      const cz = THREE.MathUtils.clamp(cz0 + Math.sin(ang) * rad, -this.worldHalfSize + 24, this.worldHalfSize - 24);
 
       // Must be clear of solid obstacles
       let blocked = false;

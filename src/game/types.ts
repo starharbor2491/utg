@@ -11,17 +11,9 @@ import * as THREE from 'three';
  *     +Z = forward (bow), +Y = up, Y = 0 = bottom of road wheels/tracks.
  */
 
-export type TankFaction = 'player' | 'enemy';
+export type Team = 'blue' | 'red';
 
 export type VehicleClass = 'normal' | 'heavy' | 'ifv';
-
-export type TankVariant =
-  | 'player_normal'
-  | 'player_heavy'
-  | 'player_ifv'
-  | 'enemy_normal'
-  | 'enemy_heavy'
-  | 'enemy_ifv';
 
 export type ObstacleKind = 'building' | 'tower' | 'station' | 'rock' | 'barrier' | 'tree' | 'crates';
 
@@ -60,12 +52,16 @@ export interface TerrainQuery {
   getObstacles(): readonly ObstacleCollider[];
   crushObstacle(obstacle: ObstacleCollider, impactDirXZ?: THREE.Vector2): void;
   raycastWorld(origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number): WorldRayHit | null;
-  getSafeSpawnPoint(preferRadiusMin: number, preferRadiusMax: number, avoidPoints: readonly THREE.Vector3[]): THREE.Vector3;
+  getSafeSpawnPoint(
+    preferRadiusMin: number,
+    preferRadiusMax: number,
+    avoidPoints: readonly THREE.Vector3[],
+    center?: { x: number; z: number }
+  ): THREE.Vector3;
 }
 
 export interface NormalizedTankTemplate {
-  variant: TankVariant;
-  /** Cloned via `cloneNormalizedTank(variant)` */
+  /** Cloned per vehicle rig instance */
   sceneRoot: THREE.Group;
   /** Approximate dimensions in meters after normalization */
   length: number;
@@ -98,7 +94,6 @@ export interface ShellSpec {
 }
 
 export interface TankStats {
-  variant: TankVariant;
   vehicleClass: VehicleClass;
   displayName: string;
   maxHp: number;
@@ -199,8 +194,9 @@ export interface ShellHitXRayReport {
 
 export interface TankEntity {
   readonly id: string;
-  readonly faction: TankFaction;
-  readonly variant: TankVariant;
+  readonly team: Team;
+  readonly isHuman: boolean;
+  readonly callsign: string;
   readonly stats: TankStats;
   readonly root: THREE.Group;
 
@@ -261,13 +257,13 @@ export interface ScreenReticlePos {
   visible: boolean;
 }
 
-export interface MinimapEnemy {
+export interface MinimapUnit {
   x: number;
   z: number;
   yaw: number;
-  variant: TankVariant;
   alive: boolean;
-  alerted: boolean;
+  ally: boolean;
+  spotted: boolean;
 }
 
 export interface MinimapObstacle {
@@ -314,6 +310,8 @@ export interface HUDTelemetry {
   kills: number;
   deaths: number;
   activeEnemies: number;
+  score: { blue: number; red: number };
+  playerTeam: Team;
   fps: number;
 
   /** Remaining flash timer & kind for center reticle hit confirmation */
@@ -336,7 +334,7 @@ export interface HUDTelemetry {
     playerX: number;
     playerZ: number;
     worldHalfSize: number;
-    enemies: readonly MinimapEnemy[];
+    units: readonly MinimapUnit[];
     obstacles: readonly MinimapObstacle[];
   };
 }

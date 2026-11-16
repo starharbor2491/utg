@@ -1,8 +1,8 @@
 import './hud.css';
 import type {
   HUDTelemetry,
-  MinimapEnemy,
   MinimapObstacle,
+  MinimapUnit,
   ObstacleKind,
   VehicleClass,
 } from './types';
@@ -181,8 +181,13 @@ export class HUD {
   private readonly radarCtx: CanvasRenderingContext2D;
   private radarDpr = 0;
 
-  // Event feed & respawn banner refs
+  // Event feed, scoreboard & respawn banner refs
   private readonly feedSlots: FeedSlot[] = [];
+  private readonly scoreboardEl: HTMLDivElement;
+  private readonly scoreBlueEl: HTMLSpanElement;
+  private readonly scoreRedEl: HTMLSpanElement;
+  private lastScoreBlue = -1;
+  private lastScoreRed = -1;
   private readonly respawnBannerEl: HTMLDivElement;
   private readonly respawnSecEl: HTMLSpanElement;
   private readonly respawnBarFillEl: HTMLDivElement;
@@ -269,7 +274,26 @@ export class HUD {
     this.statKillsEl = topRight.kills;
     this.statFpsEl = topRight.fps;
     this.statQualityEl = topRight.quality;
-    this.buildEventFeed();
+    this.root.appendChild(this.buildEventFeed());
+
+    // Minimal top-center team scoreboard (functional; styling pass comes later)
+    this.scoreboardEl = document.createElement('div');
+    this.scoreboardEl.className = 'fcs-scoreboard';
+    this.scoreboardEl.style.cssText =
+      'position:fixed;top:54px;left:50%;transform:translateX(-50%);z-index:21;pointer-events:none;display:flex;align-items:center;gap:8px;padding:4px 14px;background:rgba(15,19,14,0.88);border:1px solid rgba(232,169,56,0.35);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;font-weight:700;letter-spacing:0.1em;color:#eae6dc;';
+    const scoreBlueLbl = document.createElement('span');
+    scoreBlueLbl.textContent = 'BLUE';
+    scoreBlueLbl.style.color = '#8fb4d8';
+    this.scoreBlueEl = document.createElement('span');
+    const scoreSep = document.createElement('span');
+    scoreSep.textContent = '–';
+    scoreSep.style.opacity = '0.6';
+    this.scoreRedEl = document.createElement('span');
+    const scoreRedLbl = document.createElement('span');
+    scoreRedLbl.textContent = 'RED';
+    scoreRedLbl.style.color = '#e08d7d';
+    this.scoreboardEl.append(scoreBlueLbl, this.scoreBlueEl, scoreSep, this.scoreRedEl, scoreRedLbl);
+    this.root.appendChild(this.scoreboardEl);
 
     // 9. Respawn Countdown Banner
     const respawn = this.buildRespawnBanner();
@@ -370,6 +394,16 @@ export class HUD {
     }
 
     this.updateRespawnBanner(telemetry);
+    this.updateEventFeed(telemetry);
+    this.updateScoreboard(telemetry);
+  }
+
+  private updateScoreboard(t: HUDTelemetry): void {
+    if (t.score.blue === this.lastScoreBlue && t.score.red === this.lastScoreRed) return;
+    this.lastScoreBlue = t.score.blue;
+    this.lastScoreRed = t.score.red;
+    this.scoreBlueEl.textContent = String(t.score.blue);
+    this.scoreRedEl.textContent = String(t.score.red);
   }
 
   public dispose(): void {
@@ -862,7 +896,7 @@ export class HUD {
   }
 
   private drawCartographicRadar(t: HUDTelemetry): void {
-    const { playerX, playerZ, worldHalfSize, enemies, obstacles } = t.minimap;
+    const { playerX, playerZ, worldHalfSize, units, obstacles } = t.minimap;
 
     const coordStr = `X${formatSignedCoord(playerX)} Z${formatSignedCoord(playerZ)}`;
     if (coordStr !== this.lastRadarCoordStr) {
@@ -1028,8 +1062,8 @@ export class HUD {
     ctx.lineTo(cx + Math.sin(halfHFov) * rScope, cy - Math.cos(halfHFov) * rScope);
     ctx.stroke();
 
-    // Enemy tactical diamonds + heading ticks (with rim-clamped chevrons for distant hostiles)
-    this.drawRadarEnemies(ctx, enemies, playerX, playerZ, t.cameraYaw, sinCam, cosCam, cx, cy, scale, rScope);
+    // Ally + spotted hostile tactical markers (with rim-clamped chevrons for distant hostiles)
+    this.drawRadarUnits(ctx, units, playerX, playerZ, t.cameraYaw, sinCam, cosCam, cx, cy, scale, rScope);
 
     // Center Player Tank Hull + Turret Gun Line
     const playerHullAngle = wrapPi(t.cameraYaw - t.hullYaw);
@@ -1243,9 +1277,9 @@ export class HUD {
     }
   }
 
-  private drawRadarEnemies(
+  private drawRadarUnits(
     ctx: CanvasRenderingContext2D,
-    enemies: readonly MinimapEnemy[],
+    units: readonly MinimapUnit[],
     playerX: number,
     playerZ: number,
     camYaw: number,
@@ -1256,8 +1290,8 @@ export class HUD {
     scale: number,
     rScope: number,
   ): void {
-    for (let i = 0; i < enemies.length; i++) {
-      const e = enemies[i];
+    for (let i = 0; i < units.length; i++) {
+      const e = units[i];
       const dx = e.x - playerX;
       const dz = e.z - playerZ;
       const rightComp = -dx * cosCam + dz * sinCam;
@@ -1268,7 +1302,7 @@ export class HUD {
       const distPx = Math.hypot(rx, ry);
 
       if (!e.alive) {
-        if (distPx < rScope - 4) {
+        if (distPx < rScope - 4 && e.ally) {
           const ex = cx + rx;
           const ey = cy + ry;
           ctx.strokeStyle = 'rgba(234, 230, 220, 0.24)';
@@ -1283,8 +1317,11 @@ export class HUD {
         continue;
       }
 
+      // Unspotted hostiles never appear on the radar
+      if (!e.ally && !e.spotted) continue;
+
       // Clamped rim contact chevron when hostile is beyond 220m scope radius
-      if (distPx > rScope - 5) {
+      if (!e.ally && distPx > rScope - 5) {
         const bearingAngle = Math.atan2(ry, rx);
         const rimR = rScope - 3.5;
         ctx.save();
@@ -1304,23 +1341,15 @@ export class HUD {
       const ex = cx + rx;
       const ey = cy + ry;
       const headAngleCW = wrapPi(camYaw - e.yaw);
-      const diamondSize =
-        e.variant === 'enemy_heavy' ? 5.4 : e.variant === 'enemy_normal' ? 4.6 : 3.9;
+      const isAlly = e.ally;
+      const markColor = isAlly ? '#8FB4D8' : '#D94636';
+      const diamondSize = isAlly ? 3.6 : 4.6;
 
-      // Alert halo ring when actively engaging player
-      if (e.alerted) {
-        ctx.strokeStyle = 'rgba(217, 70, 54, 0.42)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.arc(ex, ey, diamondSize + 2.8, 0, TWO_PI);
-        ctx.stroke();
-      }
-
-      // Heading tick in enemy forward direction
+      // Heading tick in unit forward direction
       ctx.save();
       ctx.translate(ex, ey);
       ctx.rotate(headAngleCW);
-      ctx.strokeStyle = '#EAE6DC';
+      ctx.strokeStyle = isAlly ? 'rgba(143, 180, 216, 0.85)' : '#EAE6DC';
       ctx.lineWidth = 1.2;
       ctx.beginPath();
       ctx.moveTo(0, -diamondSize + 0.5);
@@ -1328,9 +1357,9 @@ export class HUD {
       ctx.stroke();
       ctx.restore();
 
-      // NATO Hostile Diamond in #D94636
-      ctx.fillStyle = '#D94636';
-      ctx.strokeStyle = e.alerted ? '#EAE6DC' : 'rgba(14, 17, 13, 0.9)';
+      // Team diamond: blue allies / red spotted hostiles
+      ctx.fillStyle = markColor;
+      ctx.strokeStyle = isAlly ? 'rgba(14, 17, 13, 0.9)' : 'rgba(14, 17, 13, 0.9)';
       ctx.lineWidth = 0.95;
       ctx.beginPath();
       ctx.moveTo(ex, ey - diamondSize);
@@ -1340,12 +1369,6 @@ export class HUD {
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
-
-      // Heavy Tank inner pip distinguisher
-      if (e.variant === 'enemy_heavy') {
-        ctx.fillStyle = '#EAE6DC';
-        ctx.fillRect(ex - 1.2, ey - 1.2, 2.4, 2.4);
-      }
     }
   }
 

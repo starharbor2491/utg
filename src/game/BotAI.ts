@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import { GRAVITY, solveBallisticAim } from './Ballistics';
-import type { TankEntity, TankIntent, TankVariant, TerrainQuery } from './types';
+import type { TankEntity, TankIntent, Team, TerrainQuery, VehicleClass } from './types';
 
-export type EnemyAIState = 'roam' | 'engage_approach' | 'strafe_orbit' | 'evade_reverse';
+export type BotAIState = 'advance' | 'engage_approach' | 'strafe_orbit' | 'evade_reverse';
 
 const NUM_STEER_RAYS = 16;
 const RAY_ANGLES = new Float32Array(NUM_STEER_RAYS);
@@ -35,27 +35,40 @@ function hashIdToSeed(id: string): number {
   return ((h >>> 0) % 10000) / 10000;
 }
 
-function wanderRadiansForVariant(_variant: TankVariant): number {
+function aimWanderRadians(_cls: VehicleClass): number {
   return THREE.MathUtils.degToRad(6.8);
 }
 
-function idealOrbitDistForVariant(variant: TankVariant): number {
-  if (variant.endsWith('_heavy')) return 112;
-  if (variant.endsWith('_ifv')) return 78;
+function idealOrbitDistForClass(cls: VehicleClass): number {
+  if (cls === 'heavy') return 112;
+  if (cls === 'ifv') return 78;
   return 96;
 }
 
-interface EnemyBrain {
+const ADVANCE_LANES = [-120, -40, 40, 120];
+const MAX_ACQUIRE_RANGE = 300;
+const MAX_ACQUIRE_RANGE_SQ = MAX_ACQUIRE_RANGE * MAX_ACQUIRE_RANGE;
+const TARGET_DROP_RANGE = 320;
+
+interface BotBrain {
   id: string;
-  state: EnemyAIState;
+  state: BotAIState;
   seed: number;
   orbitSign: 1 | -1;
   orbitFlipTimer: number;
   flipCooldown: number;
 
-  roamTargetX: number;
-  roamTargetZ: number;
-  roamTimer: number;
+  advanceX: number;
+  advanceZ: number;
+  laneX: number;
+
+  targetId: string | null;
+  target: TankEntity | null;
+  retargetTimer: number;
+  lastAttackerId: string | null;
+  lastAttackedAt: number;
+  smoothedTargetVel: THREE.Vector3;
+  lastTargetPos: THREE.Vector3;
 
   alertTimer: number;
   losLockTimer: number;
@@ -70,86 +83,103 @@ interface EnemyBrain {
   wasAlive: boolean;
 }
 
-export class EnemyAIManager {
-  private readonly brains = new Map<string, EnemyBrain>();
+export class BotAIManager {
+  private readonly brains = new Map<string, BotBrain>();
   private readonly intents = new Map<string, TankIntent>();
+  private readonly baseCenters: Record<Team, { x: number; z: number }>;
 
   private clock = 0;
-  private readonly smoothedPlayerVel = new THREE.Vector3();
-  private readonly lastPlayerPos = new THREE.Vector3();
-  private playerVelInitialized = false;
 
   // Scratch arrays & vectors (zero per-frame heap allocations)
   private readonly _interest = new Float32Array(NUM_STEER_RAYS);
   private readonly _danger = new Float32Array(NUM_STEER_RAYS);
   private readonly _muzzlePos = new THREE.Vector3();
   private readonly _muzzleDir = new THREE.Vector3();
-  private readonly _playerCenter = new THREE.Vector3();
+  private readonly _targetCenter = new THREE.Vector3();
   private readonly _aimPoint = new THREE.Vector3();
   private readonly _losDir = new THREE.Vector3();
   private readonly _desiredBore = new THREE.Vector3();
   private readonly _wanderRight = new THREE.Vector3();
+  private readonly _candPool: { t: TankEntity | null; d: number }[] = [];
+  private readonly _scratchPos = new THREE.Vector3();
 
-  /**
-   * Returns true if the specified enemy is currently alerted/engaging the player
-   * (useful for HUD / minimap `alerted` telemetry).
-   */
-  public isAlerted(enemyId: string): boolean {
-    const brain = this.brains.get(enemyId);
-    return Boolean(brain && brain.wasAlive && brain.state !== 'roam');
-  }
-
-  public getState(enemyId: string): EnemyAIState {
-    return this.brains.get(enemyId)?.state ?? 'roam';
+  constructor(baseCenters: Record<Team, { x: number; z: number }>) {
+    this.baseCenters = baseCenters;
+    for (let i = 0; i < 16; i++) {
+      this._candPool.push({ t: null, d: Infinity });
+    }
   }
 
   /**
-   * Optional explicit alert hook when damaged by the player (damage is also
-   * detected automatically via HP delta inside `update`).
+   * Returns true if the specified bot currently has a live target.
    */
-  public notifyDamaged(enemyId: string): void {
-    const brain = this.brains.get(enemyId);
+  public isAlerted(botId: string): boolean {
+    const brain = this.brains.get(botId);
+    return Boolean(brain && brain.wasAlive && brain.target !== null);
+  }
+
+  public getState(botId: string): BotAIState {
+    return this.brains.get(botId)?.state ?? 'advance';
+  }
+
+  /**
+   * Alert hook fired by the match when this bot takes damage.
+   */
+  public notifyDamaged(botId: string, attackerId: string | null): void {
+    const brain = this.brains.get(botId);
     if (brain) {
       brain.alertTimer = 16.0;
+      brain.lastAttackerId = attackerId;
+      brain.lastAttackedAt = this.clock;
     }
   }
 
   public reset(): void {
     this.brains.clear();
     this.intents.clear();
-    this.playerVelInitialized = false;
   }
 
-  private _getOrCreateBrain(enemy: TankEntity, world: TerrainQuery): EnemyBrain {
-    let brain = this.brains.get(enemy.id);
+  private _enemyBaseFor(bot: TankEntity): { x: number; z: number } {
+    return this.baseCenters[bot.team === 'blue' ? 'red' : 'blue'];
+  }
+
+  private _getOrCreateBrain(bot: TankEntity): BotBrain {
+    let brain = this.brains.get(bot.id);
     if (!brain) {
-      const seed = hashIdToSeed(enemy.id);
+      const seed = hashIdToSeed(bot.id);
+      const eBase = this._enemyBaseFor(bot);
       brain = {
-        id: enemy.id,
-        state: 'roam',
+        id: bot.id,
+        state: 'advance',
         seed,
         orbitSign: seed >= 0.5 ? 1 : -1,
         orbitFlipTimer: 5.5 + seed * 3.5,
         flipCooldown: 0,
-        roamTargetX: enemy.position.x,
-        roamTargetZ: enemy.position.z,
-        roamTimer: 0,
+        advanceX: ADVANCE_LANES[Math.floor(seed * ADVANCE_LANES.length) % ADVANCE_LANES.length],
+        advanceZ: eBase.z,
+        laneX: ADVANCE_LANES[Math.floor(seed * ADVANCE_LANES.length) % ADVANCE_LANES.length],
+        targetId: null,
+        target: null,
+        retargetTimer: seed * 0.8,
+        lastAttackerId: null,
+        lastAttackedAt: -99,
+        smoothedTargetVel: new THREE.Vector3(),
+        lastTargetPos: new THREE.Vector3().copy(bot.position),
         alertTimer: 0,
         losLockTimer: 0,
         mgCycleTimer: seed * 2.5,
-        smoothedMoveYaw: enemy.hullYaw,
+        smoothedMoveYaw: bot.hullYaw,
         stuckAccum: 0,
         unstuckTimer: 0,
         unstuckSteer: seed >= 0.5 ? 1 : -1,
-        lastHp: enemy.hp,
-        wasAlive: enemy.alive,
+        lastHp: bot.hp,
+        wasAlive: bot.alive,
       };
-      this._pickRoamWaypoint(brain, enemy, world);
-      this.brains.set(enemy.id, brain);
+      this.brains.set(bot.id, brain);
     }
 
-    if (!this.intents.has(enemy.id)) {
-      this.intents.set(enemy.id, {
+    if (!this.intents.has(bot.id)) {
+      this.intents.set(bot.id, {
         throttle: 0,
         steer: 0,
         brake: false,
@@ -162,15 +192,19 @@ export class EnemyAIManager {
     return brain;
   }
 
-  private _pickRoamWaypoint(brain: EnemyBrain, enemy: TankEntity, world: TerrainQuery): void {
-    const limit = Math.max(40, world.worldHalfSize - 38);
+  /**
+   * Picks the next advance waypoint: a random point inside the enemy half
+   * (between map center and the enemy base), biased away from solid obstacles.
+   */
+  private _pickAdvanceWaypoint(brain: BotBrain, bot: TankEntity, world: TerrainQuery): void {
+    const base = this._enemyBaseFor(bot);
+    const limit = Math.max(40, world.worldHalfSize - 30);
     const obstacles = world.getObstacles();
 
     for (let attempt = 0; attempt < 8; attempt++) {
-      const angle = Math.random() * Math.PI * 2;
-      const dist = 55 + Math.random() * 75;
-      const wx = THREE.MathUtils.clamp(enemy.position.x + Math.sin(angle) * dist, -limit, limit);
-      const wz = THREE.MathUtils.clamp(enemy.position.z + Math.cos(angle) * dist, -limit, limit);
+      const t = 0.12 + Math.random() * 0.8;
+      const wx = THREE.MathUtils.clamp((Math.random() * 2 - 1) * limit, -limit, limit);
+      const wz = THREE.MathUtils.clamp(base.z * t, -limit, limit);
 
       let clear = true;
       for (let i = 0; i < obstacles.length; i++) {
@@ -185,10 +219,139 @@ export class EnemyAIManager {
         }
       }
       if (clear || attempt === 7) {
-        brain.roamTargetX = wx;
-        brain.roamTargetZ = wz;
-        brain.roamTimer = 11 + Math.random() * 5;
+        brain.advanceX = wx;
+        brain.advanceZ = wz;
         return;
+      }
+    }
+  }
+
+  /**
+   * LOS check from bot muzzle to target center of mass. Mirrors the destructible-
+   * brush rule used by gunnery: only near crates/saplings (<12m) may be shot through.
+   */
+  private _losClearTo(bot: TankEntity, target: TankEntity, world: TerrainQuery): boolean {
+    bot.getMuzzleWorld(this._muzzlePos, this._muzzleDir);
+    target.getCenterMassWorld(this._scratchPos);
+    this._losDir.subVectors(this._scratchPos, this._muzzlePos);
+    const losLen = this._losDir.length();
+    if (losLen <= 1.0) return true;
+    this._losDir.multiplyScalar(1 / losLen);
+    const checkDist = Math.max(0.5, losLen - target.stats.hitRadius * 0.85);
+    const hit = world.raycastWorld(this._muzzlePos, this._losDir, checkDist);
+    if (hit === null) return true;
+    return (
+      hit.hitKind === 'obstacle' &&
+      Boolean(hit.obstacle?.destructible) &&
+      hit.distance < 12
+    );
+  }
+
+  /**
+   * Target acquisition: alive enemies within 300m, scored by distance with bonuses
+   * for clear LOS (-60) and recent attacker (-80). Hysteresis keeps the current
+   * target unless the new best beats it by >40, it died, or it left 320m.
+   */
+  private _selectTarget(
+    brain: BotBrain,
+    bot: TankEntity,
+    allTanks: readonly TankEntity[],
+    world: TerrainQuery
+  ): void {
+    const pool = this._candPool;
+    for (let i = 0; i < pool.length; i++) {
+      pool[i].t = null;
+      pool[i].d = Infinity;
+    }
+    let count = 0;
+    for (let i = 0; i < allTanks.length; i++) {
+      const t = allTanks[i];
+      if (!t.alive || t === bot || t.team === bot.team) continue;
+      const dx = t.position.x - bot.position.x;
+      const dz = t.position.z - bot.position.z;
+      const dSq = dx * dx + dz * dz;
+      if (dSq > MAX_ACQUIRE_RANGE_SQ || count >= pool.length) continue;
+      const slot = pool[count++];
+      slot.t = t;
+      slot.d = Math.sqrt(dSq);
+    }
+    if (count === 0) {
+      brain.target = null;
+      brain.targetId = null;
+      return;
+    }
+
+    // Insertion sort first `count` slots by distance (n <= 16)
+    for (let i = 1; i < count; i++) {
+      const s = pool[i];
+      let j = i - 1;
+      while (j >= 0 && pool[j].d > s.d) {
+        pool[j + 1] = pool[j];
+        j--;
+      }
+      pool[j + 1] = s;
+    }
+
+    const checkN = Math.min(3, count);
+    let best: TankEntity | null = null;
+    let bestScore = Infinity;
+    let curScore = Infinity;
+    const cur = brain.target;
+
+    for (let i = 0; i < checkN; i++) {
+      const cand = pool[i].t!;
+      const dist = pool[i].d;
+      let score = dist;
+      if (this._losClearTo(bot, cand, world)) score -= 60;
+      if (cand.id === brain.lastAttackerId && this.clock - brain.lastAttackedAt < 8) {
+        score -= 80;
+      }
+      if (cand === cur) curScore = score;
+      if (score < bestScore) {
+        bestScore = score;
+        best = cand;
+      }
+    }
+
+    // Current target may sit outside the top-3 (or in the 300-320m retention band):
+    // score it too so hysteresis compares like-for-like.
+    if (cur && cur.alive && cur.team !== bot.team && curScore === Infinity) {
+      const cdx = cur.position.x - bot.position.x;
+      const cdz = cur.position.z - bot.position.z;
+      const cDistSq = cdx * cdx + cdz * cdz;
+      if (cDistSq <= TARGET_DROP_RANGE * TARGET_DROP_RANGE) {
+        let score = Math.sqrt(cDistSq);
+        if (this._losClearTo(bot, cur, world)) score -= 60;
+        if (cur.id === brain.lastAttackerId && this.clock - brain.lastAttackedAt < 8) {
+          score -= 80;
+        }
+        curScore = score;
+        if (score < bestScore) {
+          bestScore = score;
+          best = cur;
+        }
+      }
+    }
+
+    let chosen: TankEntity | null;
+    if (
+      cur &&
+      cur.alive &&
+      cur.team !== bot.team &&
+      curScore !== Infinity &&
+      !(best !== null && best !== cur && bestScore + 40 < curScore)
+    ) {
+      chosen = cur;
+    } else {
+      chosen = best;
+    }
+
+    if (chosen !== brain.target) {
+      brain.target = chosen;
+      brain.targetId = chosen ? chosen.id : null;
+      if (chosen) {
+        brain.smoothedTargetVel.copy(chosen.velocity);
+        brain.lastTargetPos.copy(chosen.position);
       }
     }
   }
@@ -198,16 +361,15 @@ export class EnemyAIManager {
    * inter-tank separation (14m), and battlefield boundary avoidance.
    */
   private _computeContextSteeredYaw(
-    brain: EnemyBrain,
-    enemy: TankEntity,
+    brain: BotBrain,
+    bot: TankEntity,
     desiredYaw: number,
-    enemies: readonly TankEntity[],
-    player: TankEntity,
+    allTanks: readonly TankEntity[],
     world: TerrainQuery
   ): { yaw: number; blockedScore: number } {
-    const ex = enemy.position.x;
-    const ez = enemy.position.z;
-    const myR = enemy.stats.collisionRadius;
+    const ex = bot.position.x;
+    const ez = bot.position.z;
+    const myR = bot.stats.collisionRadius;
 
     const desSin = Math.sin(desiredYaw);
     const desCos = Math.cos(desiredYaw);
@@ -267,10 +429,10 @@ export class EnemyAIManager {
       }
     }
 
-    // 2. Tank-to-Tank Separation (within 14m against other enemies + player)
+    // 2. Tank-to-Tank Separation (within 14m against all other tanks)
     const sepRange = 14.0;
     const checkTankDanger = (other: TankEntity) => {
-      if (other === enemy) return;
+      if (other === bot) return;
       const ox = other.position.x - ex;
       const oz = other.position.z - ez;
       const clearance = myR + other.stats.collisionRadius + 2.4;
@@ -296,10 +458,9 @@ export class EnemyAIManager {
       }
     };
 
-    for (let i = 0; i < enemies.length; i++) {
-      checkTankDanger(enemies[i]);
+    for (let i = 0; i < allTanks.length; i++) {
+      checkTankDanger(allTanks[i]);
     }
-    checkTankDanger(player);
 
     // 3. Battlefield Boundary Avoidance (`worldHalfSize - 22`)
     const softBorder = world.worldHalfSize - 22;
@@ -362,46 +523,37 @@ export class EnemyAIManager {
 
   public update(
     dt: number,
-    enemies: readonly TankEntity[],
-    player: TankEntity,
+    bots: readonly TankEntity[],
+    allTanks: readonly TankEntity[],
     world: TerrainQuery
   ): Map<string, TankIntent> {
     const safeDt = Math.min(Math.max(dt, 0.0001), 0.08);
     this.clock += safeDt;
 
-    // Smooth player velocity for realistic predictive lead (reset on respawn teleport)
-    if (!this.playerVelInitialized || this.lastPlayerPos.distanceToSquared(player.position) > 400) {
-      this.playerVelInitialized = true;
-      this.smoothedPlayerVel.copy(player.velocity);
-      this.lastPlayerPos.copy(player.position);
-    } else {
-      const vAlpha = 1 - Math.exp(-6.5 * safeDt);
-      this.smoothedPlayerVel.lerp(player.velocity, vAlpha);
-      this.lastPlayerPos.copy(player.position);
-    }
-
-    player.getCenterMassWorld(this._playerCenter);
-
-    for (let i = 0; i < enemies.length; i++) {
-      const enemy = enemies[i];
-      const brain = this._getOrCreateBrain(enemy, world);
-      const intent = this.intents.get(enemy.id)!;
+    for (let i = 0; i < bots.length; i++) {
+      const bot = bots[i];
+      const brain = this._getOrCreateBrain(bot);
+      const intent = this.intents.get(bot.id)!;
 
       // Detect respawn
-      if ((!brain.wasAlive && enemy.alive) || enemy.hp > brain.lastHp + 1) {
-        brain.state = 'roam';
+      if ((!brain.wasAlive && bot.alive) || bot.hp > brain.lastHp + 1) {
+        brain.state = 'advance';
         brain.alertTimer = 0;
         brain.losLockTimer = 0;
         brain.stuckAccum = 0;
         brain.unstuckTimer = 0;
-        brain.smoothedMoveYaw = enemy.hullYaw;
-        this._pickRoamWaypoint(brain, enemy, world);
+        brain.smoothedMoveYaw = bot.hullYaw;
+        brain.target = null;
+        brain.targetId = null;
+        this._pickAdvanceWaypoint(brain, bot, world);
       }
 
-      if (!enemy.alive) {
+      if (!bot.alive) {
         brain.wasAlive = false;
         brain.lastHp = 0;
-        brain.state = 'roam';
+        brain.state = 'advance';
+        brain.target = null;
+        brain.targetId = null;
         intent.throttle = 0;
         intent.steer = 0;
         intent.brake = true;
@@ -410,37 +562,71 @@ export class EnemyAIManager {
         continue;
       }
 
-      // Detect player hit immediately via HP drop
-      if (enemy.hp < brain.lastHp - 0.01 && player.alive) {
+      // Detect incoming fire via HP drop
+      if (bot.hp < brain.lastHp - 0.01) {
         brain.alertTimer = 16.0;
       }
-      brain.lastHp = enemy.hp;
+      brain.lastHp = bot.hp;
       brain.wasAlive = true;
 
-      const dxToPlayer = player.position.x - enemy.position.x;
-      const dzToPlayer = player.position.z - enemy.position.z;
-      const distToPlayer = Math.sqrt(dxToPlayer * dxToPlayer + dzToPlayer * dzToPlayer);
-      const yawToPlayer = Math.atan2(dxToPlayer, dzToPlayer);
-
-      // Alert acquisition within 175m (keeps southern player staging spawn peaceful)
-      if (player.alive && distToPlayer <= 175) {
-        brain.alertTimer = Math.max(brain.alertTimer, 8.5);
-      } else {
-        brain.alertTimer = Math.max(0, brain.alertTimer - safeDt);
+      // Drop stale targets (died, same team, or beyond retention range)
+      let target = brain.target;
+      if (target) {
+        const tdx = target.position.x - bot.position.x;
+        const tdz = target.position.z - bot.position.z;
+        if (
+          !target.alive ||
+          target.team === bot.team ||
+          tdx * tdx + tdz * tdz > TARGET_DROP_RANGE * TARGET_DROP_RANGE
+        ) {
+          brain.target = null;
+          brain.targetId = null;
+          target = null;
+        }
       }
 
-      const engaging = player.alive && brain.alertTimer > 0;
+      // Periodic target re-evaluation (0.5-0.8s per-bot jitter)
+      brain.retargetTimer -= safeDt;
+      if (brain.retargetTimer <= 0) {
+        brain.retargetTimer = 0.5 + Math.random() * 0.3;
+        this._selectTarget(brain, bot, allTanks, world);
+        target = brain.target;
+      }
+
+      // Per-brain target velocity smoothing for predictive ballistic lead
+      // (reset inside _selectTarget on target change or >20m teleport)
+      if (target) {
+        if (brain.lastTargetPos.distanceToSquared(target.position) > 400) {
+          brain.smoothedTargetVel.copy(target.velocity);
+        } else {
+          brain.smoothedTargetVel.lerp(target.velocity, 1 - Math.exp(-6.5 * safeDt));
+        }
+        brain.lastTargetPos.copy(target.position);
+      }
+
+      const engaging = target !== null;
+
+      let distToTarget = 0;
+      let yawToTarget = 0;
+      if (engaging && target) {
+        const tdx = target.position.x - bot.position.x;
+        const tdz = target.position.z - bot.position.z;
+        distToTarget = Math.sqrt(tdx * tdx + tdz * tdz);
+        yawToTarget = Math.atan2(tdx, tdz);
+      }
+
+      brain.alertTimer = Math.max(0, brain.alertTimer - safeDt);
 
       // State Machine Transitions
       if (!engaging) {
-        brain.state = 'roam';
+        brain.state = 'advance';
       } else if (brain.state === 'evade_reverse') {
         // Hysteresis up to 45m so tank doesn't chatter right at 38m
-        if (distToPlayer > 155) brain.state = 'engage_approach';
-        else if (distToPlayer > 45) brain.state = 'strafe_orbit';
+        if (distToTarget > 155) brain.state = 'engage_approach';
+        else if (distToTarget > 45) brain.state = 'strafe_orbit';
       } else {
-        if (distToPlayer < 38) brain.state = 'evade_reverse';
-        else if (distToPlayer > 155) brain.state = 'engage_approach';
+        if (distToTarget < 38) brain.state = 'evade_reverse';
+        else if (distToTarget > 155) brain.state = 'engage_approach';
         else brain.state = 'strafe_orbit';
       }
 
@@ -455,49 +641,49 @@ export class EnemyAIManager {
       // ---------------------------------------------------------------------
       // Desired Tactical Heading & Throttle
       // ---------------------------------------------------------------------
-      let rawDesiredYaw = enemy.hullYaw;
+      let rawDesiredYaw = bot.hullYaw;
       let desiredThrottle = 0.7;
       let wantsReverseMove = false;
 
-      if (brain.state === 'roam') {
-        brain.roamTimer -= safeDt;
-        const rdx = brain.roamTargetX - enemy.position.x;
-        const rdz = brain.roamTargetZ - enemy.position.z;
-        if (rdx * rdx + rdz * rdz < 16 * 16 || brain.roamTimer <= 0) {
-          this._pickRoamWaypoint(brain, enemy, world);
+      if (brain.state === 'advance') {
+        // Drive ~0.6 throttle toward the enemy-half waypoint along this bot's lane
+        const adx = brain.advanceX - bot.position.x;
+        const adz = brain.advanceZ - bot.position.z;
+        if (adx * adx + adz * adz < 40 * 40) {
+          this._pickAdvanceWaypoint(brain, bot, world);
         }
         rawDesiredYaw = Math.atan2(
-          brain.roamTargetX - enemy.position.x,
-          brain.roamTargetZ - enemy.position.z
+          brain.advanceX - bot.position.x,
+          brain.advanceZ - bot.position.z
         );
-        desiredThrottle = 0.48;
+        desiredThrottle = 0.6;
       } else if (brain.state === 'engage_approach') {
-        // Close distance along a ~35 deg diagonal weave (never drive straight down player's barrel!)
+        // Close distance along a ~35 deg diagonal weave (never drive straight down target's barrel!)
         const weaveRad = 0.61 + 0.08 * Math.sin(this.clock * 0.75 + brain.seed * 6.28);
-        rawDesiredYaw = wrapAnglePi(yawToPlayer + brain.orbitSign * weaveRad);
+        rawDesiredYaw = wrapAnglePi(yawToTarget + brain.orbitSign * weaveRad);
         desiredThrottle = 0.56 + 0.12 * (0.5 + 0.5 * Math.sin(this.clock * 1.1 + brain.seed * 10));
       } else if (brain.state === 'strafe_orbit') {
-        // 45m..155m combat band: 65-85 deg tangent orbit with variant-tuned range control
-        const idealDist = idealOrbitDistForVariant(enemy.variant);
+        // 45m..155m combat band: 65-85 deg tangent orbit with class-tuned range control
+        const idealDist = idealOrbitDistForClass(bot.stats.vehicleClass);
         let tangentDeg = 76;
-        if (distToPlayer > idealDist + 18) {
+        if (distToTarget > idealDist + 18) {
           tangentDeg = 66; // Spiral gently inward
-        } else if (distToPlayer < idealDist - 18) {
+        } else if (distToTarget < idealDist - 18) {
           tangentDeg = 92; // Spiral gently outward
         }
         const tangentRad = THREE.MathUtils.degToRad(tangentDeg);
-        rawDesiredYaw = wrapAnglePi(yawToPlayer + brain.orbitSign * tangentRad);
+        rawDesiredYaw = wrapAnglePi(yawToTarget + brain.orbitSign * tangentRad);
         const wave = 0.5 + 0.5 * Math.sin(this.clock * 0.92 + brain.seed * Math.PI * 2);
         desiredThrottle = 0.42 + 0.26 * wave;
       } else {
-        // 'evade_reverse' (< 38m): back off if facing player, or circle hard away if already angled
-        const hullToPlayer = Math.abs(wrapAnglePi(yawToPlayer - enemy.hullYaw));
-        if (hullToPlayer < 1.15) {
+        // 'evade_reverse' (< 38m): back off if facing target, or circle hard away if already angled
+        const hullToTarget = Math.abs(wrapAnglePi(yawToTarget - bot.hullYaw));
+        if (hullToTarget < 1.15) {
           wantsReverseMove = true;
-          rawDesiredYaw = wrapAnglePi(yawToPlayer + brain.orbitSign * 0.45);
+          rawDesiredYaw = wrapAnglePi(yawToTarget + brain.orbitSign * 0.45);
           desiredThrottle = -0.65;
         } else {
-          rawDesiredYaw = wrapAnglePi(yawToPlayer + brain.orbitSign * 2.18);
+          rawDesiredYaw = wrapAnglePi(yawToTarget + brain.orbitSign * 2.18);
           desiredThrottle = 0.65;
         }
       }
@@ -514,10 +700,9 @@ export class EnemyAIManager {
         const probeYaw = wantsReverseMove ? wrapAnglePi(rawDesiredYaw + Math.PI) : rawDesiredYaw;
         const { yaw: safeMoveYaw, blockedScore } = this._computeContextSteeredYaw(
           brain,
-          enemy,
+          bot,
           probeYaw,
-          enemies,
-          player,
+          allTanks,
           world
         );
 
@@ -534,9 +719,9 @@ export class EnemyAIManager {
           1 - Math.exp(-8.5 * safeDt)
         );
 
-        const yawErr = wrapAnglePi(brain.smoothedMoveYaw - enemy.hullYaw);
+        const yawErr = wrapAnglePi(brain.smoothedMoveYaw - bot.hullYaw);
         // Match Tank.ts reverse steering flip (`this.speed < -0.6 ? -1 : 1`)
-        const reverseSteerSign = enemy.speed < -0.6 ? -1 : 1;
+        const reverseSteerSign = bot.speed < -0.6 ? -1 : 1;
         intent.steer = THREE.MathUtils.clamp(yawErr / 0.42, -1, 1) * reverseSteerSign;
         intent.brake = false;
 
@@ -548,7 +733,7 @@ export class EnemyAIManager {
         }
 
         // Anti-stuck detector: if commanding drive for > 1.8s with speed < 0.6 m/s, execute reverse recovery
-        if (Math.abs(intent.throttle) > 0.35 && Math.abs(enemy.speed) < 0.6) {
+        if (Math.abs(intent.throttle) > 0.35 && Math.abs(bot.speed) < 0.6) {
           brain.stuckAccum += safeDt;
           if (brain.stuckAccum > 1.8) {
             brain.stuckAccum = 0;
@@ -564,14 +749,14 @@ export class EnemyAIManager {
       // ---------------------------------------------------------------------
       // Predictive Ballistic Gunnery, Aim Wander & Trigger Discipline
       // ---------------------------------------------------------------------
-      if (!engaging) {
-        // Patrol turret scan along forward arc
+      if (!target) {
+        // Advance/patrol turret scan along forward arc
         const scanYaw =
-          enemy.hullYaw + Math.sin(this.clock * 0.65 + brain.seed * 6.28) * 0.42;
+          bot.hullYaw + Math.sin(this.clock * 0.65 + brain.seed * 6.28) * 0.42;
         intent.aimPoint.set(
-          enemy.position.x + Math.sin(scanYaw) * 60,
-          enemy.position.y + 1.5,
-          enemy.position.z + Math.cos(scanYaw) * 60
+          bot.position.x + Math.sin(scanYaw) * 60,
+          bot.position.y + 1.5,
+          bot.position.z + Math.cos(scanYaw) * 60
         );
         intent.fireCannon = false;
         intent.fireMG = false;
@@ -579,22 +764,23 @@ export class EnemyAIManager {
         continue;
       }
 
-      enemy.getMuzzleWorld(this._muzzlePos, this._muzzleDir);
+      bot.getMuzzleWorld(this._muzzlePos, this._muzzleDir);
+      target.getCenterMassWorld(this._targetCenter);
 
       // Iterative lead + gravity drop solver
       solveBallisticAim(
         this._muzzlePos,
-        this._playerCenter,
-        this.smoothedPlayerVel,
-        enemy.stats.shellMuzzleSpeed,
+        this._targetCenter,
+        brain.smoothedTargetVel,
+        bot.stats.shellMuzzleSpeed,
         GRAVITY,
         this._aimPoint
       );
 
-      // Add smooth humanized angular aim wander (~1.3 deg - 2.35 deg depending on variant)
-      const baseWanderRad = wanderRadiansForVariant(enemy.variant);
+      // Add smooth humanized angular aim wander
+      const baseWanderRad = aimWanderRadians(bot.stats.vehicleClass);
       const movePenaltyRad =
-        0.008 * Math.min(1, Math.abs(enemy.speed) / Math.max(1, enemy.stats.maxForwardSpeed));
+        0.008 * Math.min(1, Math.abs(bot.speed) / Math.max(1, bot.stats.maxForwardSpeed));
       const totalWanderRad = baseWanderRad + movePenaltyRad;
 
       const phase = brain.seed * 31.7;
@@ -605,22 +791,22 @@ export class EnemyAIManager {
         Math.cos(this.clock * 0.94 + phase * 1.3) * 0.6 +
         Math.sin(this.clock * 1.87 + phase * 2.1) * 0.4;
 
-      // Right tangent perpendicular to player bearing: (-cos(yawToPlayer), 0, sin(yawToPlayer))
-      this._wanderRight.set(-Math.cos(yawToPlayer), 0, Math.sin(yawToPlayer));
-      const lateralSpread = distToPlayer * totalWanderRad * noiseAz;
-      const verticalSpread = distToPlayer * totalWanderRad * 0.55 * noiseEl;
+      // Right tangent perpendicular to target bearing: (-cos(yawToTarget), 0, sin(yawToTarget))
+      this._wanderRight.set(-Math.cos(yawToTarget), 0, Math.sin(yawToTarget));
+      const lateralSpread = distToTarget * totalWanderRad * noiseAz;
+      const verticalSpread = distToTarget * totalWanderRad * 0.55 * noiseEl;
 
       this._aimPoint.addScaledVector(this._wanderRight, lateralSpread);
       this._aimPoint.y += verticalSpread;
       intent.aimPoint.copy(this._aimPoint);
 
-      // Line-of-Sight check from muzzle to player center of mass
-      this._losDir.subVectors(this._playerCenter, this._muzzlePos);
+      // Line-of-Sight check from muzzle to target center of mass
+      this._losDir.subVectors(this._targetCenter, this._muzzlePos);
       const losLen = this._losDir.length();
       let losClear = true;
       if (losLen > 1.0) {
         this._losDir.multiplyScalar(1 / losLen);
-        const checkDist = Math.max(0.5, losLen - player.stats.hitRadius * 0.85);
+        const checkDist = Math.max(0.5, losLen - target.stats.hitRadius * 0.85);
         const losHit = world.raycastWorld(this._muzzlePos, this._losDir, checkDist);
         if (losHit !== null) {
           // Only allow shooting through a nearby destructible crate/sapling (< 12m), never solid cover/ridges
@@ -645,27 +831,27 @@ export class EnemyAIManager {
       const boreDot = THREE.MathUtils.clamp(this._muzzleDir.dot(this._desiredBore), -1, 1);
       const boreAngle = Math.acos(boreDot);
 
-      // Periodic AI shell type variation on enemy tanks (switches between AP & HE occasionally)
+      // Periodic AI shell type variation (switches between AP & HE occasionally)
       intent.selectShell = Math.sin(this.clock * 0.08 + brain.seed * 10) > 0.45 ? 1 : 0;
 
-      // Slow, forgiving enemy fire: requires 2.2s continuous LOS lock, range < 190m
+      // Forgiving bot fire: requires 2.2s continuous LOS lock, range < 190m
       intent.fireCannon =
-        enemy.stats.hasMainCannon &&
+        bot.stats.hasMainCannon &&
         losClear &&
         brain.losLockTimer >= 2.2 &&
-        distToPlayer < 190 &&
+        distToTarget < 190 &&
         boreAngle <= 0.16;
 
       // Occasional short coaxial MG / IFV autocannon tracer bursts
-      const mgPeriod = enemy.stats.vehicleClass === 'ifv' ? 4.8 : 6.5;
-      const mgBurstLen = enemy.stats.vehicleClass === 'ifv' ? 0.65 : 0.42;
+      const mgPeriod = bot.stats.vehicleClass === 'ifv' ? 4.8 : 6.5;
+      const mgBurstLen = bot.stats.vehicleClass === 'ifv' ? 0.65 : 0.42;
       brain.mgCycleTimer = (brain.mgCycleTimer + safeDt) % mgPeriod;
       intent.fireMG =
-        enemy.stats.hasCoaxMG &&
-        !enemy.mgOverheated &&
+        bot.stats.hasCoaxMG &&
+        !bot.mgOverheated &&
         losClear &&
         brain.losLockTimer >= 1.6 &&
-        distToPlayer < 135 &&
+        distToTarget < 135 &&
         boreAngle <= 0.22 &&
         brain.mgCycleTimer < mgBurstLen;
     }

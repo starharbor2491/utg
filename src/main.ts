@@ -6,26 +6,28 @@ import { Tank } from './game/Tank';
 import { EffectsManager } from './game/Effects';
 import { BallisticsManager, predictBarrelImpact } from './game/Ballistics';
 import { PlayerController } from './game/PlayerController';
-import { EnemyAIManager } from './game/EnemyAI';
+import { BotAIManager } from './game/BotAI';
+import { Match } from './game/Match';
 import { HUD } from './game/HUD';
 import { HitCam } from './game/HitCam';
 import { auditThreeObject, type AuditIssue } from './game/SceneAudit';
 import type {
   DamageEvent,
   HUDTelemetry,
-  MinimapEnemy,
   MinimapObstacle,
+  MinimapUnit,
   ScreenReticlePos,
   ShellSpec,
-  TankVariant,
   VehicleClass,
 } from './game/types';
 
-interface HostileMarkerDOM {
+interface UnitMarkerDOM {
   el: HTMLDivElement;
   codeEl: HTMLSpanElement;
   distEl: HTMLSpanElement;
   barFillEl: HTMLDivElement;
+  barTrackEl: HTMLDivElement;
+  isAlly: boolean;
 }
 
 function projectWorldToScreen(
@@ -42,16 +44,46 @@ function projectWorldToScreen(
   out.y = (-scratch.y * 0.5 + 0.5) * height;
 }
 
-function variantForPlayerClass(cls: VehicleClass): TankVariant {
-  if (cls === 'heavy') return 'player_heavy';
-  if (cls === 'ifv') return 'player_ifv';
-  return 'player_normal';
+function markerCodeForClass(cls: VehicleClass): string {
+  if (cls === 'heavy') return 'HEAVY';
+  if (cls === 'ifv') return 'IFV';
+  return 'MBT';
 }
 
-function markerCodeForVariant(v: TankVariant): string {
-  if (v.endsWith('_heavy')) return 'HEAVY';
-  if (v.endsWith('_ifv')) return 'IFV';
-  return 'MBT';
+function buildUnitMarker(isAlly: boolean, callsign: string, cls: VehicleClass): UnitMarkerDOM {
+  const teamColor = isAlly ? '#8fb4d8' : '#d94636';
+  const topRowColor = isAlly ? '#bcd6ee' : '#f0b6ad';
+
+  const el = document.createElement('div');
+  el.style.cssText =
+    'position:absolute;left:0;top:0;transform:translate(-50%,-100%);display:none;flex-direction:column;align-items:center;gap:2px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums;text-shadow:0 1px 2px rgba(0,0,0,0.95);';
+
+  const topRow = document.createElement('div');
+  topRow.style.cssText = `display:flex;align-items:center;gap:5px;font-size:${isAlly ? 9 : 10}px;font-weight:700;letter-spacing:0.06em;color:${topRowColor};`;
+
+  const codeEl = document.createElement('span');
+  codeEl.textContent = isAlly ? callsign : markerCodeForClass(cls);
+  const distEl = document.createElement('span');
+  distEl.style.color = '#eae6dc';
+  distEl.style.opacity = '0.85';
+  topRow.append(codeEl, distEl);
+
+  const barTrackEl = document.createElement('div');
+  barTrackEl.style.cssText = isAlly
+    ? 'display:none;'
+    : `width:38px;height:3px;background:rgba(16,19,15,0.85);border:1px solid ${isAlly ? 'rgba(143,180,216,0.55)' : 'rgba(217,70,54,0.55)'};`;
+  const barFillEl = document.createElement('div');
+  barFillEl.style.cssText = `width:100%;height:100%;background:${teamColor};`;
+  barTrackEl.appendChild(barFillEl);
+
+  const diamond = document.createElement('div');
+  diamond.style.cssText = isAlly
+    ? 'width:6px;height:6px;border:1.5px solid #8fb4d8;transform:rotate(45deg);margin-top:2px;background:rgba(143,180,216,0.30);'
+    : 'width:7px;height:7px;border:1.5px solid #d94636;transform:rotate(45deg);margin-top:2px;background:rgba(217,70,54,0.28);';
+
+  el.dataset.unitMarker = isAlly ? 'ally' : 'enemy';
+  el.append(topRow, barTrackEl, diamond);
+  return { el, codeEl, distEl, barFillEl, barTrackEl, isAlly };
 }
 
 async function bootstrap(): Promise<void> {
@@ -113,84 +145,41 @@ async function bootstrap(): Promise<void> {
   const world = new World(scene, assets);
   const effects = new EffectsManager(scene);
   const ballistics = new BallisticsManager(scene, effects);
+  const match = new Match(scene, world, assets);
 
-  // Pre-build all 3 player vehicles once so switching class is instantaneous with zero runtime allocations!
-  const playerSpawn = new THREE.Vector3(0, world.getHeightAt(0, -190), -190);
-  const playerVehicles: Record<VehicleClass, Tank> = {
-    normal: new Tank('player_normal', 'player', 'player_normal', assets, playerSpawn, 0),
-    heavy: new Tank('player_heavy', 'player', 'player_heavy', assets, playerSpawn, 0),
-    ifv: new Tank('player_ifv', 'player', 'player_ifv', assets, playerSpawn, 0),
-  };
-  let activePlayerClass: VehicleClass = 'normal';
-  let playerTank: Tank = playerVehicles.normal;
-  scene.add(playerTank.root);
-
-  // Spawn mixed 3-class OPFOR platoon far North (230m - 365m away from player staging area)
-  const initialEnemyConfigs: { variant: TankVariant; x: number; z: number; yaw: number }[] = [
-    { variant: 'enemy_normal', x: 22, z: 42, yaw: Math.PI },
-    { variant: 'enemy_ifv', x: -58, z: 68, yaw: 2.5 },
-    { variant: 'enemy_heavy', x: 74, z: 88, yaw: -2.4 },
-    { variant: 'enemy_normal', x: -16, z: 148, yaw: Math.PI },
-    { variant: 'enemy_ifv', x: -102, z: 122, yaw: 2.1 },
-  ];
-
-  const enemies: Tank[] = [];
-  const hostileMarkers: HostileMarkerDOM[] = [];
-
-  initialEnemyConfigs.forEach((cfg, idx) => {
-    const pos = new THREE.Vector3(cfg.x, world.getHeightAt(cfg.x, cfg.z), cfg.z);
-    const enemy = new Tank(`enemy_${idx + 1}`, 'enemy', cfg.variant, assets, pos, cfg.yaw);
-    scene.add(enemy.root);
-    enemies.push(enemy);
-
-    const el = document.createElement('div');
-    el.style.cssText =
-      'position:absolute;left:0;top:0;transform:translate(-50%,-100%);display:none;flex-direction:column;align-items:center;gap:2px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums;text-shadow:0 1px 2px rgba(0,0,0,0.95);';
-
-    const topRow = document.createElement('div');
-    topRow.style.cssText =
-      'display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;letter-spacing:0.06em;color:#f0b6ad;';
-
-    const codeEl = document.createElement('span');
-    codeEl.textContent = markerCodeForVariant(cfg.variant);
-    const distEl = document.createElement('span');
-    distEl.style.color = '#eae6dc';
-    distEl.style.opacity = '0.85';
-    topRow.append(codeEl, distEl);
-
-    const barTrack = document.createElement('div');
-    barTrack.style.cssText =
-      'width:38px;height:3px;background:rgba(16,19,15,0.85);border:1px solid rgba(217,70,54,0.55);';
-    const barFillEl = document.createElement('div');
-    barFillEl.style.cssText = 'width:100%;height:100%;background:#d94636;';
-    barTrack.appendChild(barFillEl);
-
-    const diamond = document.createElement('div');
-    diamond.style.cssText =
-      'width:7px;height:7px;border:1.5px solid #d94636;transform:rotate(45deg);margin-top:2px;background:rgba(217,70,54,0.28);';
-
-    el.append(topRow, barTrack, diamond);
-    markerLayer.appendChild(el);
-    hostileMarkers.push({ el, codeEl, distEl, barFillEl });
+  // Bots = every tank except the human (tanks[0]); stable for the whole match
+  const allTanks: Tank[] = match.tanks;
+  const bots: Tank[] = match.tanks.slice(1);
+  const botAI = new BotAIManager({
+    blue: match.baseCenter('blue'),
+    red: match.baseCenter('red'),
   });
 
-  const allTanks: Tank[] = [playerTank, ...enemies];
-  const enemyAI = new EnemyAIManager();
+  // Per-unit screen markers: enemies get class code + HP bar, allies get callsign chevron
+  const unitMarkers: UnitMarkerDOM[] = [];
+  for (const bot of bots) {
+    const isAlly = bot.team === 'blue';
+    const m = buildUnitMarker(isAlly, bot.callsign, bot.stats.vehicleClass);
+    markerLayer.appendChild(m.el);
+    unitMarkers.push(m);
+  }
 
-  swapPlayerClassFn = (nextCls: VehicleClass) => {
-    if (nextCls === activePlayerClass) return;
-    const prevPos = playerTank.position.clone();
-    const prevYaw = playerTank.hullYaw;
-    const prevTurret = playerTank.turretRelYaw;
-    scene.remove(playerTank.root);
+  // Minimap unit telemetry (reused objects, zero per-frame allocations)
+  const minimapUnits: MinimapUnit[] = bots.map((b) => ({
+    x: b.position.x,
+    z: b.position.z,
+    yaw: b.hullYaw,
+    alive: b.alive,
+    ally: b.team === 'blue',
+    spotted: false,
+  }));
 
-    activePlayerClass = nextCls;
-    playerTank = playerVehicles[nextCls];
-    playerTank.respawnAt(prevPos, prevYaw);
-    playerTank.turretRelYaw = prevTurret;
-    scene.add(playerTank.root);
-    allTanks[0] = playerTank;
-    void variantForPlayerClass;
+  let kills = 0;
+  let deaths = 0;
+  let friendlyFireEvents = 0;
+
+  swapPlayerClassFn = (cls: VehicleClass) => {
+    match.selectHumanClass(cls);
   };
 
   const controller = new PlayerController(camera, canvas);
@@ -214,18 +203,6 @@ async function bootstrap(): Promise<void> {
       radius: o.radius,
       kind: o.kind,
     }));
-
-  const minimapEnemies: MinimapEnemy[] = enemies.map((e) => ({
-    x: e.position.x,
-    z: e.position.z,
-    yaw: e.hullYaw,
-    variant: e.variant,
-    alive: e.alive,
-    alerted: false,
-  }));
-
-  let kills = 0;
-  let deaths = 0;
 
   // Compact cursor-lock status pill + 3-step micro-tutorial bar (top-center)
   const topPromptsWrap = document.createElement('div');
@@ -283,15 +260,23 @@ async function bootstrap(): Promise<void> {
   let incomingDamageTimer = 0;
 
   const handleDamage = (ev: DamageEvent) => {
+    match.onDamage(ev);
+    if (ev.attacker && ev.attacker.team === ev.victim.team) {
+      friendlyFireEvents++;
+    }
+
     const victim = ev.victim as Tank;
     const attacker = ev.attacker as Tank | null;
     const killedNow = ev.killed;
 
-    if (victim.faction === 'enemy' && attacker === playerTank) {
-      enemyAI.notifyDamaged(victim.id);
-      if (ev.xrayReport) {
-        hitCam.showHit(ev.xrayReport);
-      }
+    if (!victim.isHuman && ev.xrayReport && attacker?.isHuman) {
+      hitCam.showHit(ev.xrayReport);
+    }
+    if (!victim.isHuman) {
+      botAI.notifyDamaged(victim.id, attacker?.id ?? null);
+    }
+
+    if (attacker?.isHuman && victim.team !== 'blue') {
       if (killedNow) {
         kills++;
         hitMarkerKind = 'kill';
@@ -302,11 +287,11 @@ async function bootstrap(): Promise<void> {
         }
         hitMarkerTimer = Math.max(hitMarkerTimer, ev.weapon === 'cannon' ? 0.45 : 0.18);
       }
-    } else if (victim === playerTank) {
+    } else if (victim.isHuman) {
       if (attacker) {
         incomingDamageYaw = Math.atan2(
-          attacker.position.x - playerTank.position.x,
-          attacker.position.z - playerTank.position.z
+          attacker.position.x - victim.position.x,
+          attacker.position.z - victim.position.z
         );
         incomingDamageTimer = 1.1;
       }
@@ -323,8 +308,6 @@ async function bootstrap(): Promise<void> {
   const _projScratch = new THREE.Vector3();
   const _markerWorldPos = new THREE.Vector3();
   const _losDir = new THREE.Vector3();
-  const _avoidList: THREE.Vector3[] = [];
-  const _emptyFeed: readonly [] = [];
 
   const commanderAimScreen: ScreenReticlePos = { x: 0, y: 0, visible: true };
   const gunnerBoreScreen = { x: 0, y: 0, visible: true, onTarget: false, rangeMeters: 100 };
@@ -336,14 +319,14 @@ async function bootstrap(): Promise<void> {
   const tankCallbacks = {
     onFireCannon: (shooter: Tank, pos: THREE.Vector3, dir: THREE.Vector3, shell: ShellSpec) => {
       ballistics.fireCannon(shooter, pos, dir, shell);
-      if (shooter === playerTank) {
+      if (shooter === match.human) {
         playerFiredOnce = true;
         controller.addShake(shooter.stats.vehicleClass === 'heavy' ? 0.52 : 0.34);
       }
     },
     onFireMG: (shooter: Tank, pos: THREE.Vector3, dir: THREE.Vector3, beltSpec?: ShellSpec) => {
       ballistics.fireCoaxMG(shooter, pos, dir, beltSpec);
-      if (shooter === playerTank) {
+      if (shooter === match.human) {
         playerFiredOnce = true;
         if (beltSpec) {
           controller.addShake(0.035);
@@ -361,23 +344,18 @@ async function bootstrap(): Promise<void> {
   let lastFrameTime = performance.now();
   let shadowTickToggle = 0;
 
-  const updateHostileMarkers = (vw: number, vh: number) => {
+  const updateUnitMarkers = (vw: number, vh: number) => {
+    const human = match.human;
     const hideAll = !controller.pointerLocked && !forceHideBriefing;
-    for (let i = 0; i < enemies.length; i++) {
-      const e = enemies[i];
-      const m = hostileMarkers[i];
+    for (let i = 0; i < bots.length; i++) {
+      const e = bots[i];
+      const m = unitMarkers[i];
       if (hideAll || !e.alive) {
         m.el.style.display = 'none';
         continue;
       }
 
-      const dist = playerTank.position.distanceTo(e.position);
-      const maxSpotDist = controller.sniperZoom ? 340 : 235;
-      if (dist > maxSpotDist) {
-        m.el.style.display = 'none';
-        continue;
-      }
-
+      const dist = human.position.distanceTo(e.position);
       _markerWorldPos.set(
         e.position.x,
         e.position.y + (e.stats.vehicleClass === 'ifv' ? 2.9 : 3.35),
@@ -385,6 +363,27 @@ async function bootstrap(): Promise<void> {
       );
       _projScratch.copy(_markerWorldPos).project(camera);
       if (_projScratch.z < -1 || _projScratch.z > 1) {
+        m.el.style.display = 'none';
+        continue;
+      }
+
+      if (m.isAlly) {
+        // Allies: small blue chevron + callsign, visible out to 400m, no LOS test
+        if (dist > 400) {
+          m.el.style.display = 'none';
+          continue;
+        }
+        const sx = (_projScratch.x * 0.5 + 0.5) * vw;
+        const sy = (-_projScratch.y * 0.5 + 0.5) * vh;
+        m.el.style.display = 'flex';
+        m.el.style.transform = `translate3d(${sx.toFixed(1)}px, ${sy.toFixed(1)}px, 0) translate(-50%, -100%)`;
+        m.distEl.textContent = `${Math.round(dist)}M`;
+        continue;
+      }
+
+      // Enemies: existing spot-range + LOS rules
+      const maxSpotDist = controller.sniperZoom ? 340 : 235;
+      if (dist > maxSpotDist) {
         m.el.style.display = 'none';
         continue;
       }
@@ -407,6 +406,65 @@ async function bootstrap(): Promise<void> {
       m.distEl.textContent = `${Math.round(dist)}M`;
       const hpPct = THREE.MathUtils.clamp((e.hp / e.maxHp) * 100, 0, 100);
       m.barFillEl.style.width = `${hpPct.toFixed(0)}%`;
+    }
+  };
+
+  let activeEnemyCount = 0;
+  let lastPlayerThrottle = 0;
+
+  // All simulation work (no HUD/DOM/render) — steppable headlessly via __tankQA.fastForward
+  const stepSimulation = (dt: number): void => {
+    const human = match.human;
+    const isDeployed = controller.pointerLocked || forceHideBriefing;
+
+    const shakeImpulse = effects.consumeCameraShake(camera.position);
+    let playerIntent = null;
+    if (!cameraOverrideActive) {
+      playerIntent = controller.update(dt, human, world, allTanks, shakeImpulse);
+    }
+    lastPlayerThrottle = playerIntent?.throttle ?? 0;
+
+    const aiIntents = isDeployed ? botAI.update(dt, bots, allTanks, world) : null;
+
+    human.stepKinematics(dt, isDeployed ? playerIntent : null, world, allTanks, tankCallbacks);
+    for (let i = 0; i < bots.length; i++) {
+      const e = bots[i];
+      const eIntent = aiIntents ? (aiIntents.get(e.id) ?? null) : null;
+      e.stepKinematics(dt, eIntent, world, allTanks, tankCallbacks);
+    }
+
+    ballistics.update(dt, world, allTanks, handleDamage);
+    match.update(dt);
+    world.update(dt, human.position);
+    effects.update(dt, camera);
+
+    // Minimap unit telemetry + enemy spotting (red visible only within 220m of a live blue tank)
+    activeEnemyCount = 0;
+    for (let i = 0; i < bots.length; i++) {
+      const e = bots[i];
+      const u = minimapUnits[i];
+      u.x = e.position.x;
+      u.z = e.position.z;
+      u.yaw = e.hullYaw;
+      u.alive = e.alive;
+      if (e.team === 'red') {
+        if (e.alive) {
+          activeEnemyCount++;
+          u.spotted = false;
+          for (let a = 0; a < allTanks.length; a++) {
+            const ally = allTanks[a];
+            if (!ally.alive || ally.team !== 'blue') continue;
+            const sdx = ally.position.x - e.position.x;
+            const sdz = ally.position.z - e.position.z;
+            if (sdx * sdx + sdz * sdz <= 48400) {
+              u.spotted = true;
+              break;
+            }
+          }
+        } else {
+          u.spotted = false;
+        }
+      }
     }
   };
 
@@ -436,50 +494,8 @@ async function bootstrap(): Promise<void> {
       hud.setBriefingVisible(!controller.pointerLocked);
     }
 
-    if (!playerTank.alive && playerTank.respawnTimer <= 0.01) {
-      _avoidList.length = 0;
-      for (const e of enemies) {
-        if (e.alive) _avoidList.push(e.position);
-      }
-      const sp = world.getSafeSpawnPoint(45, 95, _avoidList);
-      const faceCenterYaw = Math.atan2(-sp.x, -sp.z);
-      playerTank.respawnAt(sp, faceCenterYaw);
-      controller.setViewAngles(faceCenterYaw, -0.05);
-    }
-
-    for (let i = 0; i < enemies.length; i++) {
-      const e = enemies[i];
-      if (!e.alive && e.respawnTimer <= 0.01) {
-        _avoidList.length = 0;
-        _avoidList.push(playerTank.position);
-        for (const other of enemies) {
-          if (other !== e && other.alive) _avoidList.push(other.position);
-        }
-        const sp = world.getSafeSpawnPoint(155, 225, _avoidList);
-        const yawToPlayer = Math.atan2(playerTank.position.x - sp.x, playerTank.position.z - sp.z);
-        e.respawnAt(sp, yawToPlayer);
-      }
-    }
-
-    const shakeImpulse = effects.consumeCameraShake(camera.position);
-    let playerIntent = null;
-    if (!cameraOverrideActive) {
-      playerIntent = controller.update(dt, playerTank, world, allTanks, shakeImpulse);
-    }
-
-    const aiIntents = isDeployed ? enemyAI.update(dt, enemies, playerTank, world) : null;
-
-    playerTank.stepKinematics(dt, isDeployed ? playerIntent : null, world, allTanks, tankCallbacks);
-
-    for (let i = 0; i < enemies.length; i++) {
-      const e = enemies[i];
-      const eIntent = aiIntents ? (aiIntents.get(e.id) ?? null) : null;
-      e.stepKinematics(dt, eIntent, world, allTanks, tankCallbacks);
-    }
-
-    ballistics.update(dt, world, allTanks, handleDamage);
-    world.update(dt, playerTank.position);
-    effects.update(dt, camera);
+    stepSimulation(dt);
+    const playerTank = match.human;
 
     const vw = window.innerWidth;
     const vh = window.innerHeight;
@@ -508,17 +524,6 @@ async function bootstrap(): Promise<void> {
     if (hitMarkerTimer <= 0) hitMarkerKind = 'none';
     incomingDamageTimer = Math.max(0, incomingDamageTimer - dt);
 
-    let activeEnemyCount = 0;
-    for (let i = 0; i < enemies.length; i++) {
-      const e = enemies[i];
-      if (e.alive) activeEnemyCount++;
-      minimapEnemies[i].x = e.position.x;
-      minimapEnemies[i].z = e.position.z;
-      minimapEnemies[i].yaw = e.hullYaw;
-      minimapEnemies[i].alive = e.alive;
-      minimapEnemies[i].alerted = enemyAI.isAlerted(e.id);
-    }
-
     const reloadProg =
       1 - THREE.MathUtils.clamp(playerTank.cannonCooldown / playerTank.stats.cannonReloadTime, 0, 1);
 
@@ -535,7 +540,7 @@ async function bootstrap(): Promise<void> {
       respawnRemaining: playerTank.respawnTimer,
       speedKmh: playerTank.speed * 3.6,
       gearLabel: 'F',
-      throttle: playerIntent?.throttle ?? 0,
+      throttle: lastPlayerThrottle,
       hullYaw: playerTank.hullYaw,
       turretWorldYaw: playerTank.turretWorldYaw,
       cameraYaw: controller.cameraYaw,
@@ -550,6 +555,8 @@ async function bootstrap(): Promise<void> {
       kills,
       deaths,
       activeEnemies: activeEnemyCount,
+      score: match.score,
+      playerTeam: 'blue',
       fps: Math.round(fpsSmooth),
       hitMarker: {
         kind: hitMarkerKind,
@@ -559,21 +566,21 @@ async function bootstrap(): Promise<void> {
         fromWorldYaw: incomingDamageYaw,
         intensity: THREE.MathUtils.clamp(incomingDamageTimer, 0, 1),
       },
-      feedMessages: _emptyFeed,
+      feedMessages: match.feed,
       pointerLocked: isDeployed,
       sniperZoom: controller.sniperZoom,
       minimap: {
         playerX: playerTank.position.x,
         playerZ: playerTank.position.z,
         worldHalfSize: world.worldHalfSize,
-        enemies: minimapEnemies,
+        units: minimapUnits,
         obstacles: minimapObstacles,
       },
     };
 
     if (!cameraOverrideActive) {
       hud.update(telemetry, dt);
-      updateHostileMarkers(vw, vh);
+      updateUnitMarkers(vw, vh);
 
       if (isDeployed && !controller.hasTruePointerLock && !forceHideBriefing) {
         lockBannerEl.style.display = 'block';
@@ -664,15 +671,36 @@ async function bootstrap(): Promise<void> {
       programs: renderer.info.programs?.length ?? 0,
       geometries: renderer.info.memory.geometries,
       textures: renderer.info.memory.textures,
-      activeClass: playerTank.stats.vehicleClass,
-      activeShell: playerTank.activeShell.shortCode,
+      activeClass: match.human.stats.vehicleClass,
+      activeShell: match.human.activeShell.shortCode,
+    }),
+    fastForward: (seconds: number) => {
+      const steps = Math.max(1, Math.round(seconds * 30));
+      for (let i = 0; i < steps; i++) {
+        stepSimulation(1 / 30);
+      }
+    },
+    getMatchState: () => ({
+      score: { blue: match.score.blue, red: match.score.red },
+      friendlyFireEvents,
+      kills,
+      deaths,
+      tanks: allTanks.map((t) => ({
+        id: t.id,
+        team: t.team,
+        cls: t.stats.vehicleClass,
+        alive: t.alive,
+        hp: Math.round(t.hp),
+        x: Math.round(t.position.x * 10) / 10,
+        z: Math.round(t.position.z * 10) / 10,
+      })),
     }),
     runThreeAudit: () => {
       const results: Record<string, AuditIssue[]> = {};
-      const testVariants: TankVariant[] = ['player_normal', 'player_heavy', 'player_ifv'];
-      for (const v of testVariants) {
-        const tempTank = new Tank(`audit_${v}`, 'player', v, assets, new THREE.Vector3(0, 0, 0), 0);
-        results[v] = auditThreeObject(tempTank.root, {
+      const testClasses: VehicleClass[] = ['normal', 'heavy', 'ifv'];
+      for (const cls of testClasses) {
+        const tempTank = new Tank(`audit_${cls}`, 'blue', cls, assets, new THREE.Vector3(0, 0, 0), 0, false, 'Audit');
+        results[cls] = auditThreeObject(tempTank.root, {
           groundY: 0,
           maxGap: 0.02,
           camera,

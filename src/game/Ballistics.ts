@@ -453,7 +453,7 @@ export class BallisticsManager {
 
     const spec = shellSpec ?? shooter.activeShell;
     this._segDir.copy(muzzleDir).normalize();
-    if (shooter.faction === 'enemy') {
+    if (!shooter.isHuman) {
       if (Math.abs(this._segDir.y) < 0.92) {
         this._tangentA.crossVectors(this._segDir, this._up).normalize();
       } else {
@@ -528,12 +528,11 @@ export class BallisticsManager {
     this._tangentB.crossVectors(this._tangentA, this._coaxSpreadDir).normalize();
 
     const angle = Math.random() * Math.PI * 2;
-    const baseDisp =
-      shooter.faction === 'enemy'
-        ? 0.075
-        : beltSpec
-          ? beltSpec.dispersionRad
-          : MG_DISPERSION_RAD;
+    const baseDisp = !shooter.isHuman
+      ? 0.075
+      : beltSpec
+        ? beltSpec.dispersionRad
+        : MG_DISPERSION_RAD;
     const spread = Math.sqrt(Math.random()) * baseDisp;
     this._coaxSpreadDir
       .addScaledVector(this._tangentA, Math.cos(angle) * spread)
@@ -556,9 +555,9 @@ export class BallisticsManager {
     slot.vz = this._coaxSpreadDir.z * spd;
     slot.age = 0;
     slot.maxAge = 1.45;
-    slot.isPlayer = shooter.faction === 'player';
-    slot.directDamage =
-      shooter.faction === 'enemy' ? 0.15 : beltSpec ? beltSpec.directDamage : 2.8;
+    slot.isPlayer = shooter.isHuman;
+    const mgBaseDamage = beltSpec ? beltSpec.directDamage : 2.8;
+    slot.directDamage = shooter.isHuman ? mgBaseDamage : mgBaseDamage * 0.6;
     slot.splashDamage = beltSpec ? beltSpec.splashDamage : 0;
     slot.splashRadius = beltSpec ? beltSpec.splashRadius : 0;
     if (beltSpec) {
@@ -622,7 +621,7 @@ export class BallisticsManager {
       let bestTankDist = Infinity;
       for (let tIdx = 0; tIdx < tanks.length; tIdx++) {
         const tank = tanks[tIdx];
-        if (tank === s.shooter || !tank.alive) continue;
+        if (!tank.alive || tank.team === s.shooter?.team) continue;
         const tHit = intersectSegmentTank(this._prevPos, this._segDir, segLen, tank, 0.14, this._victimCenter);
         if (tHit !== null && tHit < bestTankDist) {
           bestTankDist = tHit;
@@ -741,7 +740,7 @@ export class BallisticsManager {
 
           for (let tIdx = 0; tIdx < tanks.length; tIdx++) {
             const tank = tanks[tIdx];
-            if (!tank.alive || tank === directVictim || tank === s.shooter) continue;
+            if (!tank.alive || tank === directVictim || tank.team === s.shooter?.team) continue;
             tank.getCenterMassWorld(this._splashCenter);
             const rawDist = this._hitPoint.distanceTo(this._splashCenter);
             const effDist = Math.max(0, rawDist - tank.stats.hitRadius * 0.35);
@@ -839,7 +838,7 @@ export class BallisticsManager {
       let bestTankDist = Infinity;
       for (let tIdx = 0; tIdx < tanks.length; tIdx++) {
         const tank = tanks[tIdx];
-        if (tank === m.shooter || !tank.alive) continue;
+        if (!tank.alive || tank.team === m.shooter?.team) continue;
         const tHit = intersectSegmentTank(this._prevPos, this._segDir, segLen, tank, 0.03, this._victimCenter);
         if (tHit !== null && tHit < bestTankDist) {
           bestTankDist = tHit;
@@ -908,7 +907,7 @@ export class BallisticsManager {
             // 30mm HEI-T splash damage to nearby living tanks
             for (let tIdx = 0; tIdx < tanks.length; tIdx++) {
               const tank = tanks[tIdx];
-              if (!tank.alive || tank === m.shooter) continue;
+              if (!tank.alive || tank.team === m.shooter?.team) continue;
               tank.getCenterMassWorld(this._splashCenter);
               const d = Math.max(0, worldHit.point.distanceTo(this._splashCenter) - tank.stats.hitRadius * 0.4);
               if (d < m.splashRadius) {

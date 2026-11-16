@@ -7,16 +7,16 @@ import type {
   ShellHitXRayReport,
   ShellSpec,
   TankEntity,
-  TankFaction,
   TankIntent,
   TankStats,
-  TankVariant,
+  Team,
   TerrainQuery,
+  VehicleClass,
   XRayModuleHitEntry,
   XRaySpallRay,
 } from './types';
 
-const NORMAL_SHELLS_PLAYER: readonly [ShellSpec, ShellSpec] = [
+const NORMAL_SHELLS: readonly [ShellSpec, ShellSpec] = [
   {
     id: 'mbt_apfsds',
     shortCode: 'APFSDS',
@@ -49,7 +49,7 @@ const NORMAL_SHELLS_PLAYER: readonly [ShellSpec, ShellSpec] = [
   },
 ];
 
-const HEAVY_SHELLS_PLAYER: readonly [ShellSpec, ShellSpec] = [
+const HEAVY_SHELLS: readonly [ShellSpec, ShellSpec] = [
   {
     id: 'heavy_apcbc',
     shortCode: '152 APCBC',
@@ -82,7 +82,7 @@ const HEAVY_SHELLS_PLAYER: readonly [ShellSpec, ShellSpec] = [
   },
 ];
 
-const IFV_BELTS_PLAYER: readonly [ShellSpec, ShellSpec] = [
+const IFV_BELTS: readonly [ShellSpec, ShellSpec] = [
   {
     id: 'ifv_apds',
     shortCode: '30MM APDS',
@@ -115,68 +115,8 @@ const IFV_BELTS_PLAYER: readonly [ShellSpec, ShellSpec] = [
   },
 ];
 
-const ENEMY_MBT_SHELLS: readonly [ShellSpec, ShellSpec] = [
-  {
-    ...NORMAL_SHELLS_PLAYER[0],
-    muzzleSpeed: 230,
-    directDamage: 12,
-    splashDamage: 3,
-    splashRadius: 4.5,
-    tracerColorRGB: [8.0, 2.6, 0.9],
-  },
-  {
-    ...NORMAL_SHELLS_PLAYER[1],
-    muzzleSpeed: 210,
-    directDamage: 10,
-    splashDamage: 5,
-    splashRadius: 6.5,
-    tracerColorRGB: [8.5, 3.2, 0.8],
-  },
-];
-
-const ENEMY_HEAVY_SHELLS: readonly [ShellSpec, ShellSpec] = [
-  {
-    ...HEAVY_SHELLS_PLAYER[0],
-    muzzleSpeed: 215,
-    directDamage: 16,
-    splashDamage: 5,
-    splashRadius: 5.5,
-    tracerColorRGB: [8.8, 2.4, 0.7],
-  },
-  {
-    ...HEAVY_SHELLS_PLAYER[1],
-    muzzleSpeed: 190,
-    directDamage: 14,
-    splashDamage: 7,
-    splashRadius: 7.5,
-    tracerColorRGB: [9.0, 2.8, 0.7],
-  },
-];
-
-const ENEMY_IFV_BELTS: readonly [ShellSpec, ShellSpec] = [
-  {
-    ...IFV_BELTS_PLAYER[0],
-    muzzleSpeed: 420,
-    directDamage: 0.2,
-    splashDamage: 0,
-    splashRadius: 0,
-    tracerColorRGB: [7.5, 1.8, 0.5],
-    dispersionRad: 0.075,
-  },
-  {
-    ...IFV_BELTS_PLAYER[1],
-    muzzleSpeed: 390,
-    directDamage: 0.2,
-    splashDamage: 0.1,
-    splashRadius: 1.5,
-    tracerColorRGB: [8.0, 2.2, 0.5],
-    dispersionRad: 0.085,
-  },
-];
-
-export const TANK_STATS_BY_VARIANT: Record<TankVariant, TankStats> = {
-  player_normal: {
-    variant: 'player_normal',
+export const TANK_STATS: Record<VehicleClass, TankStats> = {
+  normal: {
     vehicleClass: 'normal',
     displayName: 'NORMAL MBT',
     maxHp: 1000,
@@ -193,11 +133,11 @@ export const TANK_STATS_BY_VARIANT: Record<TankVariant, TankStats> = {
     gunMaxPitch: 0.36,
     hasMainCannon: true,
     cannonReloadTime: 3.6,
-    shellMuzzleSpeed: NORMAL_SHELLS_PLAYER[0].muzzleSpeed,
-    shellDirectDamage: NORMAL_SHELLS_PLAYER[0].directDamage,
-    shellSplashDamage: NORMAL_SHELLS_PLAYER[0].splashDamage,
-    shellSplashRadius: NORMAL_SHELLS_PLAYER[0].splashRadius,
-    shells: NORMAL_SHELLS_PLAYER,
+    shellMuzzleSpeed: NORMAL_SHELLS[0].muzzleSpeed,
+    shellDirectDamage: NORMAL_SHELLS[0].directDamage,
+    shellSplashDamage: NORMAL_SHELLS[0].splashDamage,
+    shellSplashRadius: NORMAL_SHELLS[0].splashRadius,
+    shells: NORMAL_SHELLS,
     recoilImpulse: 0.10,
     hitRadius: 2.65,
     collisionRadius: 2.75,
@@ -205,8 +145,7 @@ export const TANK_STATS_BY_VARIANT: Record<TankVariant, TankStats> = {
     infiniteMG: false,
     mgFireInterval: 0.085,
   },
-  player_heavy: {
-    variant: 'player_heavy',
+  heavy: {
     vehicleClass: 'heavy',
     displayName: 'HEAVY TANK',
     maxHp: 1650,
@@ -223,11 +162,11 @@ export const TANK_STATS_BY_VARIANT: Record<TankVariant, TankStats> = {
     gunMaxPitch: 0.34,
     hasMainCannon: true,
     cannonReloadTime: 5.2,
-    shellMuzzleSpeed: HEAVY_SHELLS_PLAYER[0].muzzleSpeed,
-    shellDirectDamage: HEAVY_SHELLS_PLAYER[0].directDamage,
-    shellSplashDamage: HEAVY_SHELLS_PLAYER[0].splashDamage,
-    shellSplashRadius: HEAVY_SHELLS_PLAYER[0].splashRadius,
-    shells: HEAVY_SHELLS_PLAYER,
+    shellMuzzleSpeed: HEAVY_SHELLS[0].muzzleSpeed,
+    shellDirectDamage: HEAVY_SHELLS[0].directDamage,
+    shellSplashDamage: HEAVY_SHELLS[0].splashDamage,
+    shellSplashRadius: HEAVY_SHELLS[0].splashRadius,
+    shells: HEAVY_SHELLS,
     recoilImpulse: 0.15,
     hitRadius: 2.85,
     collisionRadius: 2.9,
@@ -235,8 +174,7 @@ export const TANK_STATS_BY_VARIANT: Record<TankVariant, TankStats> = {
     infiniteMG: false,
     mgFireInterval: 0.09,
   },
-  player_ifv: {
-    variant: 'player_ifv',
+  ifv: {
     vehicleClass: 'ifv',
     displayName: 'IFV (AUTO-MG)',
     maxHp: 780,
@@ -253,107 +191,17 @@ export const TANK_STATS_BY_VARIANT: Record<TankVariant, TankStats> = {
     gunMaxPitch: 0.48,
     hasMainCannon: false,
     cannonReloadTime: 0.09,
-    shellMuzzleSpeed: IFV_BELTS_PLAYER[0].muzzleSpeed,
-    shellDirectDamage: IFV_BELTS_PLAYER[0].directDamage,
-    shellSplashDamage: IFV_BELTS_PLAYER[0].splashDamage,
-    shellSplashRadius: IFV_BELTS_PLAYER[0].splashRadius,
-    shells: IFV_BELTS_PLAYER,
+    shellMuzzleSpeed: IFV_BELTS[0].muzzleSpeed,
+    shellDirectDamage: IFV_BELTS[0].directDamage,
+    shellSplashDamage: IFV_BELTS[0].splashDamage,
+    shellSplashRadius: IFV_BELTS[0].splashRadius,
+    shells: IFV_BELTS,
     recoilImpulse: 0.022,
     hitRadius: 2.35,
     collisionRadius: 2.3,
     hasCoaxMG: true,
     infiniteMG: true,
     mgFireInterval: 0.088,
-  },
-  enemy_normal: {
-    variant: 'enemy_normal',
-    vehicleClass: 'normal',
-    displayName: 'OPFOR MBT',
-    maxHp: 760,
-    armorDamageMult: 1.0,
-    maxForwardSpeed: 6.2,
-    maxReverseSpeed: 2.8,
-    forwardAccel: 3.6,
-    reverseAccel: 2.8,
-    brakeDecel: 14.0,
-    hullTurnRate: 0.44,
-    turretTurnRate: 0.28,
-    gunElevateRate: 0.28,
-    gunMinPitch: -0.11,
-    gunMaxPitch: 0.30,
-    hasMainCannon: true,
-    cannonReloadTime: 9.5,
-    shellMuzzleSpeed: ENEMY_MBT_SHELLS[0].muzzleSpeed,
-    shellDirectDamage: 12,
-    shellSplashDamage: 4,
-    shellSplashRadius: 5.0,
-    shells: ENEMY_MBT_SHELLS,
-    recoilImpulse: 0.10,
-    hitRadius: 2.75,
-    collisionRadius: 2.75,
-    hasCoaxMG: true,
-    infiniteMG: false,
-    mgFireInterval: 0.11,
-  },
-  enemy_heavy: {
-    variant: 'enemy_heavy',
-    vehicleClass: 'heavy',
-    displayName: 'OPFOR HEAVY',
-    maxHp: 1250,
-    armorDamageMult: 0.72,
-    maxForwardSpeed: 4.5,
-    maxReverseSpeed: 2.1,
-    forwardAccel: 2.8,
-    reverseAccel: 2.2,
-    brakeDecel: 14.0,
-    hullTurnRate: 0.34,
-    turretTurnRate: 0.22,
-    gunElevateRate: 0.24,
-    gunMinPitch: -0.10,
-    gunMaxPitch: 0.28,
-    hasMainCannon: true,
-    cannonReloadTime: 12.0,
-    shellMuzzleSpeed: ENEMY_HEAVY_SHELLS[0].muzzleSpeed,
-    shellDirectDamage: 16,
-    shellSplashDamage: 5,
-    shellSplashRadius: 6.0,
-    shells: ENEMY_HEAVY_SHELLS,
-    recoilImpulse: 0.14,
-    hitRadius: 2.9,
-    collisionRadius: 2.9,
-    hasCoaxMG: true,
-    infiniteMG: false,
-    mgFireInterval: 0.12,
-  },
-  enemy_ifv: {
-    variant: 'enemy_ifv',
-    vehicleClass: 'ifv',
-    displayName: 'OPFOR IFV',
-    maxHp: 480,
-    armorDamageMult: 1.25,
-    maxForwardSpeed: 7.4,
-    maxReverseSpeed: 3.4,
-    forwardAccel: 4.6,
-    reverseAccel: 3.5,
-    brakeDecel: 16.0,
-    hullTurnRate: 0.56,
-    turretTurnRate: 0.42,
-    gunElevateRate: 0.38,
-    gunMinPitch: -0.14,
-    gunMaxPitch: 0.42,
-    hasMainCannon: false,
-    cannonReloadTime: 0.16,
-    shellMuzzleSpeed: ENEMY_IFV_BELTS[0].muzzleSpeed,
-    shellDirectDamage: 0.2,
-    shellSplashDamage: 0,
-    shellSplashRadius: 0,
-    shells: ENEMY_IFV_BELTS,
-    recoilImpulse: 0.02,
-    hitRadius: 2.4,
-    collisionRadius: 2.3,
-    hasCoaxMG: true,
-    infiniteMG: true,
-    mgFireInterval: 0.16,
   },
 };
 
@@ -477,8 +325,9 @@ const _crushDir = new THREE.Vector2();
 
 export class Tank implements TankEntity {
   public readonly id: string;
-  public readonly faction: TankFaction;
-  public readonly variant: TankVariant;
+  public readonly team: Team;
+  public readonly isHuman: boolean;
+  public readonly callsign: string;
   public readonly stats: TankStats;
   public readonly root: THREE.Group;
 
@@ -493,6 +342,7 @@ export class Tank implements TankEntity {
   public readonly maxHp: number;
   public alive = true;
   public respawnTimer = 0;
+  private spawnProtect = 0;
 
   public cannonCooldown = 0;
   public mgCooldown = 0;
@@ -524,20 +374,23 @@ export class Tank implements TankEntity {
 
   constructor(
     id: string,
-    faction: TankFaction,
-    variant: TankVariant,
+    team: Team,
+    vehicleClass: VehicleClass,
     assets: LoadedGameAssets,
     spawnPos: THREE.Vector3,
-    spawnYaw: number
+    spawnYaw: number,
+    isHuman: boolean,
+    callsign: string
   ) {
     this.id = id;
-    this.faction = faction;
-    this.variant = variant;
-    this.stats = TANK_STATS_BY_VARIANT[variant];
+    this.team = team;
+    this.isHuman = isHuman;
+    this.callsign = callsign;
+    this.stats = TANK_STATS[vehicleClass];
     this.maxHp = this.stats.maxHp;
     this.hp = this.maxHp;
 
-    this.rig = instantiateTankRig(assets, variant);
+    this.rig = instantiateTankRig(assets, vehicleClass, team);
     this.root = this.rig.root;
 
     for (const mesh of this.rig.hullMeshes) {
@@ -608,6 +461,7 @@ export class Tank implements TankEntity {
 
     this.cannonCooldown = Math.max(0, this.cannonCooldown - safeDt);
     this.mgCooldown = Math.max(0, this.mgCooldown - safeDt);
+    this.spawnProtect = Math.max(0, this.spawnProtect - safeDt);
 
     if (this.trackRepairTimer > 0) {
       this.trackRepairTimer = Math.max(0, this.trackRepairTimer - safeDt);
@@ -1040,11 +894,11 @@ export class Tank implements TankEntity {
     weapon: 'cannon' | 'mg' = 'cannon',
     shellSpec?: ShellSpec
   ): boolean {
-    if (!this.alive || amount <= 0) return false;
+    if (!this.alive || amount <= 0 || this.spawnProtect > 0) return false;
 
     const scaledAmt = amount * this.stats.armorDamageMult;
 
-    if (this.faction === 'enemy' && shellDirWorld) {
+    if (shellDirWorld) {
       return this.applyLocationalPenetration(scaledAmt, hitWorldPos, shellDirWorld, weapon, shellSpec);
     }
 
@@ -1391,7 +1245,7 @@ export class Tank implements TankEntity {
   private killTank(ammoBlowout: boolean): void {
     this.alive = false;
     this.engineFireTimer = 0;
-    this.respawnTimer = this.faction === 'player' ? 3.0 : 6.0;
+    this.respawnTimer = this.isHuman ? 5.0 : 7.0;
     this.applyWreckAppearance(true);
     this.rig.turretPivot.rotation.z = (Math.random() - 0.5) * (ammoBlowout ? 0.45 : 0.22);
     this.rig.turretPivot.position.y = this.rig.turretRestPos.y + (ammoBlowout ? 0.32 : 0.08);
@@ -1409,6 +1263,7 @@ export class Tank implements TankEntity {
     this.hp = this.maxHp;
     this.alive = true;
     this.respawnTimer = 0;
+    this.spawnProtect = 3.0;
     this.cannonCooldown = 0;
     this.mgCooldown = 0;
     this.mgHeat = 0;

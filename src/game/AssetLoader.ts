@@ -3,7 +3,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
-import type { TankVariant } from './types';
+import type { Team, VehicleClass } from './types';
 
 export type ModelKey =
   | 'player_mbt_lod1'
@@ -416,13 +416,17 @@ function prepareModelMaterialsAndShadows(root: THREE.Object3D, key: ModelKey): v
 
 /**
  * Builds grounded (`min.y === 0`), articulated rigs for all 3 vehicle classes:
- * - Normal MBT (`player_normal` / `enemy_normal`)
- * - Heavy Tank (`player_heavy` / `enemy_heavy` — ERA reactive armor wedges, 152mm heavy barrel & muzzle brake, twin rear fuel drums)
- * - Infantry Fighting Vehicle (`player_ifv` / `enemy_ifv` — agile tracked IFV chassis + rapid-fire 30mm chain-gun unmanned turret)
+ * - Normal MBT (`normal`)
+ * - Heavy Tank (`heavy` — ERA reactive armor wedges, 152mm heavy barrel & muzzle brake, twin rear fuel drums)
+ * - Infantry Fighting Vehicle (`ifv` — agile tracked IFV chassis + rapid-fire 30mm chain-gun unmanned turret)
  */
-export function instantiateTankRig(assets: LoadedGameAssets, variant: TankVariant): InstantiatedTankRig {
+export function instantiateTankRig(
+  assets: LoadedGameAssets,
+  vehicleClass: VehicleClass,
+  team: Team
+): InstantiatedTankRig {
   const root = new THREE.Group();
-  root.name = `tank_${variant}`;
+  root.name = `tank_${team}_${vehicleClass}`;
 
   const hullTiltGroup = new THREE.Group();
   hullTiltGroup.name = 'hull_tilt_group';
@@ -432,9 +436,9 @@ export function instantiateTankRig(assets: LoadedGameAssets, variant: TankVarian
   const wheels: WheelNodeBinding[] = [];
   const hullMeshes: THREE.Mesh[] = [];
 
-  const isPlayer = variant.startsWith('player_');
-  const isHeavy = variant.endsWith('_heavy');
-  const isIFV = variant.endsWith('_ifv');
+  const isBlue = team === 'blue';
+  const isHeavy = vehicleClass === 'heavy';
+  const isIFV = vehicleClass === 'ifv';
 
   // -------------------------------------------------------------------------
   // CLASS 3: INFANTRY FIGHTING VEHICLE (Weathered PBR Tracked Chassis + Unmanned 30mm RWS Turret)
@@ -449,7 +453,7 @@ export function instantiateTankRig(assets: LoadedGameAssets, variant: TankVarian
       origTurret.parent?.remove(origTurret);
     }
 
-    cloneInstanceMaterials(visualRoot, hullMeshes, isPlayer ? 'nato_ifv' : 'opfor_ifv');
+    cloneInstanceMaterials(visualRoot, hullMeshes, isBlue ? 'nato_ifv' : 'opfor_ifv');
 
     visualRoot.updateMatrixWorld(true);
     const restBox = new THREE.Box3().setFromObject(visualRoot);
@@ -458,7 +462,7 @@ export function instantiateTankRig(assets: LoadedGameAssets, variant: TankVarian
     }
     hullTiltGroup.add(visualRoot);
 
-    const hullTone = isPlayer ? '#3c4832' : '#584d3b';
+    const hullTone = isBlue ? '#3c4832' : '#584d3b';
     const armorMat = new THREE.MeshStandardMaterial({
       color: new THREE.Color(hullTone),
       roughness: 0.56,
@@ -476,7 +480,7 @@ export function instantiateTankRig(assets: LoadedGameAssets, variant: TankVarian
     applyRealisticArmorShader(gunSteelMat, 'ifv-steel');
 
     const opticGlassMat = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(isPlayer ? '#1b4a5e' : '#5e221b'),
+      color: new THREE.Color(isBlue ? '#1b4a5e' : '#5e221b'),
       roughness: 0.12,
       metalness: 0.9,
       envMapIntensity: 1.4,
@@ -517,7 +521,7 @@ export function instantiateTankRig(assets: LoadedGameAssets, variant: TankVarian
     turretPivot.add(ringBase, turretCore, podL, podR, opticHousing, opticLens);
     hullMeshes.push(ringBase, turretCore, podL, podR, opticHousing);
 
-    if (!isPlayer) {
+    if (!isBlue) {
       const opforMat = new THREE.MeshStandardMaterial({
         color: new THREE.Color('#a62820'),
         roughness: 0.65,
@@ -600,10 +604,10 @@ export function instantiateTankRig(assets: LoadedGameAssets, variant: TankVarian
   visualRoot.name = isHeavy ? 'heavy_mbt_visual' : 'normal_mbt_visual';
 
   const palette = isHeavy
-    ? isPlayer
+    ? isBlue
       ? 'nato_heavy'
       : 'opfor_heavy'
-    : isPlayer
+    : isBlue
       ? 'nato_mbt'
       : 'opfor_mbt';
   cloneInstanceMaterials(visualRoot, hullMeshes, palette);
@@ -633,7 +637,7 @@ export function instantiateTankRig(assets: LoadedGameAssets, variant: TankVarian
   // Heavy Tank Add-On Package: Sloped ERA Cheek Wedges + Heavy Side-Skirt ERA + 152mm Gun Collar & Muzzle Brake + Twin Fuel Drums
   if (isHeavy) {
     const eraMat = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(isPlayer ? '#272f29' : '#3a332b'),
+      color: new THREE.Color(isBlue ? '#272f29' : '#3a332b'),
       roughness: 0.58,
       metalness: 0.34,
       envMapIntensity: 1.1,
@@ -700,7 +704,7 @@ export function instantiateTankRig(assets: LoadedGameAssets, variant: TankVarian
   coaxNode.position.set(0.24, 0.03, 1.45);
   gunRecoilGroup.add(coaxNode);
 
-  if (!isPlayer) {
+  if (!isBlue) {
     const markerMat = new THREE.MeshStandardMaterial({
       color: new THREE.Color('#a62820'),
       roughness: 0.68,
