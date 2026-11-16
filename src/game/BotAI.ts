@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { GRAVITY, solveBallisticAim } from './Ballistics';
+import { GRAVITY, solveBallisticAim, solveRocketAim } from './Ballistics';
 import type { TankEntity, TankIntent, Team, TerrainQuery, VehicleClass } from './types';
 
 export type BotAIState = 'advance' | 'engage_approach' | 'strafe_orbit' | 'evade_reverse';
@@ -42,6 +42,8 @@ function aimWanderRadians(_cls: VehicleClass): number {
 function idealOrbitDistForClass(cls: VehicleClass): number {
   if (cls === 'heavy') return 112;
   if (cls === 'ifv') return 78;
+  if (cls === 'rocket') return 185; // standoff artillery band 140-230m
+  if (cls === 'humvee') return 92;
   return 96;
 }
 
@@ -73,6 +75,7 @@ interface BotBrain {
   alertTimer: number;
   losLockTimer: number;
   mgCycleTimer: number;
+  rocketSolveTimer: number;
 
   smoothedMoveYaw: number;
   stuckAccum: number;
@@ -168,6 +171,7 @@ export class BotAIManager {
         alertTimer: 0,
         losLockTimer: 0,
         mgCycleTimer: seed * 2.5,
+        rocketSolveTimer: seed * 0.5,
         smoothedMoveYaw: bot.hullYaw,
         stuckAccum: 0,
         unstuckTimer: 0,
@@ -767,18 +771,42 @@ export class BotAIManager {
       bot.getMuzzleWorld(this._muzzlePos, this._muzzleDir);
       target.getCenterMassWorld(this._targetCenter);
 
-      // Iterative lead + gravity drop solver
-      solveBallisticAim(
-        this._muzzlePos,
-        this._targetCenter,
-        brain.smoothedTargetVel,
-        bot.stats.shellMuzzleSpeed,
-        GRAVITY,
-        this._aimPoint
-      );
+      if (bot.stats.salvoSize) {
+        // Rocket artillery: re-solve launch pitch (bisection on the shared
+        // projectile sim) at most every 0.5s, then aim along that solution.
+        brain.rocketSolveTimer -= safeDt;
+        if (brain.rocketSolveTimer <= 0) {
+          brain.rocketSolveTimer = 0.5;
+          const spec = bot.activeShell.rocket ? bot.activeShell : bot.stats.shells[0];
+          solveRocketAim(
+            this._muzzlePos,
+            this._targetCenter,
+            brain.smoothedTargetVel,
+            spec,
+            bot.stats.gunMinPitch,
+            bot.stats.gunMaxPitch,
+            this._aimPoint
+          );
+        } else {
+          // Keep last solution: aim along current bore toward predicted point
+          this._aimPoint.copy(this._muzzlePos).addScaledVector(this._muzzleDir, 160);
+        }
+      } else {
+        // Iterative lead + gravity drop solver
+        solveBallisticAim(
+          this._muzzlePos,
+          this._targetCenter,
+          brain.smoothedTargetVel,
+          bot.stats.shellMuzzleSpeed,
+          GRAVITY,
+          this._aimPoint
+        );
+      }
 
-      // Add smooth humanized angular aim wander
-      const baseWanderRad = aimWanderRadians(bot.stats.vehicleClass);
+      // Add smooth humanized angular aim wander (rockets need a tight solution)
+      const baseWanderRad = bot.stats.salvoSize
+        ? 0.0035
+        : aimWanderRadians(bot.stats.vehicleClass);
       const movePenaltyRad =
         0.008 * Math.min(1, Math.abs(bot.speed) / Math.max(1, bot.stats.maxForwardSpeed));
       const totalWanderRad = baseWanderRad + movePenaltyRad;
@@ -834,13 +862,23 @@ export class BotAIManager {
       // Periodic AI shell type variation (switches between AP & HE occasionally)
       intent.selectShell = Math.sin(this.clock * 0.08 + brain.seed * 10) > 0.45 ? 1 : 0;
 
-      // Forgiving bot fire: requires 2.2s continuous LOS lock, range < 190m
-      intent.fireCannon =
-        bot.stats.hasMainCannon &&
-        losClear &&
-        brain.losLockTimer >= 2.2 &&
-        distToTarget < 190 &&
-        boreAngle <= 0.16;
+      if (bot.stats.salvoSize) {
+        // Rocket launcher: standoff band, tight bore alignment (0.05 rad)
+        intent.fireCannon =
+          losClear &&
+          brain.losLockTimer >= 2.2 &&
+          distToTarget > 90 &&
+          distToTarget < 260 &&
+          boreAngle <= 0.05;
+      } else {
+        // Forgiving bot fire: requires 2.2s continuous LOS lock, range < 190m
+        intent.fireCannon =
+          bot.stats.hasMainCannon &&
+          losClear &&
+          brain.losLockTimer >= 2.2 &&
+          distToTarget < 190 &&
+          boreAngle <= 0.16;
+      }
 
       // Occasional short coaxial MG / IFV autocannon tracer bursts
       const mgPeriod = bot.stats.vehicleClass === 'ifv' ? 4.8 : 6.5;

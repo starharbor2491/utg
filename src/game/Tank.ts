@@ -115,6 +115,74 @@ const IFV_BELTS: readonly [ShellSpec, ShellSpec] = [
   },
 ];
 
+const HUMVEE_50CAL: readonly [ShellSpec, ShellSpec] = [
+  {
+    id: 'humvee_127ap',
+    shortCode: '12.7 AP',
+    displayName: '12.7MM M2 AP',
+    muzzleSpeed: 890,
+    directDamage: 9,
+    splashDamage: 0,
+    splashRadius: 0,
+    penetrationDepth: 1.2,
+    spallCount: 3,
+    spallWeight: 0.3,
+    explosionScale: 0.18,
+    tracerColorRGB: [7.5, 6.8, 4.5],
+    dispersionRad: 0.014,
+  },
+  {
+    id: 'humvee_127api',
+    shortCode: '12.7 API-T',
+    displayName: '12.7MM M2 API-T INCENDIARY',
+    muzzleSpeed: 890,
+    directDamage: 7,
+    splashDamage: 6,
+    splashRadius: 2.4,
+    penetrationDepth: 0.9,
+    spallCount: 4,
+    spallWeight: 0.28,
+    explosionScale: 0.3,
+    tracerColorRGB: [9.0, 4.2, 1.0],
+    dispersionRad: 0.016,
+  },
+];
+
+const ROCKET_SHELLS: readonly [ShellSpec, ShellSpec] = [
+  {
+    id: 'rocket_he',
+    shortCode: '227 HE',
+    displayName: '227MM HYDRA 70 HE',
+    muzzleSpeed: 70,
+    directDamage: 520,
+    splashDamage: 380,
+    splashRadius: 13,
+    penetrationDepth: 1.4,
+    spallCount: 22,
+    spallWeight: 0.5,
+    explosionScale: 1.8,
+    tracerColorRGB: [9.0, 5.5, 1.4],
+    dispersionRad: 0.01,
+    rocket: { burnTime: 1.2, thrustAccel: 100 },
+  },
+  {
+    id: 'rocket_at',
+    shortCode: '227 AT',
+    displayName: '227MM HYDRA 70 AT',
+    muzzleSpeed: 70,
+    directDamage: 760,
+    splashDamage: 120,
+    splashRadius: 5,
+    penetrationDepth: 3.2,
+    spallCount: 14,
+    spallWeight: 0.55,
+    explosionScale: 1.2,
+    tracerColorRGB: [5.5, 7.5, 9.5],
+    dispersionRad: 0.01,
+    rocket: { burnTime: 1.2, thrustAccel: 100 },
+  },
+];
+
 export const TANK_STATS: Record<VehicleClass, TankStats> = {
   normal: {
     vehicleClass: 'normal',
@@ -144,6 +212,9 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
     hasCoaxMG: true,
     infiniteMG: false,
     mgFireInterval: 0.085,
+    drive: 'tracked',
+    hullHalfWidth: 1.45,
+    hullHalfLength: 2.65,
   },
   heavy: {
     vehicleClass: 'heavy',
@@ -173,6 +244,9 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
     hasCoaxMG: true,
     infiniteMG: false,
     mgFireInterval: 0.09,
+    drive: 'tracked',
+    hullHalfWidth: 1.5,
+    hullHalfLength: 2.7,
   },
   ifv: {
     vehicleClass: 'ifv',
@@ -202,6 +276,77 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
     hasCoaxMG: true,
     infiniteMG: true,
     mgFireInterval: 0.088,
+    drive: 'tracked',
+    hullHalfWidth: 1.55,
+    hullHalfLength: 3.7,
+  },
+  humvee: {
+    vehicleClass: 'humvee',
+    displayName: 'HUMVEE (M2 .50CAL)',
+    maxHp: 420,
+    armorDamageMult: 1.5,
+    maxForwardSpeed: 30, // ~108 km/h gun truck
+    maxReverseSpeed: 9,
+    forwardAccel: 9,
+    reverseAccel: 6,
+    brakeDecel: 24,
+    hullTurnRate: 0.9,
+    turretTurnRate: 2.2,
+    gunElevateRate: 1.4,
+    gunMinPitch: -0.2,
+    gunMaxPitch: 0.6,
+    hasMainCannon: false,
+    cannonReloadTime: 0.09,
+    shellMuzzleSpeed: HUMVEE_50CAL[0].muzzleSpeed,
+    shellDirectDamage: HUMVEE_50CAL[0].directDamage,
+    shellSplashDamage: HUMVEE_50CAL[0].splashDamage,
+    shellSplashRadius: HUMVEE_50CAL[0].splashRadius,
+    shells: HUMVEE_50CAL,
+    recoilImpulse: 0.02,
+    hitRadius: 1.9,
+    collisionRadius: 2.0,
+    hasCoaxMG: true,
+    infiniteMG: true,
+    mgFireInterval: 0.1,
+    drive: 'wheeled',
+    hullHalfWidth: 1.2,
+    hullHalfLength: 2.6,
+    wheelbase: 3.05,
+  },
+  rocket: {
+    vehicleClass: 'rocket',
+    displayName: 'MLRS ROCKET ARTY',
+    maxHp: 520,
+    armorDamageMult: 1.35,
+    maxForwardSpeed: 22, // ~79 km/h launcher truck
+    maxReverseSpeed: 6,
+    forwardAccel: 7,
+    reverseAccel: 4,
+    brakeDecel: 20,
+    hullTurnRate: 0.7,
+    turretTurnRate: 0.7,
+    gunElevateRate: 0.35,
+    gunMinPitch: 0,
+    gunMaxPitch: 1.0,
+    hasMainCannon: true,
+    cannonReloadTime: 14,
+    salvoSize: 6,
+    salvoInterval: 0.28,
+    shellMuzzleSpeed: ROCKET_SHELLS[0].muzzleSpeed,
+    shellDirectDamage: ROCKET_SHELLS[0].directDamage,
+    shellSplashDamage: ROCKET_SHELLS[0].splashDamage,
+    shellSplashRadius: ROCKET_SHELLS[0].splashRadius,
+    shells: ROCKET_SHELLS,
+    recoilImpulse: 0.1,
+    hitRadius: 2.9,
+    collisionRadius: 2.6,
+    hasCoaxMG: false,
+    infiniteMG: false,
+    mgFireInterval: 0.1,
+    drive: 'wheeled',
+    hullHalfWidth: 1.15,
+    hullHalfLength: 3.4,
+    wheelbase: 4.4,
   },
 };
 
@@ -364,6 +509,7 @@ export class Tank implements TankEntity {
 
   private suspPitch = 0;
   private suspRoll = 0;
+  private suspRollTarget = 0;
   private suspPitchVel = 0;
   private suspRollVel = 0;
   private prevSpeed = 0;
@@ -371,6 +517,17 @@ export class Tank implements TankEntity {
   private barrelRecoilVel = 0;
   private dustAccum = 0;
   private wreckSmokeAccum = 0;
+
+  // Wheeled drive state
+  private steerAngle = 0;
+  private wheelDistAccum = 0;
+
+  // Rocket pod salvo state
+  private salvoActive = false;
+  private salvoTimer = 0;
+  private salvoFired = 0;
+  private _rocketsLeft = 0;
+  private salvoSpec: ShellSpec | null = null;
 
   constructor(
     id: string,
@@ -408,6 +565,15 @@ export class Tank implements TankEntity {
 
   public get activeShell(): ShellSpec {
     return this.stats.shells[this.selectedShellIndex];
+  }
+
+  /** Rocket pods: rounds remaining in the current pod (0 once empty until reload finishes). */
+  public get rocketsLeft(): number {
+    return this.stats.salvoSize ? this._rocketsLeft : 0;
+  }
+
+  public get salvoInProgress(): boolean {
+    return this.salvoActive;
   }
 
   public get turretWorldYaw(): number {
@@ -579,9 +745,28 @@ export class Tank implements TankEntity {
     const roadBoost = 1.0 + 0.08 * world.getRoadFactorAt(this.position.x, this.position.z);
     const effectiveSpeed = this.speed * roadBoost;
 
-    const reverseSteerSign = this.speed < -0.6 ? -1 : 1;
-    const angularVel = steer * reverseSteerSign * this.stats.hullTurnRate;
-    this.hullYaw = wrapAnglePi(this.hullYaw + angularVel * safeDt);
+    const isWheeled = this.stats.drive === 'wheeled';
+    let angularVel = 0;
+    let lateralAccel = 0;
+
+    if (isWheeled) {
+      // Bicycle model: smoothed steer angle, speed-dependent max steer, no turn-on-spot
+      const speedFrac = Math.min(1, Math.abs(this.speed) / Math.max(1, this.stats.maxForwardSpeed));
+      const maxSteer = THREE.MathUtils.lerp(0.6, 0.25, speedFrac);
+      const steerTarget = steer * maxSteer;
+      this.steerAngle += (steerTarget - this.steerAngle) * (1 - Math.exp(-10 * safeDt));
+      const wheelbase = this.stats.wheelbase ?? 3.0;
+      angularVel = (this.speed / wheelbase) * Math.tan(this.steerAngle);
+      lateralAccel = angularVel * this.speed;
+      this.hullYaw = wrapAnglePi(this.hullYaw + angularVel * safeDt);
+
+      // Body roll from lateral acceleration (consumed by alignHullToTerrain's spring)
+      this.suspRollTarget = THREE.MathUtils.clamp(-lateralAccel * 0.0065, -0.07, 0.07);
+    } else {
+      const reverseSteerSign = this.speed < -0.6 ? -1 : 1;
+      angularVel = steer * reverseSteerSign * this.stats.hullTurnRate;
+      this.hullYaw = wrapAnglePi(this.hullYaw + angularVel * safeDt);
+    }
 
     const sinH = Math.sin(this.hullYaw);
     const cosH = Math.cos(this.hullYaw);
@@ -605,13 +790,24 @@ export class Tank implements TankEntity {
     const longitudinalAccel = (this.speed - this.prevSpeed) / Math.max(safeDt, 0.001);
     this.alignHullToTerrain(world, safeDt, longitudinalAccel);
 
-    if (this.rig.wheels.length > 0 && (Math.abs(effectiveSpeed) > 0.01 || Math.abs(angularVel) > 0.01)) {
-      const halfTrack = 1.45;
-      const vLeft = effectiveSpeed - angularVel * halfTrack;
-      const vRight = effectiveSpeed + angularVel * halfTrack;
-      for (const w of this.rig.wheels) {
-        const trackV = w.side === 'L' ? vLeft : vRight;
-        w.node.rotation.x += (trackV * safeDt) / w.radius;
+    if (this.rig.wheels.length > 0) {
+      if (isWheeled) {
+        // Wheel spin = distance travelled / radius; front steer nodes yaw with steerAngle
+        this.wheelDistAccum += effectiveSpeed * safeDt;
+        for (const w of this.rig.wheels) {
+          w.node.rotation.x = this.wheelDistAccum / w.radius;
+        }
+        for (const s of this.rig.steerNodes) {
+          s.rotation.y = this.steerAngle;
+        }
+      } else if (Math.abs(effectiveSpeed) > 0.01 || Math.abs(angularVel) > 0.01) {
+        const halfTrack = 1.45;
+        const vLeft = effectiveSpeed - angularVel * halfTrack;
+        const vRight = effectiveSpeed + angularVel * halfTrack;
+        for (const w of this.rig.wheels) {
+          const trackV = w.side === 'L' ? vLeft : vRight;
+          w.node.rotation.x += (trackV * safeDt) / w.radius;
+        }
       }
     }
 
@@ -623,19 +819,27 @@ export class Tank implements TankEntity {
         const intensity = THREE.MathUtils.clamp(absSpd / this.stats.maxForwardSpeed, 0.2, 0.9);
         const rightX = -cosH;
         const rightZ = sinH;
-        const rearDist = -3.2 * Math.sign(effectiveSpeed || 1);
-        _tmpVecA.set(
-          this.position.x + sinH * rearDist + rightX * 1.4,
-          this.position.y + 0.25,
-          this.position.z + cosH * rearDist + rightZ * 1.4
-        );
-        callbacks.onTrackDust(_tmpVecA, intensity);
+        const rearDist = isWheeled
+          ? -this.stats.hullHalfLength * 0.62
+          : -3.2 * Math.sign(effectiveSpeed || 1);
+        const sideOff = isWheeled ? this.stats.hullHalfWidth * 0.8 : 1.4;
+        const sides = isWheeled ? 2 : 1;
+        for (let sIdx = 0; sIdx < sides; sIdx++) {
+          const sideSign = sides === 2 ? (sIdx === 0 ? -1 : 1) : 1;
+          _tmpVecA.set(
+            this.position.x + sinH * rearDist + rightX * sideOff * sideSign,
+            this.position.y + 0.25,
+            this.position.z + cosH * rearDist + rightZ * sideOff * sideSign
+          );
+          callbacks.onTrackDust(_tmpVecA, intensity);
+        }
       }
     }
 
     if (intent) {
       this.updateTurretAndGunAim(intent.aimPoint, safeDt);
     }
+    this.rig.articulate?.(this.gunPitch);
 
     const recoilSpringK = 95;
     const recoilDamp = 16;
@@ -648,11 +852,43 @@ export class Tank implements TankEntity {
     // Lightweight ancestor-only world matrix sync on muzzleNode instead of 35-mesh full subtree traversal!
     this.rig.muzzleNode.updateWorldMatrix(true, false);
 
-    // Fire main cannon (Normal MBT & Heavy Tank)
+    // Fire main cannon (Normal MBT & Heavy Tank) or rocket pod salvo (MLRS)
     if (this.stats.hasMainCannon) {
       const canFireCannon =
         this.modules.cannon_breech !== 'destroyed' && this.gunnerRecoverTimer <= 0;
-      if (intent?.fireCannon && this.cannonCooldown <= 0 && canFireCannon) {
+
+      if (this.stats.salvoSize) {
+        const salvoSize = this.stats.salvoSize;
+        // Pod reload finished -> all tubes visible again
+        if (!this.salvoActive && this.cannonCooldown <= 0 && this._rocketsLeft < salvoSize) {
+          this._rocketsLeft = salvoSize;
+          this._setRocketMeshesVisible(true);
+        }
+
+        if (this.salvoActive) {
+          this.salvoTimer -= safeDt;
+          if (this.salvoTimer <= 0 && this._rocketsLeft > 0 && canFireCannon) {
+            this._fireNextRocket(callbacks);
+            this.salvoTimer = this.stats.salvoInterval ?? 0.28;
+          }
+          if (this._rocketsLeft <= 0 || !canFireCannon) {
+            this.salvoActive = false;
+            if (this._rocketsLeft <= 0) {
+              this.cannonCooldown = this.stats.cannonReloadTime;
+            }
+          }
+        } else if (
+          intent?.fireCannon &&
+          this.cannonCooldown <= 0 &&
+          this._rocketsLeft > 0 &&
+          canFireCannon
+        ) {
+          this.salvoActive = true;
+          this.salvoTimer = 0;
+          this.salvoFired = 0;
+          this.salvoSpec = this.activeShell;
+        }
+      } else if (intent?.fireCannon && this.cannonCooldown <= 0 && canFireCannon) {
         const loaderPenalty =
           this.modules.loader === 'destroyed'
             ? 2.0
@@ -749,8 +985,8 @@ export class Tank implements TankEntity {
     const rightX = -cosH;
     const rightZ = sinH;
 
-    const hw = 1.45;
-    const hl = 2.65;
+    const hw = this.stats.hullHalfWidth;
+    const hl = this.stats.hullHalfLength;
 
     const hFL = world.getHeightAt(
       this.position.x + sinH * hl - rightX * hw,
@@ -787,7 +1023,7 @@ export class Tank implements TankEntity {
     this.suspPitchVel += (k * (targetSuspPitch - this.suspPitch) - d * this.suspPitchVel) * dt;
     this.suspPitch += this.suspPitchVel * dt;
 
-    this.suspRollVel += (-k * this.suspRoll - d * this.suspRollVel) * dt;
+    this.suspRollVel += (-k * (this.suspRoll - this.suspRollTarget) - d * this.suspRollVel) * dt;
     this.suspRoll += this.suspRollVel * dt;
 
     this.root.position.copy(this.position);
@@ -875,10 +1111,34 @@ export class Tank implements TankEntity {
     return outPos.set(this.position.x, this.position.y + 1.35, this.position.z);
   }
 
+  /** Launches the next rocket from its own pod tube; that tube's mesh stays hidden until reload. */
+  private _fireNextRocket(callbacks?: {
+    onFireCannon?: (tank: Tank, pos: THREE.Vector3, dir: THREE.Vector3, shell: ShellSpec) => void;
+  }): void {
+    const meshes = this.rig.rocketMeshes;
+    if (meshes.length === 0) return;
+    const mesh = meshes[this.salvoFired % meshes.length];
+    this.salvoFired++;
+    mesh.updateWorldMatrix(true, false);
+    mesh.getWorldPosition(_tmpVecA);
+    this.rig.gunPivot.getWorldQuaternion(_tmpQuat);
+    _tmpVecB.set(0, 0, 1).applyQuaternion(_tmpQuat).normalize();
+    mesh.visible = false;
+    this._rocketsLeft = Math.max(0, this._rocketsLeft - 1);
+    callbacks?.onFireCannon?.(this, _tmpVecA, _tmpVecB, this.salvoSpec ?? this.activeShell);
+  }
+
+  private _setRocketMeshesVisible(visible: boolean): void {
+    for (const m of this.rig.rocketMeshes) {
+      m.visible = visible;
+    }
+  }
+
   public applyRecoil(): void {
+    const isRocket = Boolean(this.stats.salvoSize);
     const isHeavy = this.stats.vehicleClass === 'heavy';
-    this.barrelRecoilZ = isHeavy ? -0.56 : -0.42;
-    this.barrelRecoilVel = isHeavy ? -2.0 : -1.5;
+    this.barrelRecoilZ = isRocket ? -0.07 : isHeavy ? -0.56 : -0.42;
+    this.barrelRecoilVel = isRocket ? -0.5 : isHeavy ? -2.0 : -1.5;
 
     const relCos = Math.cos(this.turretRelYaw);
     const relSin = Math.sin(this.turretRelYaw);
@@ -898,7 +1158,7 @@ export class Tank implements TankEntity {
 
     const scaledAmt = amount * this.stats.armorDamageMult;
 
-    if (shellDirWorld) {
+    if (shellDirWorld && this.stats.drive === 'tracked') {
       return this.applyLocationalPenetration(scaledAmt, hitWorldPos, shellDirWorld, weapon, shellSpec);
     }
 
@@ -1278,10 +1538,19 @@ export class Tank implements TankEntity {
     this.fireSmokeAccum = 0;
     this.suspPitch = 0;
     this.suspRoll = 0;
+    this.suspRollTarget = 0;
     this.suspPitchVel = 0;
     this.suspRollVel = 0;
     this.barrelRecoilZ = 0;
     this.barrelRecoilVel = 0;
+    this.steerAngle = 0;
+    this.wheelDistAccum = 0;
+    this.salvoActive = false;
+    this.salvoTimer = 0;
+    this.salvoFired = 0;
+    this.salvoSpec = null;
+    this._rocketsLeft = this.stats.salvoSize ?? 0;
+    this._setRocketMeshesVisible(true);
 
     this.rig.turretPivot.rotation.set(0, 0, 0);
     this.rig.turretPivot.position.copy(this.rig.turretRestPos);

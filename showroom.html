@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vehicle Showroom — dev only</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #0c0f0b; }
+      #app { position: fixed; inset: 0; }
+      #audit-overlay {
+        position: fixed; left: 10px; bottom: 10px; z-index: 10;
+        font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #cfe0c8; background: rgba(10, 14, 9, 0.82);
+        border: 1px solid rgba(160, 200, 140, 0.35); border-radius: 4px;
+        padding: 8px 12px; white-space: pre-wrap; max-width: 46ch;
+        pointer-events: none;
+      }
+      #loading {
+        position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+        color: #cfe0c8; font: 13px ui-monospace, Menlo, monospace; letter-spacing: 0.14em;
+        background: #0c0f0b; z-index: 20;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="loading">LOADING ASSETS…</div>
+    <div id="audit-overlay"></div>
+    <script type="module" src="/src/showroom.ts"></script>
+  </body>
+</html>

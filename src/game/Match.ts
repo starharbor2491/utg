@@ -17,8 +17,8 @@ const BASE_RED = { x: 0, z: 205 };
 const SPAWN_RADIUS_MIN = 0;
 const SPAWN_RADIUS_MAX = 35;
 
-const BLUE_BOT_CLASSES: readonly VehicleClass[] = ['normal', 'heavy', 'ifv', 'normal', 'ifv'];
-const RED_BOT_CLASSES: readonly VehicleClass[] = ['normal', 'normal', 'heavy', 'ifv', 'ifv', 'heavy'];
+const BLUE_BOT_CLASSES: readonly VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket'];
+const RED_BOT_CLASSES: readonly VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket', 'normal'];
 
 export class Match {
   readonly score = { blue: 0, red: 0 };
@@ -38,12 +38,15 @@ export class Match {
     this.scene = scene;
     this.world = world;
 
-    // Pre-build all 3 human vehicles once so class switching swaps tanks[0] with zero runtime allocations
+    // Pre-build all 5 human vehicles once so class switching swaps tanks[0] with zero runtime allocations
     const blueYaw = this._yawTowardEnemyBase('blue');
+    const spawn = this._spawnPoint('blue', null);
     this.humanVehicles = {
-      normal: new Tank('you_normal', 'blue', 'normal', assets, this._spawnPoint('blue', null), blueYaw, true, 'You'),
-      heavy: new Tank('you_heavy', 'blue', 'heavy', assets, this._spawnPoint('blue', null), blueYaw, true, 'You'),
-      ifv: new Tank('you_ifv', 'blue', 'ifv', assets, this._spawnPoint('blue', null), blueYaw, true, 'You'),
+      normal: new Tank('you_normal', 'blue', 'normal', assets, spawn, blueYaw, true, 'You'),
+      heavy: new Tank('you_heavy', 'blue', 'heavy', assets, spawn, blueYaw, true, 'You'),
+      ifv: new Tank('you_ifv', 'blue', 'ifv', assets, spawn, blueYaw, true, 'You'),
+      humvee: new Tank('you_humvee', 'blue', 'humvee', assets, spawn, blueYaw, true, 'You'),
+      rocket: new Tank('you_rocket', 'blue', 'rocket', assets, spawn, blueYaw, true, 'You'),
     };
 
     this.tanks.push(this.humanVehicles.normal);

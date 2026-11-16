@@ -13,7 +13,9 @@ import * as THREE from 'three';
 
 export type Team = 'blue' | 'red';
 
-export type VehicleClass = 'normal' | 'heavy' | 'ifv';
+export type VehicleClass = 'normal' | 'heavy' | 'ifv' | 'humvee' | 'rocket';
+
+export type DriveType = 'tracked' | 'wheeled';
 
 export type ObstacleKind = 'building' | 'tower' | 'station' | 'rock' | 'barrier' | 'tree' | 'crates';
 
@@ -91,6 +93,8 @@ export interface ShellSpec {
   explosionScale: number;
   tracerColorRGB: [number, number, number];
   dispersionRad: number;
+  /** Rocket motors: while `age < burnTime` the round accelerates along its velocity */
+  rocket?: { burnTime: number; thrustAccel: number };
 }
 
 export interface TankStats {
@@ -121,6 +125,15 @@ export interface TankStats {
   hasCoaxMG: boolean;
   infiniteMG: boolean;
   mgFireInterval: number;    // seconds between autocannon/MG shots
+  drive: DriveType;
+  /** XZ footprint half extents for terrain alignment probes (meters) */
+  hullHalfWidth: number;
+  hullHalfLength: number;
+  /** Wheeled vehicles: bicycle-model wheelbase (meters) */
+  wheelbase?: number;
+  /** Rocket pod: rounds per salvo + seconds between launches */
+  salvoSize?: number;
+  salvoInterval?: number;
 }
 
 export interface TankIntent {
@@ -279,6 +292,7 @@ export interface HUDTelemetry {
   shell0Code: string;
   shell1Code: string;
   hasMainCannon: boolean;
+  hasCoaxMG: boolean;
   infiniteMG: boolean;
 
   hp: number;
@@ -310,6 +324,10 @@ export interface HUDTelemetry {
   kills: number;
   deaths: number;
   activeEnemies: number;
+  /** Rocket launcher pod state (0 for other classes) */
+  rocketsLeft: number;
+  /** Rocket pod capacity (undefined for non-rocket classes) */
+  salvoSize?: number;
   score: { blue: number; red: number };
   playerTeam: Team;
   fps: number;

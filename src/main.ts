@@ -47,6 +47,8 @@ function projectWorldToScreen(
 function markerCodeForClass(cls: VehicleClass): string {
   if (cls === 'heavy') return 'HEAVY';
   if (cls === 'ifv') return 'IFV';
+  if (cls === 'humvee') return 'HUMVEE';
+  if (cls === 'rocket') return 'MLRS';
   return 'MBT';
 }
 
@@ -510,7 +512,8 @@ async function bootstrap(): Promise<void> {
       world,
       allTanks,
       playerTank,
-      _boreImpactWorld
+      _boreImpactWorld,
+      activeShell
     );
     projectWorldToScreen(_boreImpactWorld, camera, vw, vh, gunnerBoreScreen, _projScratch);
     gunnerBoreScreen.rangeMeters = rangeMeters;
@@ -533,6 +536,7 @@ async function bootstrap(): Promise<void> {
       shell0Code: playerTank.stats.shells[0].shortCode,
       shell1Code: playerTank.stats.shells[1].shortCode,
       hasMainCannon: playerTank.stats.hasMainCannon,
+      hasCoaxMG: playerTank.stats.hasCoaxMG,
       infiniteMG: playerTank.stats.infiniteMG,
       hp: playerTank.hp,
       maxHp: playerTank.maxHp,
@@ -547,6 +551,8 @@ async function bootstrap(): Promise<void> {
       cameraFovRad: THREE.MathUtils.degToRad(camera.fov),
       cannonReloadProgress: reloadProg,
       cannonCooldownSec: playerTank.cannonCooldown,
+      rocketsLeft: playerTank.rocketsLeft,
+      salvoSize: playerTank.stats.salvoSize,
       shellSpeedMs: activeShell.muzzleSpeed,
       mgHeat: playerTank.mgHeat,
       mgOverheated: playerTank.mgOverheated,
@@ -665,6 +671,15 @@ async function bootstrap(): Promise<void> {
     selectClassForTest: (cls: VehicleClass) => {
       swapPlayerClassFn?.(cls);
     },
+    setCameraForTest: (px: number, py: number, pz: number, lx: number, ly: number, lz: number) => {
+      cameraOverrideActive = true;
+      camera.position.set(px, py, pz);
+      camera.lookAt(lx, ly, lz);
+      camera.updateMatrixWorld();
+    },
+    clearCameraForTest: () => {
+      cameraOverrideActive = false;
+    },
     getRenderStats: () => ({
       calls: renderer.info.render.calls,
       triangles: renderer.info.render.triangles,
@@ -673,6 +688,8 @@ async function bootstrap(): Promise<void> {
       textures: renderer.info.memory.textures,
       activeClass: match.human.stats.vehicleClass,
       activeShell: match.human.activeShell.shortCode,
+      rocketsLeft: match.human.rocketsLeft,
+      salvoActive: match.human.salvoInProgress,
     }),
     fastForward: (seconds: number) => {
       const steps = Math.max(1, Math.round(seconds * 30));
@@ -697,7 +714,7 @@ async function bootstrap(): Promise<void> {
     }),
     runThreeAudit: () => {
       const results: Record<string, AuditIssue[]> = {};
-      const testClasses: VehicleClass[] = ['normal', 'heavy', 'ifv'];
+      const testClasses: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket'];
       for (const cls of testClasses) {
         const tempTank = new Tank(`audit_${cls}`, 'blue', cls, assets, new THREE.Vector3(0, 0, 0), 0, false, 'Audit');
         results[cls] = auditThreeObject(tempTank.root, {

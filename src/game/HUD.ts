@@ -848,7 +848,14 @@ export class HUD {
 
     const cannonTitleEl = this.cannonStatusEl.previousElementSibling as HTMLElement | null;
     if (cannonTitleEl) {
-      cannonTitleEl.textContent = t.hasMainCannon ? 'MAIN CANNON' : '30MM CHAIN-GUN';
+      cannonTitleEl.textContent =
+        t.vehicleClass === 'rocket'
+          ? 'ROCKET POD'
+          : t.hasMainCannon
+            ? 'MAIN CANNON'
+            : t.vehicleClass === 'humvee'
+              ? 'M2 .50CAL'
+              : '30MM CHAIN-GUN';
     }
 
     const cannonP = t.hasMainCannon ? clamp01(t.cannonReloadProgress) : 1;
@@ -864,20 +871,28 @@ export class HUD {
       this.vehiclePanelEl.classList.toggle('is-reloading', !cannonReady);
     }
 
-    const cannonStr = !t.hasMainCannon
-      ? 'INF AMMO'
-      : cannonReady
-        ? 'READY'
-        : `${Math.max(0, t.cannonCooldownSec).toFixed(1)}s`;
+    const cannonStr =
+      t.vehicleClass === 'rocket'
+        ? t.rocketsLeft > 0
+          ? `ROCKETS ${t.rocketsLeft}/${t.salvoSize ?? 6}`
+          : cannonReady
+            ? 'POD EMPTY'
+            : `${Math.max(0, t.cannonCooldownSec).toFixed(1)}s RELOAD`
+        : !t.hasMainCannon
+          ? 'INF AMMO'
+          : cannonReady
+            ? 'READY'
+            : `${Math.max(0, t.cannonCooldownSec).toFixed(1)}s`;
     if (cannonStr !== this.lastCannonStr) {
       this.lastCannonStr = cannonStr;
       this.cannonStatusEl.textContent = cannonStr;
     }
 
-    // 5. Coaxial MG Thermal Gauge (hidden on IFV where main weapon IS the infinite-ammo MG!)
+    // 5. Coaxial MG Thermal Gauge (hidden on IFV where main weapon IS the
+    // infinite-ammo MG, and on the rocket launcher which has no coax at all)
     const mgBlockEl = this.mgStatusEl.closest('.fcs-bar-block') as HTMLElement | null;
     if (mgBlockEl) {
-      mgBlockEl.style.display = t.infiniteMG ? 'none' : 'flex';
+      mgBlockEl.style.display = t.infiniteMG || !t.hasCoaxMG ? 'none' : 'flex';
     }
     const heat = clamp01(t.mgHeat);
     this.mgBarFillEl.style.width = `${(heat * 100).toFixed(1)}%`;
@@ -2066,7 +2081,7 @@ export class HUD {
     const classSection = document.createElement('div');
     const classHeading = document.createElement('div');
     classHeading.className = 'fcs-section-heading';
-    classHeading.innerHTML = '<span>SELECT VEHICLE</span><span>3 CLASSES · 2 SHELLS EACH</span>';
+    classHeading.innerHTML = '<span>SELECT VEHICLE</span><span>5 CLASSES · 2 SHELLS EACH</span>';
 
     const classGrid = document.createElement('div');
     classGrid.className = 'fcs-class-grid';
@@ -2075,6 +2090,8 @@ export class HUD {
       { id: 'normal', title: 'NORMAL MBT', sub: '65 KM/H · APFSDS + HE' },
       { id: 'heavy', title: 'HEAVY TANK', sub: '152MM · ERA ARMOR' },
       { id: 'ifv', title: 'IFV (AUTO-MG)', sub: '87 KM/H · INF AMMO' },
+      { id: 'humvee', title: 'HUMVEE', sub: '108 KM/H · M2 .50CAL' },
+      { id: 'rocket', title: 'MLRS ARTY', sub: '79 KM/H · 6-RD SALVO' },
     ];
 
     const classBtns: HTMLButtonElement[] = [];

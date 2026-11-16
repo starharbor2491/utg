@@ -11,6 +11,8 @@ const EMBED_FILES = [
   ['./decoders/basis/basis_transcoder.js', 'decoders/basis/basis_transcoder.js'],
   ['./decoders/basis/basis_transcoder.wasm', 'decoders/basis/basis_transcoder.wasm'],
   ['./assets/models/player_mbt_lod1.glb', 'assets/models/player_mbt_lod1.glb'],
+  ['./assets/models/humvee.glb', 'assets/models/humvee.glb'],
+  ['./assets/models/ifv.glb', 'assets/models/ifv.glb'],
   ['./assets/models/ruined_building.glb', 'assets/models/ruined_building.glb'],
   ['./assets/models/guard_tower.glb', 'assets/models/guard_tower.glb'],
   ['./assets/models/fuel_station.glb', 'assets/models/fuel_station.glb'],

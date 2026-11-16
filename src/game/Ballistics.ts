@@ -5,6 +5,105 @@ import type { EffectsManager } from './Effects';
 
 export const GRAVITY = 9.81;
 
+/**
+ * Shared projectile integrator used by live shell flight AND the HUD's
+ * predicted-impact march, so the reticle matches real rocket ballistics.
+ * Applies gravity, then (while `age < rocket.burnTime`) thrust acceleration
+ * along the current velocity direction, then advances position.
+ */
+export function stepProjectile(
+  pos: THREE.Vector3,
+  vel: THREE.Vector3,
+  spec: ShellSpec | undefined,
+  age: number,
+  dt: number
+): void {
+  vel.y -= GRAVITY * dt;
+  const rocket = spec?.rocket;
+  if (rocket && age < rocket.burnTime) {
+    const sp = vel.length();
+    if (sp > 1e-4) {
+      const k = (rocket.thrustAccel * dt) / sp;
+      vel.x += vel.x * k;
+      vel.y += vel.y * k;
+      vel.z += vel.z * k;
+    }
+  }
+  pos.addScaledVector(vel, dt);
+}
+
+/** Scratch vectors for stepProjectile call sites (module-shared, non-reentrant). */
+const _spPos = new THREE.Vector3();
+const _spVel = new THREE.Vector3();
+const _spDir = new THREE.Vector3();
+const _spLead = new THREE.Vector3();
+
+/**
+ * Rocket-artillery aim solver: bisects launch pitch (<=12 iterations) on the
+ * low-angle branch so the shared stepProjectile sim impacts the lead point.
+ * Writes a far aim point along the solved direction into `outAimPoint`.
+ */
+export function solveRocketAim(
+  muzzlePos: THREE.Vector3,
+  targetPos: THREE.Vector3,
+  targetVel: THREE.Vector3,
+  spec: ShellSpec,
+  pitchMin: number,
+  pitchMax: number,
+  outAimPoint: THREE.Vector3
+): void {
+  // Rough time-of-flight for target lead (rocket averages ~140 m/s)
+  const dist = muzzlePos.distanceTo(targetPos);
+  const tof = Math.min(6, Math.max(0.4, dist / 140));
+  _spLead.set(
+    targetPos.x + targetVel.x * tof,
+    targetPos.y + targetVel.y * tof,
+    targetPos.z + targetVel.z * tof
+  );
+
+  // Horizontal bearing muzzle -> lead point
+  const dx = _spLead.x - muzzlePos.x;
+  const dz = _spLead.z - muzzlePos.z;
+  const hDist = Math.max(1, Math.hypot(dx, dz));
+  const yaw = Math.atan2(dx, dz);
+  const sinY = Math.sin(yaw);
+  const cosY = Math.cos(yaw);
+  const leadY = _spLead.y;
+
+  const simRange = (pitch: number): number => {
+    _spDir.set(sinY * Math.cos(pitch), Math.sin(pitch), cosY * Math.cos(pitch));
+    _spPos.copy(muzzlePos);
+    _spVel.copy(_spDir).multiplyScalar(spec.muzzleSpeed);
+    const dt = 0.05;
+    for (let t = 0; t < 6; t += dt) {
+      const prevY = _spPos.y;
+      stepProjectile(_spPos, _spVel, spec, t, dt);
+      if (_spVel.y < 0 && _spPos.y <= leadY && prevY > leadY) {
+        // Descending through target height: horizontal distance travelled
+        return Math.hypot(_spPos.x - muzzlePos.x, _spPos.z - muzzlePos.z);
+      }
+      if (_spPos.y < muzzlePos.y - 30) break;
+    }
+    return hDist * 2; // out of reach: report overshoot so bisection lowers pitch
+  };
+
+  let lo = Math.max(0.04, pitchMin);
+  let hi = Math.min(0.85, pitchMax);
+  if (simRange(lo) >= hDist) {
+    // Even minimum pitch overshoots (point-blank): fire flat
+    lo = hi = Math.max(0.02, pitchMin);
+  } else {
+    for (let i = 0; i < 12; i++) {
+      const mid = (lo + hi) * 0.5;
+      if (simRange(mid) < hDist) lo = mid;
+      else hi = mid;
+    }
+  }
+  const bestPitch = (lo + hi) * 0.5;
+  _spDir.set(sinY * Math.cos(bestPitch), Math.sin(bestPitch), cosY * Math.cos(bestPitch));
+  outAimPoint.copy(muzzlePos).addScaledVector(_spDir, 160);
+}
+
 const SHELL_POOL_SIZE = 48;
 const MG_POOL_SIZE = 160;
 const MG_MUZZLE_SPEED = 520;
@@ -12,6 +111,7 @@ const MG_DISPERSION_RAD = 0.012;
 
 // Module-level scratch vectors for zero-allocation ballistic prediction & collision
 const _predPos = new THREE.Vector3();
+const _predPrev = new THREE.Vector3();
 const _predNext = new THREE.Vector3();
 const _predVel = new THREE.Vector3();
 const _segDir = new THREE.Vector3();
@@ -133,7 +233,8 @@ export function predictBarrelImpact(
   world: TerrainQuery,
   tanks: readonly TankEntity[],
   ignoreTank: TankEntity,
-  outPoint: THREE.Vector3
+  outPoint: THREE.Vector3,
+  spec?: ShellSpec
 ): number {
   const dtStep = 0.04;
   const maxTime = 3.5;
@@ -144,11 +245,12 @@ export function predictBarrelImpact(
 
   let elapsed = 0;
   while (elapsed < maxTime) {
-    _predVel.y -= GRAVITY * dtStep;
-    _predNext.copy(_predPos).addScaledVector(_predVel, dtStep);
+    _predPrev.copy(_predPos);
     elapsed += dtStep;
+    stepProjectile(_predPos, _predVel, spec, elapsed, dtStep);
+    _predNext.copy(_predPos);
 
-    _segDir.subVectors(_predNext, _predPos);
+    _segDir.subVectors(_predNext, _predPrev);
     const segLen = _segDir.length();
     if (segLen < 1e-5) continue;
     _segDir.multiplyScalar(1 / segLen);
@@ -160,7 +262,7 @@ export function predictBarrelImpact(
     for (let i = 0; i < tanks.length; i++) {
       const tank = tanks[i];
       if (tank === ignoreTank || !tank.alive) continue;
-      const tHit = intersectSegmentTank(_predPos, _segDir, segLen, tank, 0.14, _tankCenter);
+      const tHit = intersectSegmentTank(_predPrev, _segDir, segLen, tank, 0.14, _tankCenter);
       if (tHit !== null && tHit < closestDist) {
         closestDist = tHit;
         hitFound = true;
@@ -168,29 +270,28 @@ export function predictBarrelImpact(
     }
 
     // 2. Check terrain & world obstacles
-    const worldHit = world.raycastWorld(_predPos, _segDir, segLen);
+    const worldHit = world.raycastWorld(_predPrev, _segDir, segLen);
     if (worldHit && worldHit.distance < closestDist) {
       outPoint.copy(worldHit.point);
       return muzzlePos.distanceTo(outPoint);
     }
 
     if (hitFound) {
-      outPoint.copy(_predPos).addScaledVector(_segDir, closestDist);
+      outPoint.copy(_predPrev).addScaledVector(_segDir, closestDist);
       return muzzlePos.distanceTo(outPoint);
     }
 
     // Safety floor check against terrain heightmap
     const terrainY = world.getHeightAt(_predNext.x, _predNext.z);
     if (_predNext.y <= terrainY) {
-      const prevAbove = Math.max(0, _predPos.y - world.getHeightAt(_predPos.x, _predPos.z));
+      const prevAbove = Math.max(0, _predPrev.y - world.getHeightAt(_predPrev.x, _predPrev.z));
       const below = terrainY - _predNext.y;
       const frac = prevAbove + below > 1e-4 ? prevAbove / (prevAbove + below) : 1;
-      outPoint.lerpVectors(_predPos, _predNext, frac);
+      outPoint.lerpVectors(_predPrev, _predNext, frac);
       outPoint.y = world.getHeightAt(outPoint.x, outPoint.z);
       return muzzlePos.distanceTo(outPoint);
     }
 
-    _predPos.copy(_predNext);
     if (_predPos.distanceToSquared(muzzlePos) >= maxRangeSq) {
       break;
     }
@@ -257,6 +358,7 @@ interface ShellSlot {
   vz: number;
   age: number;
   maxAge: number;
+  trailTick: number;
   directDamage: number;
   splashDamage: number;
   splashRadius: number;
@@ -316,6 +418,8 @@ export class BallisticsManager {
   private readonly _color = new THREE.Color();
   private readonly _prevPos = new THREE.Vector3();
   private readonly _nextPos = new THREE.Vector3();
+  private readonly _flyPos = new THREE.Vector3();
+  private readonly _flyVel = new THREE.Vector3();
   private readonly _segDir = new THREE.Vector3();
   private readonly _hitPoint = new THREE.Vector3();
   private readonly _hitNormal = new THREE.Vector3();
@@ -375,6 +479,7 @@ export class BallisticsManager {
         vz: 0,
         age: 0,
         maxAge: 4.5,
+        trailTick: 0,
         directDamage: 55,
         splashDamage: 30,
         splashRadius: 6.5,
@@ -461,7 +566,10 @@ export class BallisticsManager {
       }
       this._tangentB.crossVectors(this._tangentA, this._segDir).normalize();
       const scatterAng = Math.random() * Math.PI * 2;
-      const scatterMag = (0.045 + Math.random() * 0.055) * (Math.random() < 0.82 ? 1.0 : 0.35);
+      // Rockets use their own tight dispersion; guns keep the bot scatter
+      const scatterMag = spec.rocket
+        ? spec.dispersionRad * (0.6 + Math.random() * 0.8)
+        : (0.045 + Math.random() * 0.055) * (Math.random() < 0.82 ? 1.0 : 0.35);
       this._segDir
         .addScaledVector(this._tangentA, Math.cos(scatterAng) * scatterMag)
         .addScaledVector(this._tangentB, Math.sin(scatterAng) * scatterMag * 0.65)
@@ -482,7 +590,8 @@ export class BallisticsManager {
     slot.vy = this._segDir.y * speed;
     slot.vz = this._segDir.z * speed;
     slot.age = 0;
-    slot.maxAge = 4.5;
+    slot.maxAge = spec.rocket ? 7.0 : 4.5;
+    slot.trailTick = 0;
     slot.directDamage = spec.directDamage;
     slot.splashDamage = spec.splashDamage;
     slot.splashRadius = spec.splashRadius;
@@ -494,8 +603,12 @@ export class BallisticsManager {
     this.effects.spawnMuzzleFlash(
       muzzlePos,
       this._segDir,
-      shooter.stats.vehicleClass === 'heavy' ? 1.35 : 1.0
+      spec.rocket ? 0.85 : shooter.stats.vehicleClass === 'heavy' ? 1.35 : 1.0
     );
+    if (spec.rocket) {
+      // Backblast smoke thrown backwards off the launch pod
+      this.effects.spawnRocketBackblast(muzzlePos, this._segDir);
+    }
     shooter.applyRecoil();
   }
 
@@ -604,12 +717,26 @@ export class BallisticsManager {
       }
 
       this._prevPos.set(s.px, s.py, s.pz);
-      s.vy -= this.GRAVITY * stepDt;
-      this._nextPos.set(
-        s.px + s.vx * stepDt,
-        s.py + s.vy * stepDt,
-        s.pz + s.vz * stepDt
-      );
+      this._flyPos.set(s.px, s.py, s.pz);
+      this._flyVel.set(s.vx, s.vy, s.vz);
+      stepProjectile(this._flyPos, this._flyVel, s.shellSpec ?? undefined, s.age, stepDt);
+      s.px = this._flyPos.x;
+      s.py = this._flyPos.y;
+      s.pz = this._flyPos.z;
+      s.vx = this._flyVel.x;
+      s.vy = this._flyVel.y;
+      s.vz = this._flyVel.z;
+      this._nextPos.copy(this._flyPos);
+
+      // Burning rocket motors leave a dense smoke trail + motor flare
+      const rocket = s.shellSpec?.rocket;
+      if (rocket && s.age < rocket.burnTime + 0.15) {
+        s.trailTick += stepDt;
+        if (s.trailTick >= 0.035) {
+          s.trailTick = 0;
+          this.effects.spawnRocketTrail(this._flyPos);
+        }
+      }
 
       this._segDir.subVectors(this._nextPos, this._prevPos);
       const segLen = this._segDir.length();

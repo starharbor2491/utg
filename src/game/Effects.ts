@@ -1594,6 +1594,102 @@ export class EffectsManager {
   }
 
   /**
+   * Dense grey exhaust smoke + flickering motor flare emitted at a burning
+   * rocket's tail while `rocket.burnTime` is active.
+   */
+  public spawnRocketTrail(pos: THREE.Vector3): void {
+    const p = this._allocSmoke();
+    p.active = true;
+    p.age = 0;
+    p.maxAge = randRange(0.8, 1.5);
+    p.px = pos.x + randRange(-0.05, 0.05);
+    p.py = pos.y + randRange(-0.05, 0.05);
+    p.pz = pos.z + randRange(-0.05, 0.05);
+    p.vx = randRange(-0.35, 0.35);
+    p.vy = randRange(0.15, 0.7);
+    p.vz = randRange(-0.35, 0.35);
+    p.drag = 1.5;
+    p.buoyancy = 0.55;
+    p.startScale = randRange(0.34, 0.55);
+    p.endScale = randRange(1.7, 2.6);
+    p.rot = Math.random() * Math.PI * 2;
+    p.rotSpeed = randRange(-1.4, 1.4);
+    p.r0 = 0.74;
+    p.g0 = 0.73;
+    p.b0 = 0.7;
+    p.rMid = 0.62;
+    p.gMid = 0.61;
+    p.bMid = 0.59;
+    p.midFrac = 0.4;
+    p.r1 = 0.52;
+    p.g1 = 0.52;
+    p.b1 = 0.52;
+    p.peakAlpha = 0.62;
+    p.fadeInFrac = 0.1;
+
+    // Motor flare: ~1 m bright nozzle glow, modest HDR (tracer-head level)
+    if (Math.random() < 0.55) {
+      const f = this._allocFlash();
+      f.active = true;
+      f.age = 0;
+      f.maxAge = randRange(0.08, 0.15);
+      f.px = pos.x;
+      f.py = pos.y;
+      f.pz = pos.z;
+      f.vx = 0;
+      f.vy = 0;
+      f.vz = 0;
+      f.startScaleX = randRange(0.8, 1.15);
+      f.startScaleY = randRange(0.8, 1.15);
+      f.endScaleX = randRange(0.25, 0.4);
+      f.endScaleY = randRange(0.25, 0.4);
+      f.rot = 0;
+      f.rotSpeed = 0;
+      f.billboard = true;
+      f.r = 2.3;
+      f.g = 1.45;
+      f.b = 0.5;
+    }
+  }
+
+  /**
+   * Backblast: dark smoke + dust thrown backwards off the launch pod on firing.
+   */
+  public spawnRocketBackblast(pos: THREE.Vector3, launchDir: THREE.Vector3): void {
+    for (let i = 0; i < 4; i++) {
+      const p = this._allocSmoke();
+      p.active = true;
+      p.age = 0;
+      p.maxAge = randRange(0.7, 1.3);
+      const back = 1.6 + i * 0.7;
+      p.px = pos.x - launchDir.x * back + randRange(-0.4, 0.4);
+      p.py = pos.y - launchDir.y * back + randRange(-0.2, 0.5);
+      p.pz = pos.z - launchDir.z * back + randRange(-0.4, 0.4);
+      p.vx = -launchDir.x * randRange(6, 11) + randRange(-1.5, 1.5);
+      p.vy = randRange(0.8, 2.4);
+      p.vz = -launchDir.z * randRange(6, 11) + randRange(-1.5, 1.5);
+      p.drag = 2.4;
+      p.buoyancy = 0.4;
+      p.startScale = randRange(0.7, 1.2);
+      p.endScale = randRange(2.6, 4.2);
+      p.rot = Math.random() * Math.PI * 2;
+      p.rotSpeed = randRange(-1.2, 1.2);
+      p.r0 = 0.32;
+      p.g0 = 0.3;
+      p.b0 = 0.27;
+      p.rMid = 0.26;
+      p.gMid = 0.25;
+      p.bMid = 0.23;
+      p.midFrac = 0.4;
+      p.r1 = 0.2;
+      p.g1 = 0.19;
+      p.b1 = 0.18;
+      p.peakAlpha = 0.6;
+      p.fadeInFrac = 0.08;
+    }
+  }
+
+  /**
    * Called periodically by dead tank wrecks for rising black oil smoke + flickering ember glow.
    */
   public spawnWreckSmoke(pos: THREE.Vector3): void {
