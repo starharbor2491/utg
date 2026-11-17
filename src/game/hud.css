@@ -1231,3 +1231,34 @@
   border: 1.5px solid var(--fcs-team-red);
   background: rgba(217, 114, 95, 0.28);
 }
+
+/* Guided-munition seeker lock box */
+.fcs-lockbox {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 6;
+}
+.fcs-lockbox svg {
+  display: block;
+  overflow: visible;
+}
+.fcs-lockbox .fcs-lk-brackets path,
+.fcs-lockbox .fcs-lk-square {
+  stroke: var(--fcs-accent);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.fcs-lockbox .fcs-lk-brackets path {
+  stroke-linecap: square;
+}
+.fcs-lockbox .fcs-lk-label {
+  fill: var(--fcs-accent);
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}

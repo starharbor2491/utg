@@ -361,10 +361,33 @@ function createTracerBoltGeometry(): THREE.BufferGeometry {
   return merged;
 }
 
+/** In-flight guidance state for a guided shell slot. */
+interface GuidedState {
+  /** Live target entity (null once decoyed or lost) */
+  entity: TankEntity | null;
+  /** Fixed decoy aim point once a wreck steals the seeker (world space) */
+  decoyX: number;
+  decoyY: number;
+  decoyZ: number;
+  hasDecoy: boolean;
+  decoyTimer: number;
+  /** Set once the round leaves the seeker cone / target dies — ballistic from then on */
+  lost: boolean;
+  /** Previous unit LOS vector + range for proportional-navigation LOS rate */
+  hasPrevLos: boolean;
+  prevLx: number;
+  prevLy: number;
+  prevLz: number;
+  prevDist: number;
+  /** Closest approach to the aim point this flight (QA miss metric) */
+  minDist: number;
+}
+
 interface ShellSlot {
   active: boolean;
   shooter: TankEntity | null;
   shellSpec: ShellSpec | null;
+  guide: GuidedState | null;
   originX: number;
   originY: number;
   originZ: number;
@@ -450,6 +473,27 @@ export class BallisticsManager {
   private readonly _coaxSpreadDir = new THREE.Vector3();
   private readonly _tangentA = new THREE.Vector3();
   private readonly _tangentB = new THREE.Vector3();
+  private readonly _gAim = new THREE.Vector3();
+  private readonly _gTo = new THREE.Vector3();
+  private readonly _gVelDir = new THREE.Vector3();
+  private readonly _gLosRate = new THREE.Vector3();
+  private readonly _gAccel = new THREE.Vector3();
+  private readonly _gPerp = new THREE.Vector3();
+
+  // QA metrics for guidedTest()
+  public guidedHits = 0;
+  public guidedDecoys = 0;
+  public guidedMinMiss = Infinity;
+  /** When set, every rocket shell tracks closest approach to this entity (miss metric). */
+  public missProbeTarget: TankEntity | null = null;
+  public missProbeMin = Infinity;
+
+  public resetGuidedStats(): void {
+    this.guidedHits = 0;
+    this.guidedDecoys = 0;
+    this.guidedMinMiss = Infinity;
+    this.missProbeMin = Infinity;
+  }
 
   constructor(scene: THREE.Scene, effects: EffectsManager) {
     this.scene = scene;
@@ -486,6 +530,7 @@ export class BallisticsManager {
         active: false,
         shooter: null,
         shellSpec: null,
+        guide: null,
         originX: 0,
         originY: 0,
         originZ: 0,
@@ -558,7 +603,8 @@ export class BallisticsManager {
     shooter: TankEntity,
     muzzlePos: THREE.Vector3,
     muzzleDir: THREE.Vector3,
-    shellSpec?: ShellSpec
+    shellSpec?: ShellSpec,
+    guideTarget?: TankEntity | null
   ): void {
     let slot: ShellSlot | null = null;
     for (let n = 0; n < SHELL_POOL_SIZE; n++) {
@@ -610,6 +656,27 @@ export class BallisticsManager {
     slot.age = 0;
     slot.maxAge = spec.rocket ? 7.0 : 4.5;
     slot.trailTick = 0;
+    // Guided rounds only when the spec opts in AND a live lock target was passed
+    if (spec.guidance && guideTarget && guideTarget.alive && guideTarget.team !== shooter.team) {
+      let g = slot.guide;
+      if (!g) {
+        g = {
+          entity: null, decoyX: 0, decoyY: 0, decoyZ: 0,
+          hasDecoy: false, decoyTimer: 0, lost: false,
+          hasPrevLos: false, prevLx: 0, prevLy: 0, prevLz: 0, prevDist: 0,
+          minDist: Infinity,
+        };
+        slot.guide = g;
+      }
+      g.entity = guideTarget;
+      g.hasDecoy = false;
+      g.lost = false;
+      g.hasPrevLos = false;
+      g.minDist = Infinity;
+      g.decoyTimer = Math.random() * 0.2;
+    } else {
+      slot.guide = null;
+    }
     slot.directDamage = spec.directDamage;
     slot.splashDamage = spec.splashDamage;
     slot.splashRadius = spec.splashRadius;
@@ -708,11 +775,153 @@ export class BallisticsManager {
     this.effects.spawnMGFlash(coaxPos, this._coaxSpreadDir);
   }
 
+  /**
+   * Proportional-navigation guidance for guided shell slots. Runs after
+   * boostDelay while the aim point stays inside the seeker cone of the
+   * round's velocity; wreck decoys can steal the seeker every 0.2 s.
+   * Modifies `vel` in place before stepProjectile integrates.
+   */
+  private _applyGuidance(
+    s: ShellSlot,
+    vel: THREE.Vector3,
+    tanks: readonly TankEntity[],
+    decoyPoints: readonly { x: number; y: number; z: number }[] | undefined,
+    dt: number
+  ): void {
+    const g = s.guide;
+    const gd = s.shellSpec?.guidance;
+    if (!g || !gd || g.lost || dt <= 0 || s.age < gd.boostDelay) return;
+
+    // Resolve aim point: live target heat region, or fixed decoy position
+    let tx: number, ty: number, tz: number;
+    if (g.hasDecoy) {
+      tx = g.decoyX;
+      ty = g.decoyY;
+      tz = g.decoyZ;
+    } else {
+      const t = g.entity;
+      if (!t || !t.alive) {
+        g.lost = true;
+        return;
+      }
+      // Engine heat region: hull centre +0.8 m up, 30% hull length toward rear
+      const rear = t.stats.collisionRadius * 2 * 0.3;
+      const fx = Math.sin(t.hullYaw);
+      const fz = Math.cos(t.hullYaw);
+      tx = t.position.x - fx * rear;
+      ty = t.position.y + 1.8;
+      tz = t.position.z - fz * rear;
+    }
+
+    // Unit LOS + range
+    this._gTo.set(tx - s.px, ty - s.py, tz - s.pz);
+    const dist = this._gTo.length();
+    if (dist < 0.5) {
+      g.lost = true;
+      return;
+    }
+    this._gTo.multiplyScalar(1 / dist);
+    if (dist < g.minDist) g.minDist = dist;
+    if (!g.hasDecoy && g.entity) {
+      const dAim = Math.hypot(
+        s.px - g.entity.position.x,
+        s.py - (g.entity.position.y + 1.35),
+        s.pz - g.entity.position.z
+      );
+      if (s.shooter?.isHuman && dAim < this.guidedMinMiss) this.guidedMinMiss = dAim;
+    }
+
+    // Velocity unit vector (the live integration velocity)
+    this._gVelDir.set(vel.x, vel.y, vel.z);
+    const spd = this._gVelDir.length();
+    if (spd < 1) {
+      g.lost = true;
+      return;
+    }
+    this._gVelDir.multiplyScalar(1 / spd);
+
+    // Seeker cone check: target must stay within seekerConeDeg of velocity
+    const coneCos = Math.cos((gd.seekerConeDeg * Math.PI) / 180);
+    if (this._gTo.dot(this._gVelDir) < coneCos) {
+      g.lost = true;
+      return;
+    }
+
+    // Wreck decoy scan every 0.2 s (only while tracking a live entity)
+    if (gd.decoyable && !g.hasDecoy && g.entity) {
+      g.decoyTimer -= dt;
+      if (g.decoyTimer <= 0 && decoyPoints && decoyPoints.length > 0) {
+        g.decoyTimer = 0.2;
+        const cos8 = Math.cos((8 * Math.PI) / 180);
+        for (let i = 0; i < decoyPoints.length; i++) {
+          const d = decoyPoints[i];
+          this._gLosRate.set(d.x - s.px, d.y - s.py, d.z - s.pz);
+          const dd = this._gLosRate.length();
+          if (dd < 1 || dd >= dist) continue; // must be closer than the target
+          this._gLosRate.multiplyScalar(1 / dd);
+          if (this._gLosRate.dot(this._gTo) < cos8) continue;
+          if (Math.random() < 0.15) {
+            g.hasDecoy = true;
+            g.entity = null;
+            g.decoyX = d.x;
+            g.decoyY = d.y;
+            g.decoyZ = d.z;
+            g.hasPrevLos = false;
+            if (s.shooter?.isHuman) this.guidedDecoys++;
+            break;
+          }
+        }
+      }
+    }
+
+    // Proportional navigation: a = N · Vc · LOS-rate, perpendicular to velocity
+    if (g.hasPrevLos) {
+      const invDt = 1 / dt;
+      const vc = Math.max(0, -(dist - g.prevDist) * invDt); // closing speed
+      let ax = gd.navGain * vc * ((this._gTo.x - g.prevLx) * invDt);
+      let ay = gd.navGain * vc * ((this._gTo.y - g.prevLy) * invDt);
+      let az = gd.navGain * vc * ((this._gTo.z - g.prevLz) * invDt);
+      // Strip the along-track component, clamp to maxAccel
+      const aDotV = ax * this._gVelDir.x + ay * this._gVelDir.y + az * this._gVelDir.z;
+      ax -= aDotV * this._gVelDir.x;
+      ay -= aDotV * this._gVelDir.y;
+      az -= aDotV * this._gVelDir.z;
+      const aMag = Math.sqrt(ax * ax + ay * ay + az * az);
+      if (aMag > gd.maxAccel) {
+        const k = gd.maxAccel / aMag;
+        ax *= k;
+        ay *= k;
+        az *= k;
+      }
+      vel.x += ax * dt;
+      vel.y += ay * dt;
+      vel.z += az * dt;
+    }
+
+    g.hasPrevLos = true;
+    g.prevLx = this._gTo.x;
+    g.prevLy = this._gTo.y;
+    g.prevLz = this._gTo.z;
+    g.prevDist = dist;
+  }
+
+  /** QA miss probe: track closest approach of rocket shells to an entity. */
+  private _updateMissProbe(s: ShellSlot): void {
+    const t = this.missProbeTarget;
+    if (!t || !t.alive || !s.shellSpec?.rocket || !s.shooter?.isHuman) return;
+    const dx = s.px - t.position.x;
+    const dy = s.py - (t.position.y + 1.35);
+    const dz = s.pz - t.position.z;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (d < this.missProbeMin) this.missProbeMin = d;
+  }
+
   public update(
     dt: number,
     world: TerrainQuery,
     tanks: readonly TankEntity[],
-    onDamage: (ev: DamageEvent) => void
+    onDamage: (ev: DamageEvent) => void,
+    decoyPoints?: readonly { x: number; y: number; z: number }[]
   ): void {
     const stepDt = Math.min(Math.max(dt, 0), 0.05);
     if (stepDt === 0) return;
@@ -737,6 +946,8 @@ export class BallisticsManager {
       this._prevPos.set(s.px, s.py, s.pz);
       this._flyPos.set(s.px, s.py, s.pz);
       this._flyVel.set(s.vx, s.vy, s.vz);
+      this._applyGuidance(s, this._flyVel, tanks, decoyPoints, stepDt);
+      this._updateMissProbe(s);
       stepProjectile(this._flyPos, this._flyVel, s.shellSpec ?? undefined, s.age, stepDt);
       s.px = this._flyPos.x;
       s.py = this._flyPos.y;
@@ -844,6 +1055,7 @@ export class BallisticsManager {
           }
 
           const dmg = s.directDamage;
+          if (s.guide?.entity === directVictim && s.shooter?.isHuman) this.guidedHits++;
           const killed = directVictim.takeDamage(
             dmg,
             this._hitPoint.clone(),

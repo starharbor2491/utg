@@ -117,6 +117,10 @@ export class HUD {
   private readonly boreReloadCircleEl: SVGCircleElement;
   private readonly boreRangeTextEl: HTMLSpanElement;
   private readonly hitMarkerEl: HTMLDivElement;
+  private readonly lockBoxEl: HTMLDivElement;
+  private readonly lkBracketsEl: SVGGElement;
+  private readonly lkSquareEl: SVGRectElement;
+  private readonly lkLabelEl: SVGTextElement;
   private readonly killBannerEl: HTMLDivElement;
   private readonly damageArcEl: HTMLDivElement;
 
@@ -190,6 +194,10 @@ export class HUD {
     this.hitMarkerEl = reticles.hitMarker;
     this.killBannerEl = reticles.killBanner;
     this.damageArcEl = reticles.damageArc;
+    this.lockBoxEl = reticles.lockBox;
+    this.lkBracketsEl = reticles.lkBrackets;
+    this.lkSquareEl = reticles.lkSquare;
+    this.lkLabelEl = reticles.lkLabel;
     this.root.appendChild(reticles.layer);
 
     // 6. Bottom-Left Live Paper-Doll & Vehicle Propulsion/Ordnance Panel
@@ -453,6 +461,30 @@ export class HUD {
     } else {
       this.hitMarkerEl.style.opacity = '0';
       this.killBannerEl.style.opacity = '0';
+    }
+
+    // 5. Guided-munition seeker lock box
+    const lk = t.lockOn;
+    const showLock =
+      Boolean(lk && lk.onScreen && lk.progress > 0.02) &&
+      showHudReticles &&
+      !this.briefingVisible;
+    if (showLock && lk) {
+      const size = clamp(26000 / Math.max(40, lk.rangeMeters), 34, 150);
+      this.lockBoxEl.style.opacity = '1';
+      this.lockBoxEl.style.width = `${size.toFixed(0)}px`;
+      this.lockBoxEl.style.height = `${size.toFixed(0)}px`;
+      this.lockBoxEl.style.transform = `translate3d(${lk.screenX.toFixed(1)}px, ${lk.screenY.toFixed(1)}px, 0) translate(-50%, -50%)`;
+      // Brackets start spread open and close proportionally with progress
+      const spread = lk.locked ? 1 : 1.32 - 0.32 * clamp01(lk.progress);
+      this.lkBracketsEl.setAttribute(
+        'transform',
+        `translate(50 50) scale(${spread.toFixed(3)}) translate(-50 -50)`
+      );
+      this.lkSquareEl.style.opacity = lk.locked ? '1' : '0';
+      this.lkLabelEl.style.opacity = lk.locked ? '1' : '0';
+    } else {
+      this.lockBoxEl.style.opacity = '0';
     }
   }
 
@@ -1339,6 +1371,10 @@ export class HUD {
     hitMarker: HTMLDivElement;
     killBanner: HTMLDivElement;
     damageArc: HTMLDivElement;
+    lockBox: HTMLDivElement;
+    lkBrackets: SVGGElement;
+    lkSquare: SVGRectElement;
+    lkLabel: SVGTextElement;
   } {
     const layer = document.createElement('div');
     layer.className = 'fcs-reticle-layer';
@@ -1447,6 +1483,26 @@ export class HUD {
     `;
     layer.appendChild(killBanner);
 
+    // 6. Guided-munition seeker lock box (amber square / closing brackets)
+    const lockBox = document.createElement('div');
+    lockBox.className = 'fcs-lockbox';
+    lockBox.innerHTML = `
+      <svg viewBox="0 0 100 100" width="100" height="100">
+        <g class="fcs-lk-brackets">
+          <path d="M26 10 L10 10 L10 26" fill="none"/>
+          <path d="M74 10 L90 10 L90 26" fill="none"/>
+          <path d="M26 90 L10 90 L10 74" fill="none"/>
+          <path d="M74 90 L90 90 L90 74" fill="none"/>
+        </g>
+        <rect class="fcs-lk-square" x="10" y="10" width="80" height="80" fill="none"/>
+        <text class="fcs-lk-label" x="50" y="-4" text-anchor="middle">LOCK</text>
+      </svg>
+    `;
+    layer.appendChild(lockBox);
+    const lkBrackets = lockBox.querySelector('.fcs-lk-brackets') as SVGGElement;
+    const lkSquare = lockBox.querySelector('.fcs-lk-square') as SVGRectElement;
+    const lkLabel = lockBox.querySelector('.fcs-lk-label') as SVGTextElement;
+
     return {
       layer,
       commanderAim,
@@ -1456,6 +1512,10 @@ export class HUD {
       hitMarker,
       killBanner,
       damageArc,
+      lockBox,
+      lkBrackets,
+      lkSquare,
+      lkLabel,
     };
   }
 

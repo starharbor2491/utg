@@ -99,6 +99,25 @@ export interface ShellSpec {
   dispersionRad: number;
   /** Rocket motors: while `age < burnTime` the round accelerates along its velocity */
   rocket?: { burnTime: number; thrustAccel: number };
+  /** Generic guided-munition seeker (heat-seeking rockets now, SAMs later):
+   *  launch platform acquires a lock, each round then flies proportional
+   *  navigation toward the locked target after `boostDelay`. */
+  guidance?: {
+    /** Launch-platform seeker acquisition cone half-angle (deg) */
+    seekerConeDeg: number;
+    /** Seconds of continuous aim hold required to lock */
+    lockTime: number;
+    /** PN navigation gain N */
+    navGain: number;
+    /** Lateral acceleration clamp (m/s^2) */
+    maxAccel: number;
+    /** Seconds after launch before the seeker goes active */
+    boostDelay: number;
+    /** Seeker acquisition / in-flight reach (m) */
+    maxRange: number;
+    /** Burning wrecks can steal the seeker */
+    decoyable: boolean;
+  };
 }
 
 export interface TankStats {
@@ -149,6 +168,13 @@ export interface TankIntent {
   brake: boolean;
   /** Desired world-space aim target for turret + main gun */
   aimPoint: THREE.Vector3;
+  /** World-space origin of the player's aim ray (camera); bots omit it and
+   *  the seeker falls back to the tank's own position. */
+  aimRayOrigin?: THREE.Vector3;
+  /** Optional seeker aim reference: bots set this to their current target so
+   *  the lock cone measures bearing-to-target rather than the elevated
+   *  ballistic solution point in `aimPoint`. */
+  seekerAimPoint?: THREE.Vector3;
   /** Pull main cannon trigger */
   fireCannon: boolean;
   /** Hold coaxial MG / IFV autocannon trigger */
@@ -242,6 +268,13 @@ export interface TankEntity {
   selectedShellIndex: 0 | 1;
   readonly activeShell: ShellSpec;
   lastXRayReport: ShellHitXRayReport | null;
+  /** Guided-munition seeker state (salvo/rocket classes only; undefined otherwise).
+   *  `progress` runs 0..1 while acquiring, `locked` once held for lockTime. */
+  readonly seekerLock?: {
+    readonly target: TankEntity | null;
+    readonly progress: number;
+    readonly locked: boolean;
+  };
 
   getMuzzleWorld(outPos: THREE.Vector3, outDir: THREE.Vector3): void;
   getCoaxWorld(outPos: THREE.Vector3, outDir: THREE.Vector3): void;
@@ -361,6 +394,19 @@ export interface HUDTelemetry {
   playerTeam: Team;
   fps: number;
 
+  /** Guided-munition seeker lock box (rocket class only; absent otherwise).
+   *  Screen-space position is filled by main.ts each frame. */
+  lockOn?: {
+    targetId: string;
+    /** 0..1 acquisition progress while seeking; 1 while locked */
+    progress: number;
+    locked: boolean;
+    screenX: number;
+    screenY: number;
+    /** False when the target projects outside the view — HUD hides the box */
+    onScreen: boolean;
+    rangeMeters: number;
+  };
   /** Remaining flash timer & kind for center reticle hit confirmation */
   hitMarker: {
     kind: 'none' | 'hit' | 'kill';

@@ -192,6 +192,7 @@ export class BotAIManager {
         steer: 0,
         brake: false,
         aimPoint: new THREE.Vector3(0, 0, 0),
+        seekerAimPoint: new THREE.Vector3(0, 0, 0),
         fireCannon: false,
         fireMG: false,
       });
@@ -782,6 +783,9 @@ export class BotAIManager {
 
       bot.getMuzzleWorld(this._muzzlePos, this._muzzleDir);
       target.getCenterMassWorld(this._targetCenter);
+      // Seeker lock reference: bearing to the actual target (aimPoint holds
+      // the elevated ballistic solution, which sits outside the 6° cone)
+      if (intent.seekerAimPoint) intent.seekerAimPoint.copy(this._targetCenter);
 
       if (bot.stats.salvoSize) {
         // Rocket artillery: re-solve launch pitch (bisection on the shared
@@ -881,13 +885,17 @@ export class BotAIManager {
       intent.selectShell = Math.sin(this.clock * 0.08 + brain.seed * 10) > 0.45 ? 1 : 0;
 
       if (bot.stats.salvoSize) {
-        // Rocket launcher: standoff band, tight bore alignment (0.05 rad)
+        // Rocket launcher: tight bore alignment (0.05 rad). Locked salvos may
+        // fire across the seeker envelope (60–420 m); closer than 120 m
+        // unguided ballistic fire is allowed (point-blank window).
+        const seekerLocked = Boolean(bot.seekerLock?.locked);
+        const guidedBand = distToTarget > 60 && distToTarget < 420;
+        const pointBlank = distToTarget >= 40 && distToTarget < 120;
         intent.fireCannon =
           losClear &&
           brain.losLockTimer >= 2.2 &&
-          distToTarget > 140 &&
-          distToTarget < 420 &&
-          boreAngle <= 0.05;
+          boreAngle <= 0.05 &&
+          ((guidedBand && seekerLocked) || pointBlank);
       } else {
         // Forgiving bot fire: requires 2.2s continuous LOS lock, range < 340m
         intent.fireCannon =

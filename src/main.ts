@@ -19,6 +19,8 @@ import type {
   MinimapUnit,
   ScreenReticlePos,
   ShellSpec,
+  TankEntity,
+  TankIntent,
   Team,
   VehicleClass,
 } from './game/types';
@@ -306,6 +308,21 @@ async function bootstrap(): Promise<void> {
 
   const commanderAimScreen: ScreenReticlePos = { x: 0, y: 0, visible: true };
   const gunnerBoreScreen = { x: 0, y: 0, visible: true, onTarget: false, rangeMeters: 100 };
+  const lockTargetScreen: ScreenReticlePos = { x: 0, y: 0, visible: true };
+  const _qaAimPoint = new THREE.Vector3();
+  const _qaAimOrigin = new THREE.Vector3();
+  const _qaIntent: TankIntent = {
+    throttle: 0,
+    steer: 0,
+    brake: false,
+    aimPoint: _qaAimPoint,
+    aimRayOrigin: _qaAimOrigin,
+    fireCannon: false,
+    fireMG: false,
+    selectShell: null,
+  };
+  let qaIntentOverride: TankIntent | null = null;
+  let qaFireCannonOnce = false;
 
   let fpsSmooth = 60;
   let cameraOverrideActive = false;
@@ -340,8 +357,8 @@ async function bootstrap(): Promise<void> {
   let xrayFlashCount = 0;
 
   const tankCallbacks = {
-    onFireCannon: (shooter: Tank, pos: THREE.Vector3, dir: THREE.Vector3, shell: ShellSpec) => {
-      ballistics.fireCannon(shooter, pos, dir, shell);
+    onFireCannon: (shooter: Tank, pos: THREE.Vector3, dir: THREE.Vector3, shell: ShellSpec, guideTarget?: TankEntity | null) => {
+      ballistics.fireCannon(shooter, pos, dir, shell, guideTarget);
       if (shooter === match.human) {
         controller.addShake(shooter.stats.vehicleClass === 'heavy' ? 0.52 : 0.34);
       }
@@ -466,8 +483,16 @@ async function bootstrap(): Promise<void> {
 
     const shakeImpulse = effects.consumeCameraShake(camera.position);
     let playerIntent = null;
-    if (!cameraOverrideActive) {
+    if (qaIntentOverride) {
+      playerIntent = qaIntentOverride;
+    } else if (!cameraOverrideActive) {
       playerIntent = controller.update(dt, human, world, allTanks, shakeImpulse);
+      // Player aim ray originates at the camera (seeker lock cone)
+      if (playerIntent) playerIntent.aimRayOrigin = camera.position;
+    }
+    if (playerIntent && qaFireCannonOnce) {
+      playerIntent.fireCannon = true;
+      qaFireCannonOnce = false;
     }
     lastPlayerThrottle = playerIntent?.throttle ?? 0;
 
@@ -480,7 +505,7 @@ async function bootstrap(): Promise<void> {
       e.stepKinematics(dt, eIntent, world, allTanks, tankCallbacks);
     }
 
-    ballistics.update(dt, world, allTanks, handleDamage);
+    ballistics.update(dt, world, allTanks, handleDamage, destruction.getDecoyPoints());
     match.update(dt);
     world.update(dt, human.position, camera.position);
     effects.update(dt, camera);
@@ -594,6 +619,41 @@ async function bootstrap(): Promise<void> {
     );
     gunnerBoreScreen.onTarget = reticlePixelGap < 18 && playerTank.cannonCooldown <= 0.01;
 
+    // Seeker lock box: project the locked/acquiring target; drop when it
+    // leaves the viewport. While locked the ballistic pip is hidden — the
+    // lock box replaces it.
+    let lockOnTelemetry: HUDTelemetry['lockOn'];
+    const seeker = playerTank.seekerLock;
+    if (seeker?.target && seeker.progress > 0 && playerTank.stats.salvoSize) {
+      const lt = seeker.target as Tank;
+      lt.getCenterMassWorld(_projScratch);
+      projectWorldToScreen(_projScratch, camera, vw, vh, lockTargetScreen, _markerWorldPos);
+      const margin = 30;
+      const offScreen =
+        !lockTargetScreen.visible ||
+        lockTargetScreen.x < -margin ||
+        lockTargetScreen.x > vw + margin ||
+        lockTargetScreen.y < -margin ||
+        lockTargetScreen.y > vh + margin;
+      if (offScreen) {
+        lt.dropSeekerLock();
+      } else {
+        lockOnTelemetry = {
+          targetId: lt.id,
+          progress: seeker.progress,
+          locked: seeker.locked,
+          screenX: lockTargetScreen.x,
+          screenY: lockTargetScreen.y,
+          onScreen: true,
+          rangeMeters: playerTank.position.distanceTo(lt.position),
+        };
+      }
+    }
+    if (seeker?.locked) {
+      // Lock box replaces the predicted-impact pip for guided rockets
+      gunnerBoreScreen.visible = false;
+    }
+
     hitMarkerTimer = Math.max(0, hitMarkerTimer - dt);
     if (hitMarkerTimer <= 0) hitMarkerKind = 'none';
     incomingDamageTimer = Math.max(0, incomingDamageTimer - dt);
@@ -629,6 +689,7 @@ async function bootstrap(): Promise<void> {
       mgOverheated: playerTank.mgOverheated,
       commanderAim: commanderAimScreen,
       gunnerBore: gunnerBoreScreen,
+      lockOn: lockOnTelemetry,
       kills,
       deaths,
       activeEnemies: activeEnemyCount,
@@ -750,6 +811,32 @@ async function bootstrap(): Promise<void> {
     destruction.applyBlast(_markerWorldPos, 6, 12);
     t.debugKill(catastrophic);
     return true;
+  };
+
+  /** Shared guidedTest/guidedScene setup: player rocket 300 m south of a
+   *  red tank circling at 12 m/s around (0,-50); all other tanks parked. */
+  const setupGuidedScene = (target: Tank): void => {
+    const human = match.human;
+    const px = 0;
+    const pz = -350;
+    human.respawnAt(_markerWorldPos.set(px, world.getHeightAt(px, pz), pz), 0);
+    (human as unknown as { spawnProtect: number }).spawnProtect = 0;
+
+    target.qaDriveCircle = { cx: 0, cz: -50, radius: 40, speed: 12, phase: 0 };
+    target.respawnAt(_markerWorldPos.set(40, world.getHeightAt(40, -50), -50), 0);
+    (target as unknown as { spawnProtect: number }).spawnProtect = 0;
+
+    let parkIdx = 0;
+    for (const b of allTanks) {
+      if (b === human || b === target) continue;
+      const a = parkIdx * 2.399;
+      const r = 465;
+      const x = Math.cos(a) * r;
+      const z = Math.sin(a) * r;
+      b.respawnAt(_markerWorldPos.set(x, world.getHeightAt(x, z), z), a);
+      (b as unknown as { spawnProtect: number }).spawnProtect = 0;
+      parkIdx++;
+    }
   };
 
   // Expose QA & GPU render-stats telemetry for programmatic verification
@@ -1064,8 +1151,138 @@ async function bootstrap(): Promise<void> {
         hp: Math.round(t.hp),
         x: Math.round(t.position.x * 10) / 10,
         z: Math.round(t.position.z * 10) / 10,
+        seeker: t.seekerLock
+          ? {
+              target: t.seekerLock.target?.id ?? null,
+              progress: Math.round(t.seekerLock.progress * 100) / 100,
+              locked: t.seekerLock.locked,
+            }
+          : undefined,
       })),
     }),
+    /** Sets up the guidedTest scene WITHOUT running it: player rocket at
+     *  (0,-350), a red tank circling at 12 m/s around (0,-50) ~300 m ahead,
+     *  all other tanks parked at the map rim. Real seeker/HUD path then runs. */
+    guidedScene: () => {
+      swapPlayerClassFn?.('rocket');
+      const human = match.human;
+      const target =
+        bots.find((b) => b.team === 'red' && b.stats.vehicleClass !== 'rocket') ??
+        bots.find((b) => b.team === 'red') ??
+        null;
+      if (!target) return { error: 'no red bot available' };
+      setupGuidedScene(target);
+      return { ok: true, targetId: target.id };
+    },
+    /** Fires one player cannon trigger through the normal intent path. */
+    firePlayerCannonForTest: () => {
+      qaFireCannonOnce = true;
+      return true;
+    },
+    /** Guided-munition QA: a red tank drives a 40 m circle at 12 m/s, 300 m
+     *  from the player's rocket launcher. Runs guided (locked), unguided
+     *  (no lock) and decoy (burning wreck in front of target, 3 salvos)
+     *  scenarios; reports hits, min miss distance and decoy count. */
+    guidedTest: () => {
+      swapPlayerClassFn?.('rocket');
+      const human = match.human;
+      const target =
+        bots.find((b) => b.team === 'red' && b.stats.vehicleClass !== 'rocket') ??
+        bots.find((b) => b.team === 'red') ??
+        null;
+      if (!target) return { error: 'no red bot available' };
+
+      const runScenario = (mode: 'guided' | 'unguided' | 'decoy') => {
+        ballistics.resetGuidedStats();
+        ballistics.missProbeTarget = target;
+        ballistics.missProbeMin = Infinity;
+        setupGuidedScene(target);
+
+        // Decoy mode: kill spare bots at the near-side point before each salvo
+        const decoySpare = allTanks.filter((t) => t !== human && t !== target);
+        let decoyArmed = 0;
+
+        qaIntentOverride = _qaIntent;
+        let steps = 0;
+        const maxSteps = mode === 'decoy' ? 1600 : 800;
+        const wantSalvos = mode === 'decoy' ? 3 : 1;
+        let salvosStarted = 0;
+        let lastSalvoStep = -1;
+        let wasSalvo = false;
+        let unguidedFired = false;
+
+        while (steps < maxSteps) {
+          steps++;
+          target.getCenterMassWorld(_qaAimPoint);
+          _qaAimOrigin.set(human.position.x, human.position.y + 2.2, human.position.z);
+          _qaIntent.throttle = 0;
+          _qaIntent.steer = 0;
+          _qaIntent.brake = false;
+          _qaIntent.fireMG = false;
+          _qaIntent.selectShell = null;
+
+          const canTrigger =
+            human.cannonCooldown <= 0 && human.rocketsLeft > 0 && !human.salvoInProgress;
+
+          if (mode === 'unguided') {
+            // Fire the first available salvo with no lock wait
+            _qaIntent.fireCannon = !unguidedFired && canTrigger;
+            if (human.salvoInProgress) unguidedFired = true;
+          } else {
+            const locked = Boolean(human.seekerLock?.locked);
+            _qaIntent.fireCannon = locked && canTrigger && salvosStarted < wantSalvos;
+          }
+
+          if (mode === 'decoy' && salvosStarted < wantSalvos) {
+            // Arm a fresh burning wreck ~30 m in front of the target line
+            const need = salvosStarted; // one per upcoming salvo
+            if (decoyArmed <= need && decoySpare.length > 0) {
+              const spare = decoySpare[decoyArmed % decoySpare.length];
+              const bx = 0;
+              const bz = -110 - decoyArmed * 6;
+              spare.respawnAt(_markerWorldPos.set(bx, world.getHeightAt(bx, bz), bz), 0);
+              (spare as unknown as { spawnProtect: number }).spawnProtect = 0;
+              killTankNow(spare, true);
+              decoyArmed++;
+            }
+          }
+
+          stepSimulation(1 / 30);
+
+          const isSalvo = human.salvoInProgress;
+          if (isSalvo && !wasSalvo) {
+            salvosStarted++;
+            lastSalvoStep = steps;
+          }
+          wasSalvo = isSalvo;
+
+          if (salvosStarted >= wantSalvos && steps > lastSalvoStep + 260) break;
+        }
+
+        qaIntentOverride = null;
+        target.qaDriveCircle = null;
+        ballistics.missProbeTarget = null;
+
+        const minMiss = ballistics.missProbeMin;
+        return {
+          mode,
+          steps,
+          salvos: salvosStarted,
+          hits: ballistics.guidedHits,
+          decoys: ballistics.guidedDecoys,
+          minMiss: minMiss === Infinity ? null : Math.round(minMiss * 10) / 10,
+          guidedMinMiss:
+            ballistics.guidedMinMiss === Infinity ? null : Math.round(ballistics.guidedMinMiss * 10) / 10,
+          targetAlive: target.alive,
+          targetHp: Math.round(target.hp),
+        };
+      };
+
+      const guided = runScenario('guided');
+      const unguided = runScenario('unguided');
+      const decoy = runScenario('decoy');
+      return { guided, unguided, decoy };
+    },
     runThreeAudit: () => {
       const results: Record<string, AuditIssue[]> = {};
       const testClasses: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket'];

@@ -1231,6 +1231,30 @@ export class DestructionManager {
     return n;
   }
 
+  /** Burning wreck positions for guided-munition decoys (reused, zero-alloc). */
+  public readonly decoyPoints: { x: number; y: number; z: number }[] = [];
+  private readonly _decoyObjPool: { x: number; y: number; z: number }[] = [];
+
+  public getDecoyPoints(): readonly { x: number; y: number; z: number }[] {
+    const out = this.decoyPoints;
+    let i = 0;
+    for (const w of this.wrecks) {
+      if (!w.active || (w.state !== 'flight' && w.state !== 'burning')) continue;
+      let p = this._decoyObjPool[i];
+      if (!p) {
+        p = { x: 0, y: 0, z: 0 };
+        this._decoyObjPool[i] = p;
+      }
+      p.x = w.hullBody.pos.x;
+      p.y = w.hullBody.pos.y + 1.2;
+      p.z = w.hullBody.pos.z;
+      out[i] = p;
+      i++;
+    }
+    out.length = i;
+    return out;
+  }
+
   public getWreckState(): { count: number; mergeMsAvg: number; mergeCount: number; wrecks: { cls: string; age: number; state: string; x: number; y: number; z: number; tx?: number; ty?: number; tz?: number; tvx?: number; tvy?: number; tvz?: number }[] } {
     return {
       count: this.activeWreckCount,

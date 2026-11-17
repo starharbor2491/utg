@@ -992,13 +992,13 @@ export class World implements TerrainQuery {
           .replace(
             '#include <roughnessmap_fragment>',
             `float roughnessFactor = roughness;
-            // Dull silt foam streaks drifting along the banks
-            float foamT = uTime;
-            float foamN = sin(vWaterUv.x * 55.0 - foamT * 3.2 + sin(vWaterUv.y * 14.0) * 2.4) * 0.5 + 0.5;
-            foamN *= sin(vWaterUv.x * 23.0 + foamT * 1.7) * 0.5 + 0.5;
-            float foam = smoothstep(0.55, 0.9, vWaterBank) * smoothstep(0.45, 0.85, foamN);
-            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.24, 0.215, 0.14), foam * 0.5);
-            roughnessFactor = mix(roughnessFactor, 0.6, foam * 0.5);`
+            // Soft noise-broken silt band along the banks (no repeating pattern)
+            vec2 siltP = vWaterWorld.xz * 0.35;
+            float siltN = fract(sin(dot(floor(siltP), vec2(127.1, 311.7))) * 43758.5453);
+            siltN = mix(siltN, fract(sin(dot(floor(siltP * 2.7), vec2(269.5, 183.3))) * 28001.8384), 0.5);
+            float siltBreak = smoothstep(0.25, 0.75, siltN + vWaterBank * 0.35);
+            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.22, 0.20, 0.13), siltBreak * smoothstep(0.35, 0.9, vWaterBank) * 0.5);
+            roughnessFactor = mix(roughnessFactor, 0.6, siltBreak * 0.3);`
           )
           .replace(
             '#include <lights_fragment_end>',

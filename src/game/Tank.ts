@@ -149,6 +149,16 @@ const HUMVEE_50CAL: readonly [ShellSpec, ShellSpec] = [
   },
 ];
 
+const ROCKET_GUIDANCE = {
+  seekerConeDeg: 50,
+  lockTime: 0.6,
+  navGain: 3,
+  maxAccel: 45,
+  boostDelay: 0.25,
+  maxRange: 650,
+  decoyable: true,
+} as const;
+
 const ROCKET_SHELLS: readonly [ShellSpec, ShellSpec] = [
   {
     id: 'rocket_he',
@@ -165,6 +175,7 @@ const ROCKET_SHELLS: readonly [ShellSpec, ShellSpec] = [
     tracerColorRGB: [9.0, 5.5, 1.4],
     dispersionRad: 0.01,
     rocket: { burnTime: 1.2, thrustAccel: 100 },
+    guidance: ROCKET_GUIDANCE,
   },
   {
     id: 'rocket_at',
@@ -181,6 +192,7 @@ const ROCKET_SHELLS: readonly [ShellSpec, ShellSpec] = [
     tracerColorRGB: [5.5, 7.5, 9.5],
     dispersionRad: 0.01,
     rocket: { burnTime: 1.2, thrustAccel: 100 },
+    guidance: ROCKET_GUIDANCE,
   },
 ];
 
@@ -190,7 +202,7 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
     displayName: 'NORMAL MBT',
     maxHp: 1000,
     armorDamageMult: 1.0,
-    maxForwardSpeed: 18.2, // ~65 km/h
+    maxForwardSpeed: 17.2, // ~62 km/h
     maxReverseSpeed: 9.2,
     forwardAccel: 10.8,
     reverseAccel: 8.4,
@@ -254,9 +266,9 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
     displayName: 'IFV (AUTO-MG)',
     maxHp: 780,
     armorDamageMult: 1.15,
-    maxForwardSpeed: 24.2, // ~87 km/h rapid recon IFV
-    maxReverseSpeed: 12.5,
-    forwardAccel: 15.2,
+    maxForwardSpeed: 20.5, // ~74 km/h rapid recon IFV
+    maxReverseSpeed: 10.5,
+    forwardAccel: 12.0,
     reverseAccel: 11.5,
     brakeDecel: 26.0,
     hullTurnRate: 1.45,
@@ -286,9 +298,9 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
     displayName: 'HUMVEE (M2 .50CAL)',
     maxHp: 420,
     armorDamageMult: 1.5,
-    maxForwardSpeed: 30, // ~108 km/h gun truck
-    maxReverseSpeed: 9,
-    forwardAccel: 9,
+    maxForwardSpeed: 25, // ~90 km/h gun truck
+    maxReverseSpeed: 8,
+    forwardAccel: 8,
     reverseAccel: 6,
     brakeDecel: 24,
     hullTurnRate: 0.9,
@@ -319,9 +331,9 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
     displayName: 'MLRS ROCKET ARTY',
     maxHp: 520,
     armorDamageMult: 1.35,
-    maxForwardSpeed: 22, // ~79 km/h launcher truck
-    maxReverseSpeed: 6,
-    forwardAccel: 7,
+    maxForwardSpeed: 18.5, // ~67 km/h launcher truck
+    maxReverseSpeed: 5.5,
+    forwardAccel: 6.2,
     reverseAccel: 4,
     brakeDecel: 20,
     hullTurnRate: 0.7,
@@ -468,6 +480,10 @@ const _tmpVecA = new THREE.Vector3();
 const _tmpVecB = new THREE.Vector3();
 const _tmpQuat = new THREE.Quaternion();
 const _crushDir = new THREE.Vector2();
+const _seekOrigin = new THREE.Vector3();
+const _seekDir = new THREE.Vector3();
+const _seekTo = new THREE.Vector3();
+const _seekLos = new THREE.Vector3();
 
 export class Tank implements TankEntity {
   public readonly id: string;
@@ -537,6 +553,21 @@ export class Tank implements TankEntity {
   private salvoFired = 0;
   private _rocketsLeft = 0;
   private salvoSpec: ShellSpec | null = null;
+  private salvoGuideTarget: Tank | null = null;
+
+  // Guided-munition seeker state (salvo classes only)
+  private seekerTarget: Tank | null = null;
+  private seekerProgress = 0;
+  private seekerLocked = false;
+  private seekerOffTimer = 0;
+  private seekerScanTimer = 0;
+  private readonly _seekerLockView = {
+    target: null as TankEntity | null,
+    progress: 0,
+    locked: false,
+  };
+  /** QA: forces this tank to drive a circle (guidedTest target). */
+  public qaDriveCircle: { cx: number; cz: number; radius: number; speed: number; phase: number } | null = null;
 
   constructor(
     id: string,
@@ -575,6 +606,31 @@ export class Tank implements TankEntity {
     return this.salvoActive;
   }
 
+  /** Seeker lock state for HUD/bots (reused view object — read synchronously).
+   *  Undefined for classes without guided munitions. */
+  public get seekerLock():
+    | {
+        readonly target: TankEntity | null;
+        readonly progress: number;
+        readonly locked: boolean;
+      }
+    | undefined {
+    if (!this.stats.salvoSize || !this.activeShell.guidance) return undefined;
+    const v = this._seekerLockView;
+    v.target = this.seekerTarget;
+    v.progress = this.seekerProgress;
+    v.locked = this.seekerLocked;
+    return v;
+  }
+
+  /** Drops the seeker lock (off-screen target, manual reset). */
+  public dropSeekerLock(): void {
+    this.seekerTarget = null;
+    this.seekerProgress = 0;
+    this.seekerLocked = false;
+    this.seekerOffTimer = 0;
+  }
+
   public get turretWorldYaw(): number {
     return wrapAnglePi(this.hullYaw + this.turretRelYaw);
   }
@@ -585,7 +641,7 @@ export class Tank implements TankEntity {
     world: TerrainQuery,
     allTanks: readonly Tank[],
     callbacks?: {
-      onFireCannon?: (tank: Tank, pos: THREE.Vector3, dir: THREE.Vector3, shell: ShellSpec) => void;
+      onFireCannon?: (tank: Tank, pos: THREE.Vector3, dir: THREE.Vector3, shell: ShellSpec, guideTarget?: TankEntity | null) => void;
       onFireMG?: (tank: Tank, pos: THREE.Vector3, dir: THREE.Vector3, beltSpec?: ShellSpec) => void;
       onTrackDust?: (pos: THREE.Vector3, intensity01: number) => void;
       onWaterWake?: (pos: THREE.Vector3, intensity01: number) => void;
@@ -604,6 +660,23 @@ export class Tank implements TankEntity {
         this.alignHullToTerrain(world, safeDt, 0);
       }
 
+      return;
+    }
+
+    // QA-driven circular target path (guidedTest): kinematic placement, no
+    // weapons fire, turret still tracks the supplied aim point.
+    if (this.qaDriveCircle) {
+      const d = this.qaDriveCircle;
+      d.phase += (d.speed * safeDt) / d.radius;
+      const px = d.cx + Math.cos(d.phase) * d.radius;
+      const pz = d.cz + Math.sin(d.phase) * d.radius;
+      this.hullYaw = Math.atan2(-Math.sin(d.phase), Math.cos(d.phase));
+      this.position.set(px, 0, pz);
+      this.speed = d.speed;
+      this.velocity.set(Math.sin(this.hullYaw) * d.speed, 0, Math.cos(this.hullYaw) * d.speed);
+      this.alignHullToTerrain(world, safeDt, 0);
+      if (intent) this.updateTurretAndGunAim(intent.aimPoint, safeDt);
+      this.rig.articulate?.(this.gunPitch);
       return;
     }
 
@@ -864,6 +937,18 @@ export class Tank implements TankEntity {
     // Lightweight ancestor-only world matrix sync on muzzleNode instead of 35-mesh full subtree traversal!
     this.rig.muzzleNode.updateWorldMatrix(true, false);
 
+    // Guided-munition seeker: scan/track while the rocket class is active and
+    // no salvo is in flight. Frozen during a salvo (each rocket already carries
+    // the lock captured at trigger time).
+    if (
+      this.stats.salvoSize &&
+      this.activeShell.guidance &&
+      intent &&
+      !this.salvoActive
+    ) {
+      this._updateSeeker(intent, world, allTanks, safeDt);
+    }
+
     // Fire main cannon (Normal MBT & Heavy Tank) or rocket pod salvo (MLRS)
     if (this.stats.hasMainCannon) {
       const canFireCannon =
@@ -899,6 +984,7 @@ export class Tank implements TankEntity {
           this.salvoTimer = 0;
           this.salvoFired = 0;
           this.salvoSpec = this.activeShell;
+          this.salvoGuideTarget = this.seekerLocked ? this.seekerTarget : null;
         }
       } else if (intent?.fireCannon && this.cannonCooldown <= 0 && canFireCannon) {
         const loaderPenalty =
@@ -1123,9 +1209,141 @@ export class Tank implements TankEntity {
     return outPos.set(this.position.x, this.position.y + 1.35, this.position.z);
   }
 
+  /**
+   * Guided-munition seeker: at 10 Hz pick the enemy nearest the aim ray inside
+   * the guidance cone with clear LOS; per-frame track hold/drop. Lock completes
+   * after `guidance.lockTime` seconds continuously inside the cone; leaving the
+   * cone for >0.3 s (or the target dying) drops it.
+   */
+  private _updateSeeker(
+    intent: TankIntent,
+    world: TerrainQuery,
+    allTanks: readonly Tank[],
+    dt: number
+  ): void {
+    const g = this.activeShell.guidance;
+    if (!g) return;
+
+    // Aim ray: player supplies the camera origin; bots fall back to own position.
+    if (intent.aimRayOrigin) {
+      _seekOrigin.copy(intent.aimRayOrigin);
+    } else {
+      _seekOrigin.set(this.position.x, this.position.y + 1.6, this.position.z);
+    }
+    // Seeker aim reference: bots pass their target bearing explicitly (their
+    // aimPoint is an elevated ballistic solution, not a bearing); the player
+    // uses the crosshair aim point.
+    _seekDir.subVectors(intent.seekerAimPoint ?? intent.aimPoint, _seekOrigin);
+    if (_seekDir.lengthSq() < 0.04) {
+      _seekDir.set(Math.sin(this.hullYaw), 0, Math.cos(this.hullYaw));
+    } else {
+      _seekDir.normalize();
+    }
+    // Lock-on acquisition/hold cone is a fixed 6° (guidance.seekerConeDeg is
+    // the wider in-flight retention cone used by Ballistics)
+    const coneCos = Math.cos(THREE.MathUtils.degToRad(6));
+
+    // Instant drop on target death
+    if (this.seekerTarget && !this.seekerTarget.alive) {
+      this._clearSeeker();
+    }
+
+    // Per-frame hold/drop tracking on the current target (cheap cone test)
+    if (this.seekerTarget) {
+      const held = this._seekerInCone(this.seekerTarget, g, coneCos);
+      if (!held) {
+        this.seekerOffTimer += dt;
+        this.seekerProgress = Math.max(0, this.seekerProgress - dt * 1.6);
+        if (this.seekerOffTimer > 0.3) this._clearSeeker();
+      } else {
+        this.seekerOffTimer = 0;
+        if (!this.seekerLocked) {
+          this.seekerProgress = Math.min(1, this.seekerProgress + dt / g.lockTime);
+          if (this.seekerProgress >= 1) this.seekerLocked = true;
+        }
+      }
+    }
+
+    // 10 Hz acquisition scan — skipped while locked (lock persists until drop)
+    this.seekerScanTimer -= dt;
+    if (this.seekerScanTimer <= 0 && !this.seekerLocked) {
+      this.seekerScanTimer = 0.1;
+      const cand = this._scanSeekerCandidate(world, allTanks, g, coneCos);
+      if (cand !== this.seekerTarget) {
+        this.seekerTarget = cand;
+        this.seekerProgress = 0;
+        this.seekerOffTimer = 0;
+        this.seekerLocked = false;
+      }
+    }
+  }
+
+  private _clearSeeker(): void {
+    this.seekerTarget = null;
+    this.seekerProgress = 0;
+    this.seekerLocked = false;
+    this.seekerOffTimer = 0;
+  }
+
+  /** Cheap per-frame cone/range/alive test for the current seeker target. */
+  private _seekerInCone(t: Tank, g: NonNullable<ShellSpec['guidance']>, coneCos: number): boolean {
+    if (!t.alive || t.team === this.team) return false;
+    _seekTo.set(t.position.x, t.position.y + 1.5, t.position.z).sub(_seekOrigin);
+    const dist = _seekTo.length();
+    if (dist < 60 || dist > g.maxRange) return false;
+    _seekTo.multiplyScalar(1 / dist);
+    return _seekTo.dot(_seekDir) >= coneCos;
+  }
+
+  /** 10 Hz scan: enemy nearest the aim ray inside cone+range with clear LOS. */
+  private _scanSeekerCandidate(
+    world: TerrainQuery,
+    allTanks: readonly Tank[],
+    g: NonNullable<ShellSpec['guidance']>,
+    coneCos: number
+  ): Tank | null {
+    // Top-2 by aim-ray angle (dot), then LOS-check in order
+    let best: Tank | null = null;
+    let bestDot = coneCos;
+    let second: Tank | null = null;
+    let secondDot = coneCos;
+    for (let i = 0; i < allTanks.length; i++) {
+      const t = allTanks[i];
+      if (t === this || !t.alive || t.team === this.team) continue;
+      _seekTo.set(t.position.x, t.position.y + 1.5, t.position.z).sub(_seekOrigin);
+      const dist = _seekTo.length();
+      if (dist < 60 || dist > g.maxRange) continue;
+      const dot = _seekTo.dot(_seekDir) / dist;
+      if (dot > bestDot) {
+        second = best;
+        secondDot = bestDot;
+        best = t;
+        bestDot = dot;
+      } else if (dot > secondDot) {
+        second = t;
+        secondDot = dot;
+      }
+    }
+    for (const cand of [best, second]) {
+      if (!cand) break;
+      _seekTo.set(cand.position.x, cand.position.y + 1.5, cand.position.z).sub(_seekOrigin);
+      const dist = _seekTo.length();
+      if (dist < 1) continue;
+      _seekLos.copy(_seekTo).multiplyScalar(1 / dist);
+      const checkDist = Math.max(0.5, dist - cand.stats.hitRadius * 0.5 - 1);
+      const hit = world.raycastWorld(_seekOrigin, _seekLos, checkDist);
+      if (!hit) return cand;
+      // Destructible brush < 12 m doesn't block the seeker
+      const brushOk =
+        hit.hitKind === 'obstacle' && Boolean(hit.obstacle?.destructible) && hit.distance < 12;
+      if (brushOk) return cand;
+    }
+    return null;
+  }
+
   /** Launches the next rocket from its own pod tube; that tube's mesh stays hidden until reload. */
   private _fireNextRocket(callbacks?: {
-    onFireCannon?: (tank: Tank, pos: THREE.Vector3, dir: THREE.Vector3, shell: ShellSpec) => void;
+    onFireCannon?: (tank: Tank, pos: THREE.Vector3, dir: THREE.Vector3, shell: ShellSpec, guideTarget?: TankEntity | null) => void;
   }): void {
     const meshes = this.rig.rocketMeshes;
     if (meshes.length === 0) return;
@@ -1137,7 +1355,13 @@ export class Tank implements TankEntity {
     _tmpVecB.set(0, 0, 1).applyQuaternion(_tmpQuat).normalize();
     mesh.visible = false;
     this._rocketsLeft = Math.max(0, this._rocketsLeft - 1);
-    callbacks?.onFireCannon?.(this, _tmpVecA, _tmpVecB, this.salvoSpec ?? this.activeShell);
+    callbacks?.onFireCannon?.(
+      this,
+      _tmpVecA,
+      _tmpVecB,
+      this.salvoSpec ?? this.activeShell,
+      this.salvoGuideTarget
+    );
   }
 
   private _setRocketMeshesVisible(visible: boolean): void {
@@ -1591,6 +1815,13 @@ export class Tank implements TankEntity {
     this.salvoTimer = 0;
     this.salvoFired = 0;
     this.salvoSpec = null;
+    this.salvoGuideTarget = null;
+    this.seekerTarget = null;
+    this.seekerProgress = 0;
+    this.seekerLocked = false;
+    this.seekerOffTimer = 0;
+    this.seekerScanTimer = 0;
+    this.qaDriveCircle = null;
     this._rocketsLeft = this.stats.salvoSize ?? 0;
     this._setRocketMeshesVisible(true);
 
