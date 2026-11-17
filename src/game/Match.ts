@@ -21,8 +21,8 @@ const BASE_RED = { x: 0, z: 420 };
 const SPAWN_RADIUS_MIN = 0;
 const SPAWN_RADIUS_MAX = 35;
 
-const BLUE_BOT_CLASSES: readonly VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket'];
-const RED_BOT_CLASSES: readonly VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket', 'normal'];
+const BLUE_BOT_CLASSES: readonly VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'support'];
+const RED_BOT_CLASSES: readonly VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket', 'support'];
 
 export class Match {
   readonly score = { blue: 0, red: 0 };
@@ -51,6 +51,7 @@ export class Match {
       ifv: new Tank('you_ifv', 'blue', 'ifv', assets, spawn, blueYaw, true, 'You'),
       humvee: new Tank('you_humvee', 'blue', 'humvee', assets, spawn, blueYaw, true, 'You'),
       rocket: new Tank('you_rocket', 'blue', 'rocket', assets, spawn, blueYaw, true, 'You'),
+      support: new Tank('you_support', 'blue', 'support', assets, spawn, blueYaw, true, 'You'),
     };
 
     this.tanks.push(this.humanVehicles.normal);

@@ -483,6 +483,7 @@ export class BallisticsManager {
   // QA metrics for guidedTest()
   public guidedHits = 0;
   public guidedDecoys = 0;
+  public samLaunched = 0;
   public guidedMinMiss = Infinity;
   /** When set, every rocket shell tracks closest approach to this entity (miss metric). */
   public missProbeTarget: TankEntity | null = null;
@@ -491,6 +492,7 @@ export class BallisticsManager {
   public resetGuidedStats(): void {
     this.guidedHits = 0;
     this.guidedDecoys = 0;
+    this.samLaunched = 0;
     this.guidedMinMiss = Infinity;
     this.missProbeMin = Infinity;
   }
@@ -644,6 +646,7 @@ export class BallisticsManager {
     slot.active = true;
     slot.shooter = shooter;
     slot.shellSpec = spec;
+    if (spec.id === 'sam') this.samLaunched++;
     slot.originX = muzzlePos.x;
     slot.originY = muzzlePos.y;
     slot.originZ = muzzlePos.z;
@@ -963,7 +966,11 @@ export class BallisticsManager {
         s.trailTick += stepDt;
         if (s.trailTick >= 0.035) {
           s.trailTick = 0;
-          this.effects.spawnRocketTrail(this._flyPos);
+          this.effects.spawnRocketTrail(
+            this._flyPos,
+            s.shellSpec?.trailScale ?? 1,
+            s.shellSpec?.trailBright ?? 0
+          );
         }
       }
 

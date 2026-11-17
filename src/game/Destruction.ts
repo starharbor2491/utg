@@ -1013,6 +1013,7 @@ const HULL_MASS: Record<VehicleClass, number> = {
   ifv: 33,
   humvee: 11,
   rocket: 15,
+  support: 15,
 };
 
 export class DestructionManager {
@@ -1543,7 +1544,7 @@ export class DestructionManager {
     camera: THREE.PerspectiveCamera,
     assets: LoadedGameAssets
   ): Promise<void> {
-    const vcls: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket'];
+    const vcls: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket', 'support'];
     const teams: Team[] = ['blue', 'red'];
     const warm = new THREE.Group();
     warm.name = 'shader_prewarm';

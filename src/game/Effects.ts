@@ -1912,7 +1912,7 @@ export class EffectsManager {
    * Dense grey exhaust smoke + flickering motor flare emitted at a burning
    * rocket's tail while `rocket.burnTime` is active.
    */
-  public spawnRocketTrail(pos: THREE.Vector3): void {
+  public spawnRocketTrail(pos: THREE.Vector3, scaleMul = 1, bright = 0): void {
     const p = this._allocSmoke();
     p.active = true;
     p.age = 0;
@@ -1925,20 +1925,20 @@ export class EffectsManager {
     p.vz = randRange(-0.35, 0.35);
     p.drag = 1.5;
     p.buoyancy = 0.55;
-    p.startScale = randRange(0.34, 0.55);
-    p.endScale = randRange(1.7, 2.6);
+    p.startScale = randRange(0.34, 0.55) * scaleMul;
+    p.endScale = randRange(1.7, 2.6) * scaleMul;
     p.rot = Math.random() * Math.PI * 2;
     p.rotSpeed = randRange(-1.4, 1.4);
-    p.r0 = 0.74;
-    p.g0 = 0.73;
-    p.b0 = 0.7;
-    p.rMid = 0.62;
-    p.gMid = 0.61;
-    p.bMid = 0.59;
+    p.r0 = 0.74 + 0.21 * bright;
+    p.g0 = 0.73 + 0.22 * bright;
+    p.b0 = 0.7 + 0.25 * bright;
+    p.rMid = 0.62 + 0.33 * bright;
+    p.gMid = 0.61 + 0.34 * bright;
+    p.bMid = 0.59 + 0.36 * bright;
     p.midFrac = 0.4;
-    p.r1 = 0.52;
-    p.g1 = 0.52;
-    p.b1 = 0.52;
+    p.r1 = 0.52 + 0.43 * bright;
+    p.g1 = 0.52 + 0.43 * bright;
+    p.b1 = 0.52 + 0.43 * bright;
     p.peakAlpha = 0.62;
     p.fadeInFrac = 0.1;
 

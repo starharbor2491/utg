@@ -44,6 +44,7 @@ const BRIEFING_VEHICLES: readonly { id: VehicleClass; name: string; armament: st
   { id: 'ifv', name: 'IFV', armament: 'APDS-T, HEI-T' },
   { id: 'humvee', name: 'Humvee', armament: 'M2 .50 cal' },
   { id: 'rocket', name: 'Rocket artillery', armament: '6-rocket salvo' },
+  { id: 'support', name: 'Support', armament: 'SAM, FPV drone' },
 ];
 
 const BRIEFING_CONTROLS: readonly { keys: readonly string[]; action: string }[] = [
@@ -754,12 +755,17 @@ export class HUD {
 
     let cannonBadge: 'ready' | 'reload' | 'neutral' = 'neutral';
     let cannonStr: string;
-    if (t.vehicleClass === 'rocket') {
+    if (t.vehicleClass === 'support' && t.activeShellIndex === 1) {
+      cannonStr = 'FPV · NEXT UPDATE';
+      cannonBadge = 'neutral';
+    } else if (t.vehicleClass === 'rocket' || t.vehicleClass === 'support') {
+      const ordnance = t.vehicleClass === 'support' ? 'SAM' : 'Rockets';
+      const emptyLabel = t.vehicleClass === 'support' ? 'SAM empty' : 'Pod empty';
       if (t.rocketsLeft > 0) {
-        cannonStr = `Rockets ${t.rocketsLeft} / ${t.salvoSize ?? 6}`;
+        cannonStr = `${ordnance} ${t.rocketsLeft} / ${t.salvoSize ?? 6}`;
         cannonBadge = 'ready';
       } else if (cannonReady) {
-        cannonStr = 'Pod empty';
+        cannonStr = emptyLabel;
       } else {
         cannonStr = `Reloading ${Math.max(0, t.cannonCooldownSec).toFixed(1)} s`;
         cannonBadge = 'reload';

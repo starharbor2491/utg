@@ -195,6 +195,54 @@ const ROCKET_GUIDANCE = {
   decoyable: true,
 } as const;
 
+const SAM_GUIDANCE = {
+  seekerConeDeg: 60,
+  lockTime: 0.35,
+  navGain: 4,
+  maxAccel: 90,
+  boostDelay: 0.1,
+  maxRange: 700,
+  decoyable: true,
+} as const;
+
+const SAM_SHELLS: readonly [ShellSpec, ShellSpec] = [
+  {
+    id: 'sam',
+    shortCode: 'SAM',
+    displayName: 'SAM MISSILE',
+    muzzleSpeed: 90,
+    directDamage: 60,
+    splashDamage: 120,
+    splashRadius: 4,
+    penetrationDepth: 0.8,
+    penMm: 40,
+    moduleDamage: { slug: 0.35, spall: 0.12, spallCount: 4 },
+    spallCount: 8,
+    spallWeight: 0.4,
+    explosionScale: 0.7,
+    tracerColorRGB: [9.0, 9.0, 9.5],
+    dispersionRad: 0.012,
+    rocket: { burnTime: 1.6, thrustAccel: 160 },
+    guidance: SAM_GUIDANCE,
+  },
+  {
+    // F5b stub: selectable slot, cannot fire yet.
+    id: 'fpv_drone',
+    shortCode: 'FPV',
+    displayName: 'FPV DRONE',
+    muzzleSpeed: 0,
+    directDamage: 0,
+    splashDamage: 0,
+    splashRadius: 0,
+    penetrationDepth: 0,
+    spallCount: 0,
+    spallWeight: 0,
+    explosionScale: 0,
+    tracerColorRGB: [9, 9, 9],
+    dispersionRad: 0,
+  },
+];
+
 const ROCKET_SHELLS: readonly [ShellSpec, ShellSpec] = [
   {
     id: 'rocket_he',
@@ -381,6 +429,39 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
     shellSplashRadius: ROCKET_SHELLS[0].splashRadius,
     shells: ROCKET_SHELLS,
     recoilImpulse: 0.1,
+    hitRadius: 2.9,
+    collisionRadius: 2.6,
+    hasCoaxMG: false,
+    infiniteMG: false,
+    mgFireInterval: 0.1,
+    drive: 'wheeled',
+    hullHalfWidth: 1.15,
+    hullHalfLength: 3.4,
+    wheelbase: 4.4,
+  },
+  support: {
+    vehicleClass: 'support',
+    displayName: 'SAM SUPPORT',
+    maxForwardSpeed: 18.5, // ~67 km/h same truck as the launcher
+    maxReverseSpeed: 5.5,
+    forwardAccel: 6.2,
+    reverseAccel: 4,
+    brakeDecel: 20,
+    hullTurnRate: 0.7,
+    turretTurnRate: 0.7,
+    gunElevateRate: 0.35,
+    gunMinPitch: 0,
+    gunMaxPitch: 1.0,
+    hasMainCannon: true,
+    cannonReloadTime: 10, // full 8-round ripple reload
+    salvoSize: 8,
+    salvoInterval: 0.3,
+    shellMuzzleSpeed: SAM_SHELLS[0].muzzleSpeed,
+    shellDirectDamage: SAM_SHELLS[0].directDamage,
+    shellSplashDamage: SAM_SHELLS[0].splashDamage,
+    shellSplashRadius: SAM_SHELLS[0].splashRadius,
+    shells: SAM_SHELLS,
+    recoilImpulse: 0.08,
     hitRadius: 2.9,
     collisionRadius: 2.6,
     hasCoaxMG: false,
@@ -1057,7 +1138,7 @@ export class Tank implements TankEntity {
       this.stats.salvoSize &&
       this.activeShell.guidance &&
       intent &&
-      !this.salvoActive
+      (!this.salvoActive || this.stats.vehicleClass === 'support')
     ) {
       this._updateSeeker(intent, world, allTanks, safeDt);
     }
@@ -1090,7 +1171,8 @@ export class Tank implements TankEntity {
           intent?.fireCannon &&
           this.cannonCooldown <= 0 &&
           this._rocketsLeft > 0 &&
-          canFireCannon
+          canFireCannon &&
+          this.activeShell.id !== 'fpv_drone'
         ) {
           this.salvoActive = true;
           this.salvoTimer = 0;
@@ -1460,12 +1542,20 @@ export class Tank implements TankEntity {
     _tmpVecB.set(0, 0, 1).applyQuaternion(_tmpQuat).normalize();
     mesh.visible = false;
     this._rocketsLeft = Math.max(0, this._rocketsLeft - 1);
+    // SAM ripple: each missile snapshots the CURRENT lock at launch so the
+    // player can walk the ripple onto a new target mid-salvo.
+    const guide =
+      this.stats.vehicleClass === 'support'
+        ? this.seekerLocked
+          ? this.seekerTarget
+          : null
+        : this.salvoGuideTarget;
     callbacks?.onFireCannon?.(
       this,
       _tmpVecA,
       _tmpVecB,
       this.salvoSpec ?? this.activeShell,
-      this.salvoGuideTarget
+      guide
     );
   }
 

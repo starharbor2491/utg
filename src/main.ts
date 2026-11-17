@@ -98,6 +98,7 @@ function markerCodeForClass(cls: VehicleClass): string {
   if (cls === 'ifv') return 'IFV';
   if (cls === 'humvee') return 'Humvee';
   if (cls === 'rocket') return 'Rocket';
+  if (cls === 'support') return 'Support';
   return 'MBT';
 }
 
@@ -1328,6 +1329,7 @@ async function bootstrap(): Promise<void> {
     }),
     getMatchState: () => ({
       score: { blue: match.score.blue, red: match.score.red },
+      samLaunched: ballistics.samLaunched,
       friendlyFireEvents,
       kills,
       deaths,
@@ -1521,8 +1523,9 @@ async function bootstrap(): Promise<void> {
         { name: '7.62', spec: undefined, dmg: 2.8, weapon: 'mg' },
         { name: 'Rkt-HE', spec: TANK_STATS.rocket.shells[0], dmg: TANK_STATS.rocket.shells[0].directDamage, weapon: 'cannon' },
         { name: 'Rkt-AT', spec: TANK_STATS.rocket.shells[1], dmg: TANK_STATS.rocket.shells[1].directDamage, weapon: 'cannon' },
+        { name: 'SAM', spec: TANK_STATS.support.shells[0], dmg: TANK_STATS.support.shells[0].directDamage, weapon: 'cannon' },
       ];
-      const victimClasses: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket'];
+      const victimClasses: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket', 'support'];
       const aspects = ['front', 'side', 'rear', 'top'] as const;
       const victimOf = new Map<VehicleClass, Tank>();
       for (const t of allTanks) {
@@ -1619,6 +1622,58 @@ async function bootstrap(): Promise<void> {
       return { trials: TRIALS, maxShots: MAX_SHOTS, rows };
     },
 
+    /** SAM ripple check: player support vs a circling red humvee 300 m out.
+     *  Fires one 8-missile ripple when locked; reports hits/8. */
+    samTest: () => {
+      swapPlayerClassFn?.('support');
+      const human = match.human;
+      const target =
+        bots.find((b) => b.team === 'red' && b.stats.vehicleClass === 'humvee') ??
+        bots.find((b) => b.team === 'red' && b.stats.vehicleClass !== 'support') ??
+        null;
+      if (!target) return { error: 'no red bot available' };
+      ballistics.resetGuidedStats();
+      ballistics.missProbeTarget = target;
+      ballistics.missProbeMin = Infinity;
+      setupGuidedScene(target);
+      qaIntentOverride = _qaIntent;
+      let steps = 0;
+      const maxSteps = 1100;
+      let salvosStarted = 0;
+      let lastSalvoStep = -1;
+      let wasSalvo = false;
+      while (steps < maxSteps) {
+        steps++;
+        target.getCenterMassWorld(_qaAimPoint);
+        _qaAimOrigin.set(human.position.x, human.position.y + 2.2, human.position.z);
+        _qaIntent.throttle = 0;
+        _qaIntent.steer = 0;
+        _qaIntent.brake = false;
+        _qaIntent.fireMG = false;
+        _qaIntent.selectShell = null;
+        const locked = Boolean(human.seekerLock?.locked);
+        const canTrigger =
+          human.cannonCooldown <= 0 && human.rocketsLeft > 0 && !human.salvoInProgress;
+        _qaIntent.fireCannon = locked && canTrigger && salvosStarted === 0;
+        stepSimulation(1 / 30);
+        const isSalvo = human.salvoInProgress;
+        if (isSalvo && !wasSalvo) {
+          salvosStarted++;
+          lastSalvoStep = steps;
+        }
+        wasSalvo = isSalvo;
+        if (salvosStarted >= 1 && steps > lastSalvoStep + 260) break;
+      }
+      qaIntentOverride = null;
+      target.qaDriveCircle = null;
+      return {
+        hits: ballistics.guidedHits,
+        launches: ballistics.samLaunched,
+        minMiss: Math.round(ballistics.missProbeMin * 10) / 10,
+        targetCrew: target.crewAlive,
+        rippleSec: Math.round((lastSalvoStep / 30) * 10) / 10,
+      };
+    },
     guidedTest: () => {
       swapPlayerClassFn?.('rocket');
       const human = match.human;
@@ -1721,7 +1776,7 @@ async function bootstrap(): Promise<void> {
     },
     runThreeAudit: () => {
       const results: Record<string, AuditIssue[]> = {};
-      const testClasses: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket'];
+      const testClasses: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket', 'support'];
       for (const cls of testClasses) {
         const tempTank = new Tank(`audit_${cls}`, 'blue', cls, assets, new THREE.Vector3(0, 0, 0), 0, false, 'Audit');
         results[cls] = auditThreeObject(tempTank.root, {

@@ -6,6 +6,7 @@ import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { buildRocketLauncherRig } from './models/RocketLauncher';
+import { buildSupportVehicleRig } from './models/SupportVehicle';
 import type { Team, VehicleClass } from './types';
 
 export type ModelKey =
@@ -460,6 +461,9 @@ function buildVehicleRig(
   // Rocket artillery is fully procedural (src/game/models/RocketLauncher.ts)
   if (vehicleClass === 'rocket') {
     return buildRocketLauncherRig(team);
+  }
+  if (vehicleClass === 'support') {
+    return buildSupportVehicleRig(team);
   }
 
   const root = new THREE.Group();

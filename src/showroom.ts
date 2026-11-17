@@ -15,7 +15,7 @@ import type { Team, VehicleClass } from './game/types';
  * No `v` param -> all 5 classes x both teams in a row + audit overlay.
  */
 
-const CLASSES: readonly VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket'];
+const CLASSES: readonly VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket', 'support'];
 const TEAMS: readonly Team[] = ['blue', 'red'];
 
 const params = new URLSearchParams(location.search);

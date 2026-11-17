@@ -75,7 +75,20 @@ function tintGeo(geo: THREE.BufferGeometry, color: THREE.Color): THREE.BufferGeo
   return geo;
 }
 
-export function buildRocketLauncherRig(team: Team): InstantiatedTankRig {
+export interface RocketChassisParts {
+  root: THREE.Group;
+  hullTiltGroup: THREE.Group;
+  visualRoot: THREE.Object3D;
+  wheels: WheelNodeBinding[];
+  steerNodes: THREE.Object3D[];
+  hullMeshes: THREE.Mesh[];
+  mats: Record<string, THREE.Material>;
+}
+
+/** Shared 6x6 tanker chassis: hull, cab, wheels, steer knuckles. Both the
+ *  rocket pod launcher and the SAM support vehicle build their mission
+ *  module on top of this. */
+export function buildRocketChassis(team: Team): RocketChassisParts {
   const isBlue = team === 'blue';
   const root = new THREE.Group();
   root.name = `rocket_${team}`;
@@ -453,9 +466,25 @@ export function buildRocketLauncherRig(team: Team): InstantiatedTankRig {
   buckets.clear();
   hullTiltGroup.add(visualRoot);
 
-  // ------------------------------------------------------------------
-  // LAUNCHER — turntable on the deck -> trunnions -> pod (rear-bottom pivot)
-  // ------------------------------------------------------------------
+
+  return {
+    root,
+    hullTiltGroup,
+    visualRoot,
+    wheels,
+    steerNodes,
+    hullMeshes,
+    mats: {
+      paintMat, paintDarkMat, steelMat, darkSteelMat, rubberMat, glassMat, lensMat,
+      modPaintT, modDarkT, modSteelT, modPaintP, modDarkP, modSteelP, rocketMat, wheelMat,
+    },
+  };
+}
+
+export function buildRocketLauncherRig(team: Team): InstantiatedTankRig {
+  const ch = buildRocketChassis(team);
+  const { root, hullTiltGroup, visualRoot, wheels, steerNodes, hullMeshes } = ch;
+  const { modPaintT, modDarkT, modSteelT, modPaintP, modDarkP, modSteelP, rocketMat } = ch.mats;
   const turretPivot = new THREE.Group();
   turretPivot.name = 'rocket_turret_pivot';
   turretPivot.position.set(0, DIMS.turretY, DIMS.turretZ);

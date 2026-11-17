@@ -11,7 +11,7 @@
  * - Armour is in mm per face: front / side / rear / top / bottom.
  */
 
-export type DamageClass = 'normal' | 'heavy' | 'ifv' | 'humvee' | 'rocket';
+export type DamageClass = 'normal' | 'heavy' | 'ifv' | 'humvee' | 'rocket' | 'support';
 
 export type ModuleId =
   | 'engine'
@@ -92,6 +92,40 @@ const nx = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: numb
 });
 
 /** Per-class module layouts. Normalized coords over the measured part bbox. */
+const ROCKET_LAYOUT: ClassDamageLayout = {
+  softSkin: true,
+  hullArmor: { front: 10, side: 6, rear: 6, top: 6, bottom: 6 },
+  turretArmor: { front: 6, side: 6, rear: 6, top: 6, bottom: 6 },
+  modules: [
+    { id: 'engine', boxes: [nx(0.3, 0.1, 0.72, 0.7, 0.55, 0.98)] },
+    { id: 'fuel', boxes: [nx(0.0, 0.35, 0.25, 0.2, 0.85, 0.75), nx(0.8, 0.35, 0.25, 1.0, 0.85, 0.75)] },
+    { id: 'ammo', boxes: [nx(0.15, 0.4, 0.0, 0.85, 1.0, 0.5, TURRET)] },
+    {
+      id: 'wheels_left',
+      boxes: [nx(0.0, 0.0, 0.1, 0.15, 0.45, 0.42, HULL, EXT), nx(0.0, 0.0, 0.58, 0.15, 0.45, 0.9, HULL, EXT)],
+    },
+    {
+      id: 'wheels_right',
+      boxes: [nx(0.85, 0.0, 0.1, 1.0, 0.45, 0.42, HULL, EXT), nx(0.85, 0.0, 0.58, 1.0, 0.45, 0.9, HULL, EXT)],
+    },
+    { id: 'driver', crew: 'driver', boxes: [nx(0.3, 0.5, 0.75, 0.55, 0.95, 0.97)] },
+    { id: 'commander', crew: 'commander', boxes: [nx(0.6, 0.5, 0.7, 0.85, 0.95, 0.95)] },
+    { id: 'gunner', crew: 'gunner', boxes: [nx(0.55, 0.45, 0.75, 0.8, 0.95, 0.97)] },
+    { id: 'launcher', boxes: [nx(0.08, 0.15, 0.0, 0.92, 0.95, 0.62, TURRET, EXT)] },
+  ],
+};
+
+/** Support reuses the rocket layout; the launcher module gains a rear
+ *  drone-bay box (still reported under the 'launcher' module id). */
+const SUPPORT_LAYOUT: ClassDamageLayout = {
+  ...ROCKET_LAYOUT,
+  modules: ROCKET_LAYOUT.modules.map((m) =>
+    m.id === 'launcher'
+      ? { ...m, boxes: [...m.boxes, nx(0.15, 0.0, -0.4, 0.85, 0.55, 0.05, TURRET, EXT)] }
+      : m
+  ),
+};
+
 export const DAMAGE_LAYOUTS: Record<DamageClass, ClassDamageLayout> = {
   normal: {
     softSkin: false,
@@ -213,28 +247,8 @@ export const DAMAGE_LAYOUTS: Record<DamageClass, ClassDamageLayout> = {
       { id: 'gunner', crew: 'gunner', boxes: [nx(0.4, 0.1, 0.35, 0.6, 1.3, 0.65, TURRET, EXT)] },
     ],
   },
-  rocket: {
-    softSkin: true,
-    hullArmor: { front: 10, side: 6, rear: 6, top: 6, bottom: 6 },
-    turretArmor: { front: 6, side: 6, rear: 6, top: 6, bottom: 6 },
-    modules: [
-      { id: 'engine', boxes: [nx(0.3, 0.1, 0.72, 0.7, 0.55, 0.98)] },
-      { id: 'fuel', boxes: [nx(0.0, 0.35, 0.25, 0.2, 0.85, 0.75), nx(0.8, 0.35, 0.25, 1.0, 0.85, 0.75)] },
-      { id: 'ammo', boxes: [nx(0.15, 0.4, 0.0, 0.85, 1.0, 0.5, TURRET)] },
-      {
-        id: 'wheels_left',
-        boxes: [nx(0.0, 0.0, 0.1, 0.15, 0.45, 0.42, HULL, EXT), nx(0.0, 0.0, 0.58, 0.15, 0.45, 0.9, HULL, EXT)],
-      },
-      {
-        id: 'wheels_right',
-        boxes: [nx(0.85, 0.0, 0.1, 1.0, 0.45, 0.42, HULL, EXT), nx(0.85, 0.0, 0.58, 1.0, 0.45, 0.9, HULL, EXT)],
-      },
-      { id: 'driver', crew: 'driver', boxes: [nx(0.3, 0.5, 0.75, 0.55, 0.95, 0.97)] },
-      { id: 'commander', crew: 'commander', boxes: [nx(0.6, 0.5, 0.7, 0.85, 0.95, 0.95)] },
-      { id: 'gunner', crew: 'gunner', boxes: [nx(0.55, 0.45, 0.75, 0.8, 0.95, 0.97)] },
-      { id: 'launcher', boxes: [nx(0.08, 0.15, 0.0, 0.92, 0.95, 0.62, TURRET, EXT)] },
-    ],
-  },
+  rocket: ROCKET_LAYOUT,
+  support: SUPPORT_LAYOUT,
 };
 
 // ---------- runtime module state ----------

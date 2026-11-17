@@ -13,7 +13,7 @@ import * as THREE from 'three';
 
 export type Team = 'blue' | 'red';
 
-export type VehicleClass = 'normal' | 'heavy' | 'ifv' | 'humvee' | 'rocket';
+export type VehicleClass = 'normal' | 'heavy' | 'ifv' | 'humvee' | 'rocket' | 'support';
 
 export type DriveType = 'tracked' | 'wheeled';
 
@@ -123,6 +123,10 @@ export interface ShellSpec {
   penMm?: number;
   /** Per-module damage on penetration: slug along path, spall cone. */
   moduleDamage?: { slug: number; spall: number; spallCount: number };
+  /** Exhaust trail tuning for rocket-powered rounds (scale multiplier on
+   *  the shared smoke emitter, 0..1 brighten toward white). */
+  trailScale?: number;
+  trailBright?: number;
 }
 
 export interface TankStats {
