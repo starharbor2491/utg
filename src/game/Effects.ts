@@ -458,6 +458,19 @@ export class EffectsManager {
   private prevSparkActive = -1;
   private prevRingActive = -1;
 
+  // Dense active-slot lists: pool index → position map for O(1) swap-remove.
+  // Update loops iterate only live particles instead of full capacity.
+  private readonly smokeActiveIdx: number[] = [];
+  private readonly smokePos = new Int32Array(SMOKE_CAPACITY).fill(-1);
+  private readonly flashActiveIdx: number[] = [];
+  private readonly flashPos = new Int32Array(FLASH_CAPACITY).fill(-1);
+  private readonly sparkActiveIdx: number[] = [];
+  private readonly sparkPos = new Int32Array(SPARK_CAPACITY).fill(-1);
+  private readonly ringActiveIdx: number[] = [];
+  private readonly ringPos = new Int32Array(RING_CAPACITY).fill(-1);
+  private readonly fireActiveIdx: number[] = [];
+  private readonly firePos = new Int32Array(FIRE_CAPACITY).fill(-1);
+
   // Reusable scratch math objects (zero GC pressure in update/spawn)
   private readonly _mat4 = new THREE.Matrix4();
   private readonly _hiddenMat4 = new THREE.Matrix4().makeScale(0, 0, 0);
@@ -879,69 +892,90 @@ export class EffectsManager {
   // -------------------------------------------------------------------------
   // Internal allocation helpers
   // -------------------------------------------------------------------------
-  private _allocSmoke(): SmokeParticle {
-    for (let n = 0; n < SMOKE_CAPACITY; n++) {
-      const idx = (this.smokeCursor + n) % SMOKE_CAPACITY;
-      if (!this.smokePool[idx].active) {
-        this.smokeCursor = (idx + 1) % SMOKE_CAPACITY;
-        return this.smokePool[idx];
-      }
+  // Swap-remove pool slot `idx` from its dense active list (pos = slot→list-pos map).
+  private _listRemove(list: number[], pos: Int32Array, idx: number): void {
+    const p = pos[idx];
+    const last = list.pop()!;
+    if (p < list.length) {
+      list[p] = last;
+      pos[last] = p;
     }
-    const fallback = this.smokePool[this.smokeCursor];
-    this.smokeCursor = (this.smokeCursor + 1) % SMOKE_CAPACITY;
-    return fallback;
+    pos[idx] = -1;
+  }
+
+  private _allocSmoke(): SmokeParticle {
+    let idx = -1;
+    for (let n = 0; n < SMOKE_CAPACITY; n++) {
+      const i = (this.smokeCursor + n) % SMOKE_CAPACITY;
+      if (!this.smokePool[i].active) { idx = i; break; }
+    }
+    if (idx < 0) idx = this.smokeCursor;
+    this.smokeCursor = (idx + 1) % SMOKE_CAPACITY;
+    if (this.smokePos[idx] < 0) {
+      this.smokePos[idx] = this.smokeActiveIdx.length;
+      this.smokeActiveIdx.push(idx);
+    }
+    return this.smokePool[idx];
   }
 
   private _allocFlash(): FlashParticle {
+    let idx = -1;
     for (let n = 0; n < FLASH_CAPACITY; n++) {
-      const idx = (this.flashCursor + n) % FLASH_CAPACITY;
-      if (!this.flashPool[idx].active) {
-        this.flashCursor = (idx + 1) % FLASH_CAPACITY;
-        return this.flashPool[idx];
-      }
+      const i = (this.flashCursor + n) % FLASH_CAPACITY;
+      if (!this.flashPool[i].active) { idx = i; break; }
     }
-    const fallback = this.flashPool[this.flashCursor];
-    this.flashCursor = (this.flashCursor + 1) % FLASH_CAPACITY;
-    return fallback;
+    if (idx < 0) idx = this.flashCursor;
+    this.flashCursor = (idx + 1) % FLASH_CAPACITY;
+    if (this.flashPos[idx] < 0) {
+      this.flashPos[idx] = this.flashActiveIdx.length;
+      this.flashActiveIdx.push(idx);
+    }
+    return this.flashPool[idx];
   }
 
   private _allocSpark(): SparkParticle {
+    let idx = -1;
     for (let n = 0; n < SPARK_CAPACITY; n++) {
-      const idx = (this.sparkCursor + n) % SPARK_CAPACITY;
-      if (!this.sparkPool[idx].active) {
-        this.sparkCursor = (idx + 1) % SPARK_CAPACITY;
-        return this.sparkPool[idx];
-      }
+      const i = (this.sparkCursor + n) % SPARK_CAPACITY;
+      if (!this.sparkPool[i].active) { idx = i; break; }
     }
-    const fallback = this.sparkPool[this.sparkCursor];
-    this.sparkCursor = (this.sparkCursor + 1) % SPARK_CAPACITY;
-    return fallback;
+    if (idx < 0) idx = this.sparkCursor;
+    this.sparkCursor = (idx + 1) % SPARK_CAPACITY;
+    if (this.sparkPos[idx] < 0) {
+      this.sparkPos[idx] = this.sparkActiveIdx.length;
+      this.sparkActiveIdx.push(idx);
+    }
+    return this.sparkPool[idx];
   }
 
   private _allocFire(): FireParticle {
+    let idx = -1;
     for (let n = 0; n < FIRE_CAPACITY; n++) {
-      const idx = (this.fireCursor + n) % FIRE_CAPACITY;
-      if (!this.firePool[idx].active) {
-        this.fireCursor = (idx + 1) % FIRE_CAPACITY;
-        return this.firePool[idx];
-      }
+      const i = (this.fireCursor + n) % FIRE_CAPACITY;
+      if (!this.firePool[i].active) { idx = i; break; }
     }
-    const fallback = this.firePool[this.fireCursor];
-    this.fireCursor = (this.fireCursor + 1) % FIRE_CAPACITY;
-    return fallback;
+    if (idx < 0) idx = this.fireCursor;
+    this.fireCursor = (idx + 1) % FIRE_CAPACITY;
+    if (this.firePos[idx] < 0) {
+      this.firePos[idx] = this.fireActiveIdx.length;
+      this.fireActiveIdx.push(idx);
+    }
+    return this.firePool[idx];
   }
 
   private _allocRing(): RingParticle {
+    let idx = -1;
     for (let n = 0; n < RING_CAPACITY; n++) {
-      const idx = (this.ringCursor + n) % RING_CAPACITY;
-      if (!this.ringPool[idx].active) {
-        this.ringCursor = (idx + 1) % RING_CAPACITY;
-        return this.ringPool[idx];
-      }
+      const i = (this.ringCursor + n) % RING_CAPACITY;
+      if (!this.ringPool[i].active) { idx = i; break; }
     }
-    const fallback = this.ringPool[this.ringCursor];
-    this.ringCursor = (this.ringCursor + 1) % RING_CAPACITY;
-    return fallback;
+    if (idx < 0) idx = this.ringCursor;
+    this.ringCursor = (idx + 1) % RING_CAPACITY;
+    if (this.ringPos[idx] < 0) {
+      this.ringPos[idx] = this.ringActiveIdx.length;
+      this.ringActiveIdx.push(idx);
+    }
+    return this.ringPool[idx];
   }
 
   private _spawnPointLight(
@@ -1279,6 +1313,9 @@ export class EffectsManager {
     }
   }
 
+  /** Dev/bench counter: total spawnExplosion calls. */
+  public explosionsSpawned = 0;
+
   /**
    * High-impact War Thunder-grade HE detonation or catastrophic tank kill cookoff!
    */
@@ -1288,6 +1325,7 @@ export class EffectsManager {
     scale: number,
     kind: 'he_ground' | 'he_armor' | 'tank_kill'
   ): void {
+    this.explosionsSpawned++;
     const nrm = this._v1.copy(normal).lengthSq() > 0.001 ? this._v1.normalize() : this._v1.set(0, 1, 0);
     const isKill = kind === 'tank_kill';
     const isGround = kind === 'he_ground';
@@ -1891,10 +1929,14 @@ export class EffectsManager {
   public setWreckFxVisible(v: boolean): void {
     this.wreckFxVisible = v;
     if (v) return;
-    for (const p of this.firePool) p.active = false;
-    for (const p of this.smokePool) p.active = false;
-    for (const p of this.sparkPool) p.active = false;
-    for (const p of this.flashPool) p.active = false;
+    for (const p of this.firePool) { p.active = false; }
+    for (const p of this.smokePool) { p.active = false; }
+    for (const p of this.sparkPool) { p.active = false; }
+    for (const p of this.flashPool) { p.active = false; }
+    this.fireActiveIdx.length = 0; this.firePos.fill(-1);
+    this.smokeActiveIdx.length = 0; this.smokePos.fill(-1);
+    this.sparkActiveIdx.length = 0; this.sparkPos.fill(-1);
+    this.flashActiveIdx.length = 0; this.flashPos.fill(-1);
     this.fireMesh.visible = false;
     this.smokeMesh.visible = false;
     this.sparkMesh.visible = false;
@@ -2023,12 +2065,14 @@ export class EffectsManager {
     const matE = this._mat4.elements;
 
     let fireActive = 0;
-    for (let i = 0; i < FIRE_CAPACITY; i++) {
+    const fireList = this.fireActiveIdx;
+    for (let k = fireList.length - 1; k >= 0; k--) {
+      const i = fireList[k];
       const p = this.firePool[i];
-      if (!p.active) continue;
       p.age += stepDt;
-      if (p.age >= p.maxAge) {
+      if (!p.active || p.age >= p.maxAge) {
         p.active = false;
+        this._listRemove(fireList, this.firePos, i);
         continue;
       }
       const t = p.age / p.maxAge;
@@ -2172,12 +2216,14 @@ export class EffectsManager {
     const by = this._camBack.y;
     const bz = this._camBack.z;
 
-    for (let i = 0; i < SMOKE_CAPACITY; i++) {
+    const smokeList = this.smokeActiveIdx;
+    for (let k = smokeList.length - 1; k >= 0; k--) {
+      const i = smokeList[k];
       const p = this.smokePool[i];
-      if (!p.active) continue;
       p.age += stepDt;
-      if (p.age >= p.maxAge) {
+      if (!p.active || p.age >= p.maxAge) {
         p.active = false;
+        this._listRemove(smokeList, this.smokePos, i);
         continue;
       }
 
@@ -2271,12 +2317,14 @@ export class EffectsManager {
 
     // 2. Update Additive HDR Flash Pool
     let flashActive = 0;
-    for (let i = 0; i < FLASH_CAPACITY; i++) {
+    const flashList = this.flashActiveIdx;
+    for (let k = flashList.length - 1; k >= 0; k--) {
+      const i = flashList[k];
       const f = this.flashPool[i];
-      if (!f.active) continue;
       f.age += stepDt;
-      if (f.age >= f.maxAge) {
+      if (!f.active || f.age >= f.maxAge) {
         f.active = false;
+        this._listRemove(flashList, this.flashPos, i);
         continue;
       }
 
@@ -2349,12 +2397,14 @@ export class EffectsManager {
 
     // 3. Update Velocity-Aligned HDR Spark / Ember Pool
     let sparkActive = 0;
-    for (let i = 0; i < SPARK_CAPACITY; i++) {
+    const sparkList = this.sparkActiveIdx;
+    for (let k = sparkList.length - 1; k >= 0; k--) {
+      const i = sparkList[k];
       const sp = this.sparkPool[i];
-      if (!sp.active) continue;
       sp.age += stepDt;
-      if (sp.age >= sp.maxAge) {
+      if (!sp.active || sp.age >= sp.maxAge) {
         sp.active = false;
+        this._listRemove(sparkList, this.sparkPos, i);
         continue;
       }
 
@@ -2455,12 +2505,14 @@ export class EffectsManager {
 
     // 4. Update Ground Shockwave Rings
     let ringActive = 0;
-    for (let i = 0; i < RING_CAPACITY; i++) {
+    const ringList = this.ringActiveIdx;
+    for (let k = ringList.length - 1; k >= 0; k--) {
+      const i = ringList[k];
       const r = this.ringPool[i];
-      if (!r.active) continue;
       r.age += stepDt;
-      if (r.age >= r.maxAge) {
+      if (!r.active || r.age >= r.maxAge) {
         r.active = false;
+        this._listRemove(ringList, this.ringPos, i);
         continue;
       }
 

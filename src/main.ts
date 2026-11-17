@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-import { loadAllGameAssets } from './game/AssetLoader';
+import { instantiateTankRig, loadAllGameAssets } from './game/AssetLoader';
 import { World } from './game/World';
 import { Tank } from './game/Tank';
 import { EffectsManager } from './game/Effects';
@@ -19,6 +19,7 @@ import type {
   MinimapUnit,
   ScreenReticlePos,
   ShellSpec,
+  Team,
   VehicleClass,
 } from './game/types';
 
@@ -29,6 +30,8 @@ interface UnitMarkerDOM {
   barFillEl: HTMLDivElement;
   barTrackEl: HTMLDivElement;
   isAlly: boolean;
+  losTimer: number;
+  losBlocked: boolean;
 }
 
 function projectWorldToScreen(
@@ -78,7 +81,9 @@ function buildUnitMarker(isAlly: boolean, callsign: string, cls: VehicleClass): 
 
   el.dataset.unitMarker = isAlly ? 'ally' : 'enemy';
   el.append(topRow, barTrackEl, diamond);
-  return { el, codeEl, distEl, barFillEl, barTrackEl, isAlly };
+  return { el, codeEl, distEl, barFillEl, barTrackEl, isAlly,
+    losTimer: Math.random() * 0.2,
+    losBlocked: false,};
 }
 
 async function bootstrap(): Promise<void> {
@@ -97,6 +102,7 @@ async function bootstrap(): Promise<void> {
   const getOptimalDpr = () => Math.min(window.devicePixelRatio || 1, 1.35);
   renderer.setPixelRatio(getOptimalDpr());
   renderer.setSize(window.innerWidth, window.innerHeight);
+  let qualityLevel = 0;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
@@ -143,6 +149,13 @@ async function bootstrap(): Promise<void> {
   const ballistics = new BallisticsManager(scene, effects);
   const destruction = new DestructionManager(scene, world, effects);
   const match = new Match(scene, world, assets);
+
+  // Kill first-kill hitches: bake wreck cache + compile every vehicle/wreck/
+  // debris shader program while the loading screen is still up. Runs after
+  // Match so the 12 live tanks' programs are covered too.
+  hud.setLoadingProgress(0.97, 'Compiling shaders...');
+  await destruction.prewarmWrecksAndVehicles(renderer, scene, camera, assets);
+  hud.setLoadingProgress(1, 'Ready');
 
   // Persistent physical wrecks for every kill (current roster + prebuilt human vehicles)
   match.forEachTankEver((t) => {
@@ -192,7 +205,7 @@ async function bootstrap(): Promise<void> {
     const h = window.innerHeight;
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
-    renderer.setPixelRatio(getOptimalDpr());
+    renderer.setPixelRatio(qualityLevel === 0 ? getOptimalDpr() : 1.0);
     renderer.setSize(w, h);
   });
 
@@ -238,6 +251,7 @@ async function bootstrap(): Promise<void> {
     const killedNow = ev.killed;
 
     if (!victim.isHuman && ev.xrayReport && attacker?.isHuman) {
+      xrayFlashCount++;
       hitCam.showHit(ev.xrayReport);
     }
     if (killedNow) {
@@ -289,6 +303,33 @@ async function bootstrap(): Promise<void> {
   let forceHideBriefing = false;
   const perfProbe = { active: false, target: 0, frames: 0, simMs: 0, renderMs: 0 };
 
+  // --- Bench/QA instrumentation (dev tooling, zero-cost when unused) ---
+  interface BenchFx {
+    smokeMesh: THREE.Object3D;
+    fireMesh: THREE.Object3D;
+    sparkMesh: THREE.Object3D;
+    flashMesh: THREE.Object3D;
+    ringMesh: THREE.Object3D;
+    scorchMesh: THREE.Object3D;
+    lightPool: { light: THREE.PointLight }[];
+  }
+  interface BenchDest {
+    debrisMeshes: THREE.Object3D[];
+    wrecks: { group: THREE.Object3D; active: boolean }[];
+    wreckLights: THREE.PointLight[];
+    mergeCount: number;
+  }
+  interface BenchWorld {
+    grassMesh: THREE.Object3D | null;
+  }
+  const benchFx = effects as unknown as BenchFx;
+  const benchDest = destruction as unknown as BenchDest;
+  const benchWorld = world as unknown as BenchWorld;
+
+  const hitchLog: { t: number; ms: number; tags: string; rc: number }[] = [];
+  const frameTimes: number[] = [];
+  let xrayFlashCount = 0;
+
   const tankCallbacks = {
     onFireCannon: (shooter: Tank, pos: THREE.Vector3, dir: THREE.Vector3, shell: ShellSpec) => {
       ballistics.fireCannon(shooter, pos, dir, shell);
@@ -313,7 +354,24 @@ async function bootstrap(): Promise<void> {
   let lastFrameTime = performance.now();
   let shadowTickToggle = 0;
 
-  const updateUnitMarkers = (vw: number, vh: number) => {
+  // Adaptive quality: L0 = full, L1 = DPR 1.0 + medium world, L2 = L1 + 15 Hz
+  // shadows + halved wreck FX + max 4 burning-wreck fire emitters.
+  let qualityManual: number | null = null;
+  let qualityEma = 8;
+  let qualityBadTime = 0;
+  let qualityGoodTime = 0;
+  let shadowInterval = 2;
+  const applyQuality = (lvl: number): void => {
+    qualityLevel = lvl;
+    renderer.setPixelRatio(lvl === 0 ? getOptimalDpr() : 1.0);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    world.setQuality(lvl === 0 ? 'default' : 'medium');
+    shadowInterval = lvl === 2 ? 4 : 2;
+    destruction.fxRateMul = lvl === 2 ? 0.5 : 1;
+    destruction.maxFireWrecks = lvl === 2 ? 4 : Infinity;
+  };
+
+  const updateUnitMarkers = (vw: number, vh: number, markerDt: number) => {
     const human = match.human;
     const hideAll = !controller.pointerLocked && !forceHideBriefing;
     for (let i = 0; i < bots.length; i++) {
@@ -357,15 +415,23 @@ async function bootstrap(): Promise<void> {
         continue;
       }
 
-      _losDir.subVectors(_markerWorldPos, camera.position);
-      const losLen = _losDir.length();
-      if (losLen > 1) {
-        _losDir.multiplyScalar(1 / losLen);
-        const hit = world.raycastWorld(camera.position, _losDir, losLen - 2.2);
-        if (hit && (hit.hitKind === 'terrain' || !hit.obstacle?.destructible)) {
-          m.el.style.display = 'none';
-          continue;
+      m.losTimer -= markerDt;
+      if (m.losTimer <= 0) {
+        m.losTimer = 0.2;
+        m.losBlocked = false;
+        _losDir.subVectors(_markerWorldPos, camera.position);
+        const losLen = _losDir.length();
+        if (losLen > 1) {
+          _losDir.multiplyScalar(1 / losLen);
+          const hit = world.raycastWorld(camera.position, _losDir, losLen - 2.2);
+          if (hit && (hit.hitKind === 'terrain' || !hit.obstacle?.destructible)) {
+            m.losBlocked = true;
+          }
         }
+      }
+      if (m.losBlocked) {
+        m.el.style.display = 'none';
+        continue;
       }
 
       const sx = (_projScratch.x * 0.5 + 0.5) * vw;
@@ -459,6 +525,18 @@ async function bootstrap(): Promise<void> {
     lastFrameTime = now - (elapsedMs % minIntervalMs);
     const dt = Math.min(Math.max(rawDt, 0.001), 0.05);
     fpsSmooth = THREE.MathUtils.lerp(fpsSmooth, 1 / Math.max(rawDt, 0.001), 0.08);
+
+    // Hitch instrumentation: snapshot per-frame work counters at frame start
+    const marks0 = {
+      programs: renderer.info.programs?.length ?? 0,
+      merges: benchDest.mergeCount,
+      explosions: effects.explosionsSpawned,
+      xrays: xrayFlashCount,
+      raycasts: world.raycastCount,
+    };
+    const frameStart = performance.now();
+    frameTimes.push(now);
+    if (frameTimes.length > 900) frameTimes.splice(0, frameTimes.length - 900);
 
     if (!forceHideBriefing) {
       hud.setBriefingVisible(!controller.pointerLocked);
@@ -556,7 +634,7 @@ async function bootstrap(): Promise<void> {
 
     if (!cameraOverrideActive) {
       hud.update(telemetry, dt);
-      updateUnitMarkers(vw, vh);
+      updateUnitMarkers(vw, vh, dt);
 
       if (isDeployed && !controller.hasTruePointerLock && !forceHideBriefing) {
         lockBannerEl.style.display = 'block';
@@ -574,7 +652,7 @@ async function bootstrap(): Promise<void> {
     }
 
     // Refresh directional shadow map every 2nd active frame (30 Hz) — cuts shadow GPU work by 50%!
-    shadowTickToggle = (shadowTickToggle + 1) & 1;
+    shadowTickToggle = (shadowTickToggle + 1) % shadowInterval;
     if (shadowTickToggle === 0) {
       renderer.shadowMap.needsUpdate = true;
     }
@@ -589,7 +667,65 @@ async function bootstrap(): Promise<void> {
       if (perfProbe.frames >= perfProbe.target) perfProbe.active = false;
     }
     if (hideOwnTankInOptic) playerTank.root.visible = true;
+
+    // Hitch log: frames whose total wall time exceeds 25 ms, tagged by work done
+    const frameMs = performance.now() - frameStart;
+    if (frameMs > 25) {
+      const tags: string[] = [];
+      const dPrograms = (renderer.info.programs?.length ?? 0) - marks0.programs;
+      const dMerges = benchDest.mergeCount - marks0.merges;
+      const dExplosions = effects.explosionsSpawned - marks0.explosions;
+      const dXrays = xrayFlashCount - marks0.xrays;
+      const dRaycasts = world.raycastCount - marks0.raycasts;
+      if (dPrograms > 0) tags.push(`shader+${dPrograms}`);
+      if (dMerges > 0) tags.push(`wreckBake+${dMerges}`);
+      if (dExplosions > 0) tags.push(`explosion+${dExplosions}`);
+      if (dXrays > 0) tags.push(`xray+${dXrays}`);
+      if (dRaycasts > 200) tags.push(`raycasts+${dRaycasts}`);
+      hitchLog.push({
+        t: now / 1000,
+        ms: Math.round(frameMs * 10) / 10,
+        tags: tags.join(',') || 'other',
+        rc: dRaycasts,
+      });
+      if (hitchLog.length > 300) hitchLog.splice(0, hitchLog.length - 300);
+    }
+
+    // Adaptive quality: cheap always-on CPU EMA (sim + render submit + HUD).
+    qualityEma += (frameMs - qualityEma) * 0.08;
+    if (qualityManual === null) {
+      if (qualityEma > 12) {
+        qualityBadTime += dt;
+        qualityGoodTime = 0;
+      } else if (qualityEma < 6) {
+        qualityGoodTime += dt;
+        qualityBadTime = 0;
+      } else {
+        qualityBadTime = 0;
+        qualityGoodTime = 0;
+      }
+      if (qualityBadTime > 2 && qualityLevel < 2) {
+        applyQuality(qualityLevel + 1);
+        qualityBadTime = 0;
+        qualityGoodTime = 0;
+      } else if (qualityGoodTime > 10 && qualityLevel > 0) {
+        applyQuality(qualityLevel - 1);
+        qualityBadTime = 0;
+        qualityGoodTime = 0;
+      }
+    }
   }
+
+  const killTankNow = (t: Tank, catastrophic: boolean): boolean => {
+    if (!t.alive) return false;
+    const fx = Math.sin(t.hullYaw);
+    const fz = Math.cos(t.hullYaw);
+    _markerWorldPos.set(t.position.x + fx * t.stats.collisionRadius, t.position.y + 1.4, t.position.z + fz * t.stats.collisionRadius);
+    effects.spawnExplosion(_markerWorldPos, _projScratch.set(0, 1, 0), 1.3, 'tank_kill');
+    destruction.applyBlast(_markerWorldPos, 6, 12);
+    t.debugKill(catastrophic);
+    return true;
+  };
 
   // Expose QA & GPU render-stats telemetry for programmatic verification
   (window as unknown as Record<string, unknown>).__tankQA = {
@@ -614,14 +750,161 @@ async function bootstrap(): Promise<void> {
     setWreckFxVisible: (v: boolean) => effects.setWreckFxVisible(v),
     killForTest: (tankId: string, catastrophic: boolean) => {
       const t = allTanks.find((x) => x.id === tankId);
-      if (!t || !t.alive) return false;
-      const fx = Math.sin(t.hullYaw);
-      const fz = Math.cos(t.hullYaw);
-      _markerWorldPos.set(t.position.x + fx * t.stats.collisionRadius, t.position.y + 1.4, t.position.z + fz * t.stats.collisionRadius);
-      effects.spawnExplosion(_markerWorldPos, _projScratch.set(0, 1, 0), 1.3, 'tank_kill');
-      destruction.applyBlast(_markerWorldPos, 6, 12);
-      t.debugKill(catastrophic);
+      return t ? killTankNow(t, catastrophic) : false;
+    },
+    /** Deterministic big-fight stress scene: all bots on a 50–140 m ring ±35°
+     *  in front of the camera, facing the ring centre; 5 are killed
+     *  catastrophically (wreck FX on). Leaves a 3v3 bot fight + 5 wrecks. */
+    setupBigFight: () => {
+      const human = match.human;
+      const camYaw = controller.cameraYaw;
+      const ringX = human.position.x + Math.sin(camYaw) * 95;
+      const ringZ = human.position.z + Math.cos(camYaw) * 95;
+      const n = bots.length;
+      for (let i = 0; i < n; i++) {
+        const b = bots[i];
+        const bearing = camYaw + THREE.MathUtils.degToRad(-35 + (70 * i) / Math.max(1, n - 1));
+        const dist = 50 + ((i * 53) % 91);
+        const x = human.position.x + Math.sin(bearing) * dist;
+        const z = human.position.z + Math.cos(bearing) * dist;
+        const y = world.getHeightAt(x, z);
+        b.respawnAt(_markerWorldPos.set(x, y, z), Math.atan2(ringX - x, ringZ - z));
+        (b as unknown as { spawnProtect: number }).spawnProtect = 0;
+      }
+      // Kill indices 1,3 (blue) + 6,8,10 (red) -> 3v3 still fighting, 5 wrecks
+      for (const idx of [1, 3, 6, 8, 10]) {
+        if (bots[idx]) killTankNow(bots[idx], true);
+      }
+      return { placed: n, killed: 5 };
+    },
+    /** Synchronous GPU+CPU frame cost: n renders at the 30 Hz shadow cadence,
+     *  forced to completion with a 1x1 readPixels. */
+    benchRender: (n: number) => {
+      const frames = Math.max(1, Math.round(n));
+      const t0 = performance.now();
+      for (let i = 0; i < frames; i++) {
+        renderer.shadowMap.needsUpdate = i % 2 === 0;
+        renderer.render(scene, camera);
+      }
+      const gl = renderer.getContext();
+      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+      const total = performance.now() - t0;
+      return {
+        msPerFrame: Math.round((total / frames) * 100) / 100,
+        totalMs: Math.round(total * 10) / 10,
+        calls: renderer.info.render.calls,
+        triangles: renderer.info.render.triangles,
+        programs: renderer.info.programs?.length ?? 0,
+        dpr: renderer.getPixelRatio(),
+      };
+    },
+    setBenchToggle: (name: string, on: boolean) => {
+      switch (name) {
+        case 'smoke':
+          benchFx.smokeMesh.visible = on;
+          break;
+        case 'fire':
+          benchFx.fireMesh.visible = on;
+          break;
+        case 'debris':
+          for (const m of benchDest.debrisMeshes) m.visible = on;
+          break;
+        case 'wreckFx':
+          effects.wreckFxVisible = on;
+          break;
+        case 'pointLights':
+          for (const s of benchFx.lightPool) s.light.visible = on;
+          for (const l of benchDest.wreckLights) l.visible = on;
+          break;
+        case 'shadows':
+          renderer.shadowMap.enabled = on;
+          scene.traverse((o) => {
+            const mat = (o as unknown as { material?: THREE.Material | THREE.Material[] }).material;
+            if (!mat) return;
+            if (Array.isArray(mat)) for (const m of mat) m.needsUpdate = true;
+            else mat.needsUpdate = true;
+          });
+          break;
+        case 'grass':
+          if (benchWorld.grassMesh) benchWorld.grassMesh.visible = on;
+          break;
+        case 'wrecks':
+          for (const w of benchDest.wrecks) w.group.visible = on && w.active;
+          break;
+        case 'vehicles':
+          for (const t of allTanks) t.root.visible = on && t.alive;
+          break;
+        case 'markers':
+          markerLayer.style.display = on ? '' : 'none';
+          break;
+        default:
+          return false;
+      }
       return true;
+    },
+    setBenchDpr: (x: number) => {
+      renderer.setPixelRatio(Math.max(0.5, x));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      return renderer.getPixelRatio();
+    },
+    getQualityLevel: () => qualityLevel,
+    forceQualityLevel: (n: number | null) => {
+      qualityManual = n;
+      if (n !== null) applyQuality(Math.max(0, Math.min(2, Math.round(n))));
+      return qualityLevel;
+    },
+    getHitchLog: () => hitchLog.slice(),
+    /** Program cache keys for shader-growth diffing (dev tooling). */
+    getProgramKeys: () =>
+      (renderer.info.programs ?? []).map((p) => {
+        const q = p as unknown as { cacheKey?: string; name?: string };
+        return `${q.name ?? '?'}|${q.cacheKey ?? ''}`;
+      }),
+    /** Timestamps (ms) of executed ticks — deltas give true rendered-frame pacing. */
+    getFrameTimes: () => frameTimes.slice(),
+    /** Mesh counts per rig region for all 5 classes x 2 teams (dev tooling). */
+    getRigMeshCounts: () => {
+      const out: Record<string, { total: number; hull: number; turret: number; gun: number; wheels: number; physical: number; glass: number }> = {};
+      const classes: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket'];
+      const teams: Team[] = ['blue', 'red'];
+      for (const cls of classes) {
+        for (const team of teams) {
+          const rig = instantiateTankRig(assets, cls, team);
+          const wheelNodes = new Set<THREE.Object3D>(rig.wheels.map((w) => w.node));
+          const counts = { total: 0, hull: 0, turret: 0, gun: 0, wheels: 0, physical: 0, glass: 0 };
+          const inSubtree = (root: THREE.Object3D, mesh: THREE.Object3D): boolean => {
+            for (let p: THREE.Object3D | null = mesh; p; p = p.parent) {
+              if (p === root) return true;
+              if (p === rig.visualRoot) return false;
+            }
+            return false;
+          };
+          rig.visualRoot.traverse((o) => {
+            if (!(o as THREE.Mesh).isMesh) return;
+            counts.total++;
+            const matProp = (o as THREE.Mesh).material;
+            const mats = (Array.isArray(matProp) ? matProp : [matProp]) as THREE.Material[];
+            for (const mm of mats) {
+              if ((mm as THREE.MeshPhysicalMaterial).isMeshPhysicalMaterial) counts.physical++;
+              const mn = (mm.name || '').toLowerCase();
+              const ms = mm as THREE.MeshStandardMaterial;
+              if (ms.transparent || /glass|window|lens/.test(mn)) counts.glass++;
+            }
+            if (inSubtree(rig.gunRecoilGroup, o)) counts.gun++;
+            else if (inSubtree(rig.turretPivot, o)) counts.turret++;
+            else {
+              let isWheel = false;
+              for (const w of wheelNodes) {
+                if (inSubtree(w, o)) { isWheel = true; break; }
+              }
+              if (isWheel) counts.wheels++;
+              else counts.hull++;
+            }
+          });
+          out[`${cls}_${team}`] = counts;
+        }
+      }
+      return out;
     },
     physicsSelfTest: () => destruction.selfTest(),
     getWreckState: () => destruction.getWreckState(),

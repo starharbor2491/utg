@@ -41,7 +41,7 @@ const FEED_POOL_SIZE = 6;
 const BRIEFING_VEHICLES: readonly { id: VehicleClass; name: string; armament: string }[] = [
   { id: 'normal', name: 'Main battle tank', armament: 'APFSDS, HE' },
   { id: 'heavy', name: 'Heavy tank', armament: 'APCBC, HE' },
-  { id: 'ifv', name: 'Infantry fighting vehicle', armament: 'APDS-T, HEI-T' },
+  { id: 'ifv', name: 'IFV', armament: 'APDS-T, HEI-T' },
   { id: 'humvee', name: 'Humvee', armament: 'M2 .50 cal' },
   { id: 'rocket', name: 'Rocket artillery', armament: '6-rocket salvo' },
 ];

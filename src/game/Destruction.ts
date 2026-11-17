@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { EffectsManager } from './Effects';
 import type { World } from './World';
-import type { ObstacleCollider, VehicleClass, WreckKillInfo } from './types';
+import type { ObstacleCollider, Team, VehicleClass, WreckKillInfo } from './types';
+import { denormalizeGeo, instantiateTankRig, type LoadedGameAssets } from './AssetLoader';
 import type { Tank } from './Tank';
 
 // ---------------------------------------------------------------------------
@@ -250,6 +251,10 @@ interface BakedPart {
    *  Used as terrain contact points so wrecks rest on actual armor, not on
    *  empty OBB corners (e.g. the space beside a long gun barrel). */
   contacts: Float32Array;
+  /** Connected components removed as whips by the bake filter (diagnostics) */
+  whipComponents: number;
+  /** Triangles dropped with those components (diagnostics) */
+  whipDroppedTris: number;
 }
 
 interface TurretCollide {
@@ -272,24 +277,6 @@ interface ClassGeo {
 
 const _m1 = new THREE.Matrix4();
 const _m2 = new THREE.Matrix4();
-
-// GLB assets use KHR_mesh_quantization: position/normal arrive as normalized
-// integer attributes. BufferGeometry.applyMatrix4 writes plain floats back via
-// setXYZ, which truncates them into the integer buffer and collapses every
-// vertex to the mesh origin. De-normalize to float32 before transforming.
-function denormalizeGeo(geo: THREE.BufferGeometry): void {
-  for (const name of ['position', 'normal', 'tangent', 'color'] as const) {
-    const attr = geo.attributes[name] as THREE.BufferAttribute | undefined;
-    if (!attr || !attr.normalized) continue;
-    const arr = new Float32Array(attr.count * attr.itemSize);
-    for (let i = 0; i < attr.count; i++) {
-      for (let c = 0; c < attr.itemSize; c++) {
-        arr[i * attr.itemSize + c] = attr.getComponent(i, c);
-      }
-    }
-    geo.setAttribute(name, new THREE.BufferAttribute(arr, attr.itemSize));
-  }
-}
 
 function normalizeGeo(geo: THREE.BufferGeometry): void {
   for (const name of Object.keys(geo.attributes)) {
@@ -364,26 +351,37 @@ function bakePart(
     }
   }
 
-  // Whip/outlier filter, then bounds from surviving vertices only
+  // Whip filter, then bounds from surviving vertices only
   const filter = computeWhipFilter(entries);
-  if (filter.isolated.size > 0) {
-    for (const e of entries) dropIsolatedTriangles(e.geo, filter.isolated);
+  for (let i = 0; i < entries.length; i++) {
+    const flags = filter.dropTris[i];
+    if (flags) dropTrianglesByFlag(entries[i].geo, flags);
   }
   const box = filter.box;
   const center = box.getCenter(new THREE.Vector3());
   const half = box.getSize(new THREE.Vector3()).multiplyScalar(0.5);
   // Re-centre geometry on the box centre so bodies rotate about their middle
   for (const e of entries) e.geo.translate(-center.x, -center.y, -center.z);
-  return { entries, box, center, half, contacts: supportContactPoints(filter.reps, center) };
+  return {
+    entries,
+    box,
+    center,
+    half,
+    contacts: supportContactPoints(filter.reps, center),
+    whipComponents: filter.whipComponents,
+    whipDroppedTris: filter.droppedTriangles,
+  };
 }
 
 // ---------------------------------------------------------------------------
-// Whip/outlier filter. Thin radio whips and snapped trim survive as sparse
-// vertex chains: their 0.25 m voxel cells have < 2 occupied neighbours, while
-// every real panel cell is surrounded. Isolated cells are excluded from the
-// part bounds (they were inflating hull half.y to ~2 m and propping flipped
-// wrecks on antenna tips) and their triangles are dropped so the whips snap
-// off in the fire. Runs once per class+team — geometry is cached.
+// Whip filter (topological). Vertices are welded by position (1 mm) across all
+// of a part's merged entries and union-find over shared welded vertices yields
+// connected components. A component is a whip iff its bbox has its two smallest
+// dimensions < 0.08 m and its largest > 0.4 m — thin antennas and rods only.
+// Armour panels stay connected to the hull no matter how sparse their vertex
+// layout, so nothing else is ever removed. Whip triangles are dropped from the
+// render geometry and excluded from bounds/contact reps so wrecks neither show
+// nor balance on antenna tips. Runs once per class+team — geometry is cached.
 // ---------------------------------------------------------------------------
 
 const WHIP_CELL = 0.25;
@@ -403,82 +401,195 @@ function whipKeyPos(x: number, y: number, z: number): number {
   );
 }
 
-function whipDecode(key: number, out: THREE.Vector3): void {
-  const ix = Math.floor(key / WHIP_VOL);
-  const rem = key - ix * WHIP_VOL;
-  const iy = Math.floor(rem / WHIP_SPAN);
-  const iz = rem - iy * WHIP_SPAN;
-  out.set(ix - WHIP_OFF, iy - WHIP_OFF, iz - WHIP_OFF);
+// Weld quantization: 1 mm cells. Part-local coords stay well inside ±40 m, so
+// the packed key fits in a JS-safe integer (< 2^53).
+const WELD_Q = 1000;
+const WELD_OFF = 40000;
+const WELD_SPAN = 80000; // 2 * WELD_OFF
+
+function weldKey(x: number, y: number, z: number): number {
+  const qx = Math.round(x * WELD_Q) + WELD_OFF;
+  const qy = Math.round(y * WELD_Q) + WELD_OFF;
+  const qz = Math.round(z * WELD_Q) + WELD_OFF;
+  return (qx * WELD_SPAN + qy) * WELD_SPAN + qz;
 }
 
 interface WhipFilter {
-  /** Cell keys flagged as isolated (whip/trim outliers) */
-  isolated: Set<number>;
-  /** One representative vertex per non-isolated cell, part-local xyz */
+  /** Per-entry triangle drop flags, parallel to entries (null = keep all) */
+  dropTris: (Uint8Array | null)[];
+  /** One representative vertex per occupied 0.25 m cell of surviving verts, part-local xyz */
   reps: Float32Array;
-  /** Bounds over all vertices in non-isolated cells, part-local */
+  /** Bounds over surviving verts, part-local */
   box: THREE.Box3;
+  whipComponents: number;
+  droppedTriangles: number;
 }
 
 function computeWhipFilter(entries: BakedEntry[]): WhipFilter {
-  // Pass 1: voxelize — first vertex seen per cell becomes its representative
-  const occupied = new Map<number, number>();
-  const rx: number[] = [];
-  const ry: number[] = [];
-  const rz: number[] = [];
-  for (const e of entries) {
-    const p = e.geo.attributes.position as THREE.BufferAttribute | undefined;
-    if (!p) continue;
-    for (let i = 0; i < p.count; i++) {
-      const x = p.getX(i);
-      const y = p.getY(i);
-      const z = p.getZ(i);
-      const key = whipKeyPos(x, y, z);
-      if (!occupied.has(key)) {
-        occupied.set(key, rx.length);
-        rx.push(x);
-        ry.push(y);
-        rz.push(z);
+  const dropTris: (Uint8Array | null)[] = new Array(entries.length).fill(null);
+
+  // Union-find over welded vertex positions across every entry of the part.
+  const parent = new Map<number, number>();
+  const find = (k: number): number => {
+    let root = k;
+    for (;;) {
+      const p = parent.get(root);
+      if (p === undefined || p === root) break;
+      root = p;
+    }
+    let c = k;
+    while (c !== root) {
+      const p = parent.get(c);
+      if (p === undefined) break;
+      parent.set(c, root);
+      c = p;
+    }
+    return root;
+  };
+  const union = (a: number, b: number): void => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(rb, ra);
+  };
+
+  interface EntryTris {
+    entryIdx: number;
+    pos: THREE.BufferAttribute;
+    index: ArrayLike<number> | null;
+    triCount: number;
+    /** Welded key of each triangle's first vertex (component lookup) */
+    triK0: number[];
+  }
+  const parts: EntryTris[] = [];
+  const keepVerts: Uint8Array[] = [];
+
+  // Pass 1: weld vertices and union every triangle's corners into components
+  for (let ei = 0; ei < entries.length; ei++) {
+    const geo = entries[ei].geo;
+    const pos = geo.attributes.position as THREE.BufferAttribute | undefined;
+    if (!pos) continue;
+    const index = geo.index ? (geo.index.array as ArrayLike<number>) : null;
+    const triCount = index
+      ? Math.floor(index.length / 3)
+      : Math.floor(pos.count / 3);
+    // Welded key per vertex slot, lazily filled (-1 = unset; keys are >= 0 for
+    // any part-local coord inside ±40 m, which vehicle parts always are)
+    const vkeys = new Array<number>(pos.count).fill(-1);
+    const keyOf = (vi: number): number => {
+      let k = vkeys[vi];
+      if (k < 0) {
+        k = weldKey(pos.getX(vi), pos.getY(vi), pos.getZ(vi));
+        vkeys[vi] = k;
+        if (!parent.has(k)) parent.set(k, k);
+      }
+      return k;
+    };
+    const triK0 = new Array<number>(triCount);
+    for (let t = 0; t < triCount; t++) {
+      const i0 = index ? index[t * 3] : t * 3;
+      const i1 = index ? index[t * 3 + 1] : t * 3 + 1;
+      const i2 = index ? index[t * 3 + 2] : t * 3 + 2;
+      const k0 = keyOf(i0);
+      const k1 = keyOf(i1);
+      const k2 = keyOf(i2);
+      union(k0, k1);
+      union(k1, k2);
+      triK0[t] = k0;
+    }
+    parts.push({ entryIdx: ei, pos, index, triCount, triK0 });
+    keepVerts.push(new Uint8Array(pos.count));
+  }
+
+  // Pass 2: bounding box per connected component
+  const compBounds = new Map<number, number[]>(); // root -> [minx,miny,minz,maxx,maxy,maxz]
+  for (const pt of parts) {
+    const { pos, index, triCount, triK0 } = pt;
+    for (let t = 0; t < triCount; t++) {
+      const root = find(triK0[t]);
+      let b = compBounds.get(root);
+      if (!b) {
+        b = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+        compBounds.set(root, b);
+      }
+      for (let c = 0; c < 3; c++) {
+        const vi = index ? index[t * 3 + c] : t * 3 + c;
+        const x = pos.getX(vi);
+        const y = pos.getY(vi);
+        const z = pos.getZ(vi);
+        if (x < b[0]) b[0] = x;
+        if (y < b[1]) b[1] = y;
+        if (z < b[2]) b[2] = z;
+        if (x > b[3]) b[3] = x;
+        if (y > b[4]) b[4] = y;
+        if (z > b[5]) b[5] = z;
       }
     }
   }
 
-  // Pass 2: a cell is isolated when fewer than 2 of its 26 neighbours exist
-  const isolated = new Set<number>();
-  const dc = new THREE.Vector3();
-  for (const key of occupied.keys()) {
-    whipDecode(key, dc);
-    let n = 0;
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dz = -1; dz <= 1; dz++) {
-          if (dx === 0 && dy === 0 && dz === 0) continue;
-          if (occupied.has(whipKeyIdx(dc.x + dx, dc.y + dy, dc.z + dz))) n++;
-        }
-      }
-    }
-    if (n < 2) isolated.add(key);
+  // Pass 3: a component is a whip iff two smallest bbox dims < 0.08 m and the
+  // largest > 0.4 m (antennas, whips, thin rods). Nothing else qualifies.
+  const whipRoots = new Set<number>();
+  let compCount = 0;
+  for (const [root, b] of compBounds) {
+    compCount++;
+    const dx = b[3] - b[0];
+    const dy = b[4] - b[1];
+    const dz = b[5] - b[2];
+    const dMin = Math.min(dx, dy, dz);
+    const dMax = Math.max(dx, dy, dz);
+    const dMid = dx + dy + dz - dMin - dMax;
+    if (dMin < 0.08 && dMid < 0.08 && dMax > 0.4) whipRoots.add(root);
   }
   // Degenerate guard: never filter away an entire part
-  if (isolated.size === occupied.size) isolated.clear();
+  if (whipRoots.size === compCount) whipRoots.clear();
 
-  // Pass 3: bounds over every vertex that sits in a non-isolated cell
+  // Pass 4: flag whip triangles; mark vertices of surviving triangles
+  let droppedTriangles = 0;
+  for (let pi = 0; pi < parts.length; pi++) {
+    const pt = parts[pi];
+    const drop = new Uint8Array(pt.triCount);
+    const keep = keepVerts[pi];
+    let anyDrop = false;
+    for (let t = 0; t < pt.triCount; t++) {
+      if (whipRoots.size > 0 && whipRoots.has(find(pt.triK0[t]))) {
+        drop[t] = 1;
+        anyDrop = true;
+        droppedTriangles++;
+        continue;
+      }
+      for (let c = 0; c < 3; c++) {
+        const vi = pt.index ? pt.index[t * 3 + c] : t * 3 + c;
+        keep[vi] = 1;
+      }
+    }
+    dropTris[pt.entryIdx] = anyDrop ? drop : null;
+  }
+
+  // Pass 5: bounds + one 0.25 m cell representative per surviving vertex
   const min = new THREE.Vector3(Infinity, Infinity, Infinity);
   const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
-  for (const e of entries) {
-    const p = e.geo.attributes.position as THREE.BufferAttribute | undefined;
-    if (!p) continue;
-    for (let i = 0; i < p.count; i++) {
-      const x = p.getX(i);
-      const y = p.getY(i);
-      const z = p.getZ(i);
-      if (isolated.has(whipKeyPos(x, y, z))) continue;
+  const repsArr: number[] = [];
+  const seenCells = new Set<number>();
+  for (let pi = 0; pi < parts.length; pi++) {
+    const pt = parts[pi];
+    const keep = keepVerts[pi];
+    const { pos } = pt;
+    for (let vi = 0; vi < pos.count; vi++) {
+      if (!keep[vi]) continue;
+      const x = pos.getX(vi);
+      const y = pos.getY(vi);
+      const z = pos.getZ(vi);
       if (x < min.x) min.x = x;
       if (y < min.y) min.y = y;
       if (z < min.z) min.z = z;
       if (x > max.x) max.x = x;
       if (y > max.y) max.y = y;
       if (z > max.z) max.z = z;
+      const cell = whipKeyPos(x, y, z);
+      if (!seenCells.has(cell)) {
+        seenCells.add(cell);
+        repsArr.push(x, y, z);
+      }
     }
   }
   const box = new THREE.Box3(min, max);
@@ -486,52 +597,44 @@ function computeWhipFilter(entries: BakedEntry[]): WhipFilter {
     box.min.set(-0.5, -0.5, -0.5);
     box.max.set(0.5, 0.5, 0.5);
   }
-
-  // Representatives of surviving cells for support sampling
-  const repsArr: number[] = [];
-  for (const [key, ri] of occupied) {
-    if (isolated.has(key)) continue;
-    repsArr.push(rx[ri], ry[ri], rz[ri]);
-  }
-  return { isolated, reps: new Float32Array(repsArr), box };
+  return {
+    dropTris,
+    reps: new Float32Array(repsArr),
+    box,
+    whipComponents: whipRoots.size,
+    droppedTriangles,
+  };
 }
 
-// Drop every triangle that touches an isolated cell. Indexed geos keep their
-// index buffer (compacted); non-indexed geos are compacted per-attribute.
-// Unused vertices are removed too so probes/queries never see dead whip tips.
-function dropIsolatedTriangles(geo: THREE.BufferGeometry, isolated: Set<number>): void {
+// Drop flagged triangles and compact vertices/attributes so dead whip tips
+// are never seen by probes or queries. Indexed geos keep an index buffer;
+// non-indexed geos stay non-indexed.
+function dropTrianglesByFlag(geo: THREE.BufferGeometry, drop: Uint8Array): void {
   const pos = geo.attributes.position as THREE.BufferAttribute | undefined;
   if (!pos) return;
-  const flag = new Uint8Array(pos.count);
-  let any = false;
-  for (let i = 0; i < pos.count; i++) {
-    if (isolated.has(whipKeyPos(pos.getX(i), pos.getY(i), pos.getZ(i)))) {
-      flag[i] = 1;
-      any = true;
-    }
-  }
-  if (!any) return;
-
+  const idx = geo.index;
+  const triCount = idx ? Math.floor(idx.count / 3) : Math.floor(pos.count / 3);
   const remap = new Int32Array(pos.count).fill(-1);
   let newCount = 0;
   let newIndex: number[] | null = null;
 
-  if (geo.index) {
-    const idx = geo.index.array;
+  if (idx) {
+    const arr = idx.array;
     newIndex = [];
-    for (let t = 0; t + 2 < idx.length; t += 3) {
-      const a = idx[t];
-      const b = idx[t + 1];
-      const c = idx[t + 2];
-      if (flag[a] || flag[b] || flag[c]) continue;
+    for (let t = 0; t < triCount; t++) {
+      if (drop[t]) continue;
+      const a = arr[t * 3];
+      const b = arr[t * 3 + 1];
+      const c = arr[t * 3 + 2];
       if (remap[a] < 0) remap[a] = newCount++;
       if (remap[b] < 0) remap[b] = newCount++;
       if (remap[c] < 0) remap[c] = newCount++;
       newIndex.push(remap[a], remap[b], remap[c]);
     }
   } else {
-    for (let v = 0; v < pos.count; v += 3) {
-      if (flag[v] || flag[v + 1] || flag[v + 2]) continue;
+    for (let t = 0; t < triCount; t++) {
+      if (drop[t]) continue;
+      const v = t * 3;
       remap[v] = newCount++;
       remap[v + 1] = newCount++;
       remap[v + 2] = newCount++;
@@ -927,6 +1030,8 @@ export class DestructionManager {
   private readonly debrisMeshes: THREE.InstancedMesh[] = [];
   private readonly debrisPool: Debris[] = [];
   private debrisCursor = 0;
+  private readonly debrisActiveIdx: number[] = [];
+  private readonly debrisPos = new Int32Array(DEBRIS_CAP).fill(-1);
   private readonly debrisMat4 = new THREE.Matrix4();
   private readonly debrisDiam: number[] = [];
 
@@ -1026,76 +1131,7 @@ export class DestructionManager {
     const t0 = performance.now();
     tank.root.updateMatrixWorld(true);
 
-    // Bake/cache geometry
-    const cacheKey = `${cls}:${team}`;
-    let geo = this.geoCache.get(cacheKey);
-    if (!geo) {
-      // Clone: bakePart uses _m1 as scratch, so passing _m1/_m2 themselves would
-      // alias the inverse-space matrix and corrupt every mesh after the first.
-      const rigRootInv = _m2.copy(tank.root.matrixWorld).invert().clone();
-      const turretInv = _m1.copy(tank.rig.turretPivot.matrixWorld).invert().clone();
-      const hullMeshes: THREE.Mesh[] = [];
-      const turretMeshes: THREE.Mesh[] = [];
-      collectMeshes(tank.root, tank.rig.turretPivot, hullMeshes);
-      collectMeshes(tank.rig.turretPivot, null, turretMeshes);
-      const hull = bakePart(hullMeshes, rigRootInv);
-      const turret = turretMeshes.length > 0 ? bakePart(turretMeshes, turretInv) : null;
-
-      // Turret collision box excludes the gun subtree only when the gun is
-      // barrel-like (long and thin — e.g. the MBT/IFV cannon): a long barrel
-      // inflates the OBB with empty space and makes settled wrecks float.
-      // Chunky gun pods (rocket launcher) stay in the collision box. The
-      // muzzle tip always becomes a thin extra contact point.
-      let turretCollide: TurretCollide | null = null;
-      const gunRoot = tank.rig.gunPivot;
-      if (turret && gunRoot && isDescendantOf(gunRoot, tank.rig.turretPivot)) {
-        const turretOnly: THREE.Mesh[] = [];
-        const gunMeshes: THREE.Mesh[] = [];
-        collectMeshes(tank.rig.turretPivot, gunRoot, turretOnly);
-        collectMeshes(gunRoot, null, gunMeshes);
-        if (turretOnly.length > 0 && gunMeshes.length > 0) {
-          const tbox = new THREE.Box3();
-          const gbox = new THREE.Box3();
-          bakeBoundsOnly(turretOnly, turretInv, tbox);
-          bakeBoundsOnly(gunMeshes, turretInv, gbox);
-          if (!tbox.isEmpty() && !gbox.isEmpty()) {
-            const ts = tbox.getSize(_t1);
-            const gs = gbox.getSize(_t2);
-            const gh = gbox.getSize(_t3).multiplyScalar(0.5);
-            const tDim = Math.max(ts.x, ts.y, ts.z);
-            const gDim = Math.max(gs.x, gs.y, gs.z);
-            const gMinHalf = Math.min(gh.x, gh.y, gh.z);
-            const barrelLike = gDim > tDim * 1.35 && gMinHalf < 0.6;
-            const tc = tbox.getCenter(new THREE.Vector3());
-            const th = tbox.getSize(new THREE.Vector3()).multiplyScalar(0.5);
-            const tipPivot = tank.rig.muzzleNode.getWorldPosition(_t2).applyMatrix4(turretInv);
-            if (barrelLike) {
-              turretCollide = {
-                offset: tc.sub(turret.center),
-                half: th,
-                tip: tipPivot.clone().sub(turret.center),
-              };
-            } else {
-              // Keep the full box (pod is the bulk of the wreck) + tip contact
-              turretCollide = {
-                offset: new THREE.Vector3(),
-                half: turret.half.clone(),
-                tip: tipPivot.clone().sub(turret.center),
-              };
-            }
-          }
-        }
-      }
-      geo = {
-        hull,
-        turret,
-        turretCollide,
-        turretRestRel: turret
-          ? _m1.copy(rigRootInv).multiply(tank.rig.turretPivot.matrixWorld).clone()
-          : null,
-      };
-      this.geoCache.set(cacheKey, geo);
-    }
+    const geo = this._ensureGeoCached(cls, team, tank);
     this.mergeCount++;
     this.mergeTotalMs += performance.now() - t0;
 
@@ -1391,6 +1427,167 @@ export class DestructionManager {
       seed: Math.random() * 100,
       emitWorld: [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()],
     };
+  }
+
+  /** Bake (or fetch) the shared hull/turret geometry for a class×team pair. */
+  private _ensureGeoCached(cls: VehicleClass, team: Team, tank: Tank): ClassGeo {
+    const cacheKey = `${cls}:${team}`;
+    const cached = this.geoCache.get(cacheKey);
+    if (cached) return cached;
+    tank.root.updateMatrixWorld(true);
+
+    // Clone: bakePart uses _m1 as scratch, so passing _m1/_m2 themselves would
+    // alias the inverse-space matrix and corrupt every mesh after the first.
+    const rigRootInv = _m2.copy(tank.root.matrixWorld).invert().clone();
+    const turretInv = _m1.copy(tank.rig.turretPivot.matrixWorld).invert().clone();
+    const hullMeshes: THREE.Mesh[] = [];
+    const turretMeshes: THREE.Mesh[] = [];
+    collectMeshes(tank.root, tank.rig.turretPivot, hullMeshes);
+    collectMeshes(tank.rig.turretPivot, null, turretMeshes);
+    const hull = bakePart(hullMeshes, rigRootInv);
+    const turret = turretMeshes.length > 0 ? bakePart(turretMeshes, turretInv) : null;
+    console.info(
+      `[wreck-bake] ${cls}:${team} whipComponents=${hull.whipComponents + (turret?.whipComponents ?? 0)} droppedTris=${hull.whipDroppedTris + (turret?.whipDroppedTris ?? 0)}`
+    );
+
+    // Turret collision box excludes the gun subtree only when the gun is
+    // barrel-like (long and thin — e.g. the MBT/IFV cannon): a long barrel
+    // inflates the OBB with empty space and makes settled wrecks float.
+    // Chunky gun pods (rocket launcher) stay in the collision box. The
+    // muzzle tip always becomes a thin extra contact point.
+    let turretCollide: TurretCollide | null = null;
+    const gunRoot = tank.rig.gunPivot;
+    if (turret && gunRoot && isDescendantOf(gunRoot, tank.rig.turretPivot)) {
+      const turretOnly: THREE.Mesh[] = [];
+      const gunMeshes: THREE.Mesh[] = [];
+      collectMeshes(tank.rig.turretPivot, gunRoot, turretOnly);
+      collectMeshes(gunRoot, null, gunMeshes);
+      if (turretOnly.length > 0 && gunMeshes.length > 0) {
+        const tbox = new THREE.Box3();
+        const gbox = new THREE.Box3();
+        bakeBoundsOnly(turretOnly, turretInv, tbox);
+        bakeBoundsOnly(gunMeshes, turretInv, gbox);
+        if (!tbox.isEmpty() && !gbox.isEmpty()) {
+          const ts = tbox.getSize(_t1);
+          const gs = gbox.getSize(_t2);
+          const gh = gbox.getSize(_t3).multiplyScalar(0.5);
+          const tDim = Math.max(ts.x, ts.y, ts.z);
+          const gDim = Math.max(gs.x, gs.y, gs.z);
+          const gMinHalf = Math.min(gh.x, gh.y, gh.z);
+          const barrelLike = gDim > tDim * 1.35 && gMinHalf < 0.6;
+          const tc = tbox.getCenter(new THREE.Vector3());
+          const th = tbox.getSize(new THREE.Vector3()).multiplyScalar(0.5);
+          const tipPivot = tank.rig.muzzleNode.getWorldPosition(_t2).applyMatrix4(turretInv);
+          if (barrelLike) {
+            turretCollide = {
+              offset: tc.sub(turret.center),
+              half: th,
+              tip: tipPivot.clone().sub(turret.center),
+            };
+          } else {
+            // Keep the full box (pod is the bulk of the wreck) + tip contact
+            turretCollide = {
+              offset: new THREE.Vector3(),
+              half: turret.half.clone(),
+              tip: tipPivot.clone().sub(turret.center),
+            };
+          }
+        }
+      }
+    }
+    const geo: ClassGeo = {
+      hull,
+      turret,
+      turretCollide,
+      turretRestRel: turret
+        ? _m1.copy(rigRootInv).multiply(tank.rig.turretPivot.matrixWorld).clone()
+        : null,
+    };
+    this.geoCache.set(cacheKey, geo);
+    return geo;
+  }
+
+  /**
+   * Loading-time warm-up: bake the wreck geometry cache for every class×team,
+   * build wreck materials, and compile all vehicle/wreck shader programs so the
+   * first kill in a real fight doesn't hitch. Warm objects are removed after
+   * `renderer.compileAsync`; materials stay undisposed so programs remain cached.
+   */
+  public async prewarmWrecksAndVehicles(
+    renderer: THREE.WebGLRenderer,
+    scene: THREE.Scene,
+    camera: THREE.PerspectiveCamera,
+    assets: LoadedGameAssets
+  ): Promise<void> {
+    const vcls: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket'];
+    const teams: Team[] = ['blue', 'red'];
+    const warm = new THREE.Group();
+    warm.name = 'shader_prewarm';
+    let slot = 0;
+    for (const cls of vcls) {
+      for (const team of teams) {
+        const rig = instantiateTankRig(assets, cls, team);
+        const fakeTank = {
+          root: rig.root,
+          rig,
+          team,
+          stats: { vehicleClass: cls },
+        } as unknown as Tank;
+        fakeTank.root.updateMatrixWorld(true);
+        const geo = this._ensureGeoCached(cls, team, fakeTank);
+        const wreck = this._createWreckRecord();
+        const info = {
+          tank: fakeTank,
+          hitPoint: new THREE.Vector3(0, 1.1, 0),
+          shellDir: null,
+          weapon: 'cannon',
+          damage: 999,
+          catastrophic: true,
+        } as WreckKillInfo;
+        this._buildWreckMeshes(wreck, geo, info);
+        // Loose grid in front of the camera so nothing is frustum-culled
+        const ox = (slot % 5) * 7 - 14;
+        const oz = Math.floor(slot / 5) * 7 - 10;
+        rig.root.position.set(ox, 0, oz);
+        wreck.group.position.set(ox + 3.5, 0, oz + 3.5);
+        warm.add(rig.root, wreck.group);
+        slot++;
+      }
+    }
+    scene.add(warm);
+    warm.updateMatrixWorld(true);
+    const fwd = new THREE.Vector3();
+    camera.getWorldDirection(fwd);
+    warm.position.copy(camera.position).addScaledVector(fwd, 26);
+    warm.updateMatrixWorld(true);
+    // compile()/render() frustum-cull: force every warm object to "intersect" so
+    // edge-of-frustum wreck/vehicle variants still get their programs compiled.
+    warm.traverse((o) => {
+      o.frustumCulled = false;
+    });
+
+    // Debris instanced meshes start count=0/visible=false — force one instance
+    // each so their programs compile during warm-up too.
+    for (const im of this.debrisMeshes) {
+      im.count = 1;
+      im.visible = true;
+    }
+    // compileAsync never resolves on some backends (SwiftShader, some Safari
+    // GPUs); cap the wait — the real render below compiles anything left.
+    await Promise.race([
+      renderer.compileAsync(scene, camera),
+      new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+    ]);
+    // One real render while warm objects are live: compiles shadow-depth and
+    // any program variants compileAsync skips, so the first play frame is clean.
+    renderer.shadowMap.needsUpdate = true;
+    renderer.render(scene, camera);
+    for (const im of this.debrisMeshes) {
+      im.count = 0;
+      im.visible = false;
+    }
+    scene.remove(warm);
+    warm.clear();
   }
 
   private _buildWreckMeshes(wreck: Wreck, geo: ClassGeo, info: WreckKillInfo): void {
@@ -1714,11 +1911,25 @@ export class DestructionManager {
     }
   }
 
+  private _listRemove(list: number[], pos: Int32Array, idx: number): void {
+    const p = pos[idx];
+    const last = list.pop()!;
+    if (p < list.length) {
+      list[p] = last;
+      pos[last] = p;
+    }
+    pos[idx] = -1;
+  }
+
   private _allocDebris(): Debris | null {
     for (let n = 0; n < DEBRIS_CAP; n++) {
       const idx = (this.debrisCursor + n) % DEBRIS_CAP;
       if (!this.debrisPool[idx].active) {
         this.debrisCursor = (idx + 1) % DEBRIS_CAP;
+        if (this.debrisPos[idx] < 0) {
+          this.debrisPos[idx] = this.debrisActiveIdx.length;
+          this.debrisActiveIdx.push(idx);
+        }
         return this.debrisPool[idx];
       }
     }
@@ -1730,12 +1941,14 @@ export class DestructionManager {
     // Compact-write: iterate pool, write each active debris into its mesh slot
     const slotCursor = [0, 0, 0, 0];
     const q = _sq;
-    for (let i = 0; i < DEBRIS_CAP; i++) {
+    const debrisList = this.debrisActiveIdx;
+    for (let k = debrisList.length - 1; k >= 0; k--) {
+      const i = debrisList[k];
       const d = this.debrisPool[i];
-      if (!d.active) continue;
       d.age += dt;
-      if (d.age >= d.life) {
+      if (!d.active || d.age >= d.life) {
         d.active = false;
+        this._listRemove(debrisList, this.debrisPos, i);
         continue;
       }
       // Sphere-vs-terrain with rolling friction
@@ -1971,6 +2184,10 @@ export class DestructionManager {
     }
   }
 
+  /** Adaptive-quality scalars (main.ts quality levels). */
+  public fxRateMul = 1;
+  public maxFireWrecks = Infinity;
+
   private _emitEffects(wreck: Wreck, dt: number, cameraPos: THREE.Vector3): void {
     const burning = wreck.age < 20;
     const dying = wreck.age >= 20 && wreck.age < 35;
@@ -1984,9 +2201,20 @@ export class DestructionManager {
     }
     const emitWorld = wreck.emitWorld;
 
+    const fxDt = dt * this.fxRateMul;
+
     // Fire licks — many small overlapping quads per emitter
-    wreck.fireAccum += dt;
-    const fireRate = burning ? 0.055 : dying ? 0.16 : 0;
+    // L2 cap: only the youngest maxFireWrecks fire-eligible wrecks burn with
+    // fire; older ones go straight to smoke.
+    wreck.fireAccum += fxDt;
+    let fireRate = burning ? 0.055 : dying ? 0.16 : 0;
+    if (fireRate > 0 && this.maxFireWrecks < Infinity) {
+      let younger = 0;
+      for (const w of this.wrecks) {
+        if (w !== wreck && w.active && w.age < 35 && w.age < wreck.age) younger++;
+      }
+      if (younger >= this.maxFireWrecks) fireRate = 0;
+    }
     if (fireRate > 0 && wreck.fireAccum >= fireRate) {
       wreck.fireAccum = 0;
       const nEmit = burning ? emitCount : Math.min(2, emitCount);
@@ -2000,7 +2228,7 @@ export class DestructionManager {
     }
 
     // Thick black smoke column (continues through the smoke-only phase, thinner)
-    wreck.smokeAccum += dt;
+    wreck.smokeAccum += fxDt;
     const smokeRate = wreck.age < 35 ? 0.15 : 0.3;
     if (wreck.smokeAccum >= smokeRate) {
       wreck.smokeAccum = 0;
@@ -2011,7 +2239,7 @@ export class DestructionManager {
     }
 
     // Embers while burning
-    wreck.emberAccum += dt;
+    wreck.emberAccum += fxDt;
     if (burning && wreck.emberAccum >= 0.45) {
       wreck.emberAccum = 0;
       const p = emitWorld[Math.floor(Math.random() * emitCount)];

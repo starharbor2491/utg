@@ -223,14 +223,14 @@ export class World implements TerrainQuery {
     return this.obstacles;
   }
 
-  public setQuality(quality: 'high' | 'medium'): void {
+  public setQuality(quality: 'high' | 'medium' | 'default'): void {
     if (this.grassMesh) {
       this.grassMesh.count =
-        quality === 'high'
-          ? this.grassMesh.instanceMatrix.count
-          : Math.floor(this.grassMesh.instanceMatrix.count * 0.45);
+        quality === 'medium'
+          ? Math.floor(this.grassMesh.instanceMatrix.count * 0.45)
+          : this.grassMesh.instanceMatrix.count;
     }
-    const targetShadow = quality === 'high' ? 2048 : 1024;
+    const targetShadow = quality === 'high' ? 2048 : quality === 'medium' ? 1024 : 1536;
     if (this.sunLight.shadow.mapSize.x !== targetShadow) {
       this.sunLight.shadow.mapSize.set(targetShadow, targetShadow);
       this.sunLight.shadow.map?.dispose();
@@ -861,7 +861,11 @@ export class World implements TerrainQuery {
     });
   }
 
+  /** Dev/bench counter: total raycastWorld calls (reset via bench tooling). */
+  public raycastCount = 0;
+
   public raycastWorld(origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number): WorldRayHit | null {
+    this.raycastCount++;
     let bestDist = maxDist;
     let hitKind: 'terrain' | 'obstacle' | null = null;
     let hitObs: ObstacleCollider | undefined;

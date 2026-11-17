@@ -447,6 +447,16 @@ export function instantiateTankRig(
   vehicleClass: VehicleClass,
   team: Team
 ): InstantiatedTankRig {
+  const rig = buildVehicleRig(assets, vehicleClass, team);
+  mergeStaticVehicleMeshes(rig, `${vehicleClass}:${team}`);
+  return rig;
+}
+
+function buildVehicleRig(
+  assets: LoadedGameAssets,
+  vehicleClass: VehicleClass,
+  team: Team
+): InstantiatedTankRig {
   // Rocket artillery is fully procedural (src/game/models/RocketLauncher.ts)
   if (vehicleClass === 'rocket') {
     return buildRocketLauncherRig(team);
@@ -988,4 +998,167 @@ function cloneInstanceMaterials(
       mesh.material = cloneMat(mesh.material);
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// Static-geometry merging
+//
+// Every non-articulated mesh under each articulated node (hull body, turret,
+// gun/mantlet, launcher pod surround, etc.) is collapsed into one mesh per
+// material, baked into that node's local space. Articulated pieces — wheels,
+// road wheels, sprockets, steer pivots, the gun recoil group, the RWS yaw
+// node, and rocket pod tubes (hidden individually on launch) — keep their own
+// nodes. Merged BufferGeometry is cached per class×team so all vehicles of a
+// variant share GPU buffers; each vehicle still gets its own material clones.
+// ---------------------------------------------------------------------------
+
+
+// GLB assets use KHR_mesh_quantization: position/normal arrive as normalized
+// integer attributes. BufferGeometry.applyMatrix4 writes plain floats back via
+// setXYZ, which truncates them into the integer buffer and collapses every
+// vertex to the mesh origin. De-normalize to float32 before transforming.
+export function denormalizeGeo(geo: THREE.BufferGeometry): void {
+  for (const name of ['position', 'normal', 'tangent', 'color'] as const) {
+    const attr = geo.attributes[name] as THREE.BufferAttribute | undefined;
+    if (!attr || !attr.normalized) continue;
+    const arr = new Float32Array(attr.count * attr.itemSize);
+    for (let i = 0; i < attr.count; i++) {
+      for (let c = 0; c < attr.itemSize; c++) {
+        arr[i * attr.itemSize + c] = attr.getComponent(i, c);
+      }
+    }
+    geo.setAttribute(name, new THREE.BufferAttribute(arr, attr.itemSize));
+  }
+}
+
+const vehicleMergeGeoCache = new Map<string, Map<string, THREE.BufferGeometry>>();
+
+function materialMergeSignature(mat: THREE.Material): string {
+  const m = mat as THREE.MeshStandardMaterial;
+  const std = m.isMeshStandardMaterial ? m : null;
+  return [
+    mat.name,
+    std ? std.color.getHexString() : '',
+    std ? std.metalness.toFixed(3) : '',
+    std ? std.roughness.toFixed(3) : '',
+    std ? (std.map?.uuid ?? '') : '',
+    std ? (std.normalMap?.uuid ?? '') : '',
+    std ? std.emissive.getHexString() : '',
+    std ? std.emissiveIntensity.toFixed(3) : '',
+    std ? (std.vertexColors ? 1 : 0) : 0,
+    mat.side,
+    mat.transparent ? 1 : 0,
+    m.alphaTest > 0 ? 1 : 0,
+    mat.customProgramCacheKey(),
+  ].join('|');
+}
+
+function attributeMergeSignature(geo: THREE.BufferGeometry): string {
+  const attrs = Object.keys(geo.attributes).sort().join(',');
+  return `${geo.index ? 'i' : 'n'}:${attrs}`;
+}
+
+function regionNodeId(node: THREE.Object3D, stop: THREE.Object3D): string {
+  if (node.name) return node.name;
+  const parts: string[] = [];
+  for (let p: THREE.Object3D | null = node; p && p !== stop; p = p.parent) {
+    parts.unshift(p.name || p.type);
+  }
+  return parts.join('/');
+}
+
+function mergeStaticVehicleMeshes(rig: InstantiatedTankRig, cacheKey: string): void {
+  rig.root.updateMatrixWorld(true);
+  const visualRoot = rig.visualRoot;
+
+  const dynamic = new Set<THREE.Object3D>([
+    rig.turretPivot,
+    rig.gunPivot,
+    rig.gunRecoilGroup,
+  ]);
+  if (rig.rwsNode) dynamic.add(rig.rwsNode);
+  for (const w of rig.wheels) dynamic.add(w.node);
+  for (const st of rig.steerNodes) dynamic.add(st);
+  const podMeshes = new Set<THREE.Object3D>(rig.rocketMeshes);
+
+  interface MergeGroup {
+    mat: THREE.Material;
+    cast: boolean;
+    recv: boolean;
+    meshes: THREE.Mesh[];
+  }
+  const regions = new Map<THREE.Object3D, { id: string; groups: Map<string, MergeGroup> }>();
+
+  visualRoot.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh || Array.isArray(mesh.material)) return;
+    if (podMeshes.has(mesh) || dynamic.has(mesh)) return;
+    const morphKeys = Object.keys(mesh.geometry.morphAttributes ?? {});
+    if (morphKeys.length > 0) return;
+
+    // Deepest dynamic ancestor wins; meshes with none merge into visualRoot.
+    let region: THREE.Object3D = visualRoot;
+    for (let p = mesh.parent; p && p !== visualRoot; p = p.parent) {
+      if (dynamic.has(p)) {
+        region = p;
+        break;
+      }
+    }
+
+    let r = regions.get(region);
+    if (!r) {
+      r = { id: regionNodeId(region, visualRoot), groups: new Map() };
+      regions.set(region, r);
+    }
+    const sig =
+      `${materialMergeSignature(mesh.material)}|${attributeMergeSignature(mesh.geometry)}` +
+      `|${mesh.castShadow ? 1 : 0}${mesh.receiveShadow ? 1 : 0}`;
+    let g = r.groups.get(sig);
+    if (!g) {
+      g = { mat: mesh.material, cast: mesh.castShadow, recv: mesh.receiveShadow, meshes: [] };
+      r.groups.set(sig, g);
+    }
+    g.meshes.push(mesh);
+  });
+
+  let cache = vehicleMergeGeoCache.get(cacheKey);
+  if (!cache) {
+    cache = new Map();
+    vehicleMergeGeoCache.set(cacheKey, cache);
+  }
+
+  const regionInv = new THREE.Matrix4();
+  const relMat = new THREE.Matrix4();
+
+  for (const [region, r] of regions) {
+    if (r.groups.size === 0) continue;
+    regionInv.copy(region.matrixWorld).invert();
+    for (const [sig, g] of r.groups) {
+      if (g.meshes.length < 2) continue;
+      const key = `${r.id}|${sig}`;
+      let geo = cache.get(key);
+      if (!geo) {
+        const geos: THREE.BufferGeometry[] = [];
+        for (const m of g.meshes) {
+          const baked = m.geometry.clone();
+          denormalizeGeo(baked);
+          relMat.multiplyMatrices(regionInv, m.matrixWorld);
+          baked.applyMatrix4(relMat);
+          geos.push(baked);
+        }
+        const merged = mergeGeometries(geos, false);
+        if (!merged) continue; // incompatible attributes — leave meshes as-is
+        geo = merged;
+        cache.set(key, geo);
+      }
+      const mergedMesh = new THREE.Mesh(geo, g.mat);
+      mergedMesh.castShadow = g.cast;
+      mergedMesh.receiveShadow = g.recv;
+      mergedMesh.name = g.meshes[0].name || `${r.id}_merged`;
+      region.add(mergedMesh);
+      for (const m of g.meshes) {
+        m.parent?.remove(m);
+      }
+    }
+  }
 }

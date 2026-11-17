@@ -74,6 +74,8 @@ interface BotBrain {
 
   alertTimer: number;
   losLockTimer: number;
+  losScanTimer: number;
+  losClearCached: boolean;
   mgCycleTimer: number;
   rocketSolveTimer: number;
 
@@ -170,6 +172,8 @@ export class BotAIManager {
         lastTargetPos: new THREE.Vector3().copy(bot.position),
         alertTimer: 0,
         losLockTimer: 0,
+        losScanTimer: seed * 0.1,
+        losClearCached: true,
         mgCycleTimer: seed * 2.5,
         rocketSolveTimer: seed * 0.5,
         smoothedMoveYaw: bot.hullYaw,
@@ -828,25 +832,31 @@ export class BotAIManager {
       this._aimPoint.y += verticalSpread;
       intent.aimPoint.copy(this._aimPoint);
 
-      // Line-of-Sight check from muzzle to target center of mass
-      this._losDir.subVectors(this._targetCenter, this._muzzlePos);
-      const losLen = this._losDir.length();
-      let losClear = true;
-      if (losLen > 1.0) {
-        this._losDir.multiplyScalar(1 / losLen);
-        const checkDist = Math.max(0.5, losLen - target.stats.hitRadius * 0.85);
-        const losHit = world.raycastWorld(this._muzzlePos, this._losDir, checkDist);
-        if (losHit !== null) {
-          // Only allow shooting through a nearby destructible crate/sapling (< 12m), never solid cover/ridges
-          const shootableBrush =
-            losHit.hitKind === 'obstacle' &&
-            Boolean(losHit.obstacle?.destructible) &&
-            losHit.distance < 12;
-          if (!shootableBrush) {
-            losClear = false;
+      // Line-of-Sight check from muzzle to target center of mass (<=10 Hz per bot, staggered)
+      brain.losScanTimer -= safeDt;
+      if (brain.losScanTimer <= 0) {
+        brain.losScanTimer = 0.1;
+        this._losDir.subVectors(this._targetCenter, this._muzzlePos);
+        const losLen = this._losDir.length();
+        let scanned = true;
+        if (losLen > 1.0) {
+          this._losDir.multiplyScalar(1 / losLen);
+          const checkDist = Math.max(0.5, losLen - target.stats.hitRadius * 0.85);
+          const losHit = world.raycastWorld(this._muzzlePos, this._losDir, checkDist);
+          if (losHit !== null) {
+            // Only allow shooting through a nearby destructible crate/sapling (< 12m), never solid cover/ridges
+            const shootableBrush =
+              losHit.hitKind === 'obstacle' &&
+              Boolean(losHit.obstacle?.destructible) &&
+              losHit.distance < 12;
+            if (!shootableBrush) {
+              scanned = false;
+            }
           }
         }
+        brain.losClearCached = scanned;
       }
+      const losClear = brain.losClearCached;
 
       if (losClear) {
         brain.losLockTimer = Math.min(3.0, brain.losLockTimer + safeDt);

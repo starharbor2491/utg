@@ -4,7 +4,10 @@
    ========================================================================== */
 
 :root {
-  --fcs-surface: rgba(14, 15, 14, 0.82);
+  --fcs-surface: rgba(20, 22, 18, 0.9);
+  --fcs-edge: rgba(236, 234, 228, 0.16);
+  --fcs-edge-top: rgba(236, 234, 228, 0.26);
+  --fcs-track: 0.07em;
   --fcs-surface-solid: #0e0f0e;
   --fcs-raised: rgba(236, 234, 228, 0.06);
   --fcs-hairline: rgba(236, 234, 228, 0.08);
@@ -35,6 +38,19 @@
   --hud-font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 }
 
+.fcs-root,
+.fcs-unit-marker,
+.fcs-lock-banner {
+  text-transform: uppercase;
+  letter-spacing: var(--fcs-track);
+}
+
+.fcs-root button {
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+}
+
 .fcs-root {
   position: fixed;
   inset: 0;
@@ -53,13 +69,14 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Matte instrument panel: translucent surface, hairline border, soft shadow. */
+/* Square steel instrument plate: flat matte face, machined edge, no shadow. */
 .hud-plate {
   position: relative;
   background: var(--fcs-surface);
-  border: 1px solid var(--fcs-hairline);
-  border-radius: 12px;
-  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.38);
+  border: 1px solid var(--fcs-edge);
+  border-top-color: var(--fcs-edge-top);
+  border-radius: 0;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.55);
 }
 
 .hud-plate--crimson {
@@ -103,7 +120,7 @@
   padding: 6px 14px;
   background: var(--fcs-surface);
   border: 1px solid var(--fcs-hairline);
-  border-radius: 8px;
+  border-radius: 0;
   font-family: var(--hud-font-display);
   font-size: 13px;
   color: var(--fcs-text);
@@ -197,11 +214,11 @@
   padding: 3px 8px;
   background: var(--fcs-surface);
   border: 1px solid var(--fcs-hairline);
-  border-radius: 4px;
+  border-radius: 0;
   font-family: var(--hud-font-mono);
   font-size: 11px;
   font-weight: 500;
-  letter-spacing: 0;
+  letter-spacing: var(--fcs-track);
   color: var(--fcs-text-2);
 }
 
@@ -216,11 +233,11 @@
   padding: 4px 12px;
   background: var(--fcs-surface);
   border: 1px solid var(--fcs-hairline);
-  border-radius: 8px;
+  border-radius: 0;
   font-family: var(--hud-font-mono);
   font-variant-numeric: tabular-nums;
   font-size: 12px;
-  letter-spacing: 0;
+  letter-spacing: var(--fcs-track);
 }
 
 .fcs-sniper-lrf-val {
@@ -324,7 +341,7 @@
   font-variant-numeric: tabular-nums;
   font-size: 11px;
   line-height: 1.15;
-  letter-spacing: 0;
+  letter-spacing: var(--fcs-track);
   color: var(--fcs-text);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), 0 0 4px rgba(0, 0, 0, 0.85);
   white-space: nowrap;
@@ -376,7 +393,7 @@
   padding: 4px 14px;
   background: var(--fcs-surface);
   border: 1px solid var(--fcs-hairline-strong);
-  border-radius: 8px;
+  border-radius: 0;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -388,7 +405,7 @@
   font-family: var(--hud-font-display);
   font-size: 13px;
   font-weight: 500;
-  letter-spacing: 0;
+  letter-spacing: var(--fcs-track);
   color: var(--fcs-text);
 }
 
@@ -396,7 +413,7 @@
   font-family: var(--hud-font-mono);
   font-size: 10px;
   font-weight: 500;
-  letter-spacing: 0;
+  letter-spacing: var(--fcs-track);
   color: var(--fcs-danger);
 }
 
@@ -508,7 +525,7 @@
 .fcs-bar-title {
   font-size: 11px;
   font-weight: 500;
-  letter-spacing: 0;
+  letter-spacing: var(--fcs-track);
   color: var(--fcs-text-2);
 }
 
@@ -517,7 +534,7 @@
   font-variant-numeric: tabular-nums;
   font-size: 11px;
   font-weight: 500;
-  letter-spacing: 0;
+  letter-spacing: var(--fcs-track);
   color: var(--fcs-text);
 }
 
@@ -558,14 +575,14 @@
   font-size: 28px;
   font-weight: 500;
   line-height: 1;
-  letter-spacing: 0;
+  letter-spacing: var(--fcs-track);
   color: var(--fcs-text);
 }
 
 .fcs-speed-unit {
   font-size: 11px;
   font-weight: 400;
-  letter-spacing: 0;
+  letter-spacing: var(--fcs-track);
   color: var(--fcs-text-3);
 }
 
@@ -649,7 +666,7 @@
 .fcs-radar-title {
   font-size: 11px;
   font-weight: 500;
-  letter-spacing: 0;
+  letter-spacing: var(--fcs-track);
   color: var(--fcs-text-3);
 }
 
@@ -689,7 +706,7 @@
   padding: 4px 10px;
   background: var(--fcs-surface);
   border: 1px solid var(--fcs-hairline);
-  border-radius: 8px;
+  border-radius: 0;
   font-size: 12px;
   color: var(--fcs-text);
 }
@@ -714,7 +731,7 @@
   font-family: var(--hud-font-mono);
   font-size: 10px;
   font-weight: 500;
-  letter-spacing: 0;
+  letter-spacing: var(--fcs-track);
   color: var(--fcs-text-3);
 }
 
@@ -783,7 +800,7 @@
 .fcs-respawn-title {
   font-size: 20px;
   font-weight: 500;
-  letter-spacing: 0;
+  letter-spacing: var(--fcs-track);
   color: var(--fcs-text);
   margin-bottom: 8px;
 }
@@ -904,7 +921,7 @@
   display: inline-flex;
   align-items: center;
   border: 1px solid var(--fcs-hairline-strong);
-  border-radius: 4px;
+  border-radius: 0;
   color: var(--fcs-text-2);
   white-space: nowrap;
 }
@@ -935,7 +952,7 @@
   gap: 1px;
   background: #ECEAE4;
   border: none;
-  border-radius: 8px;
+  border-radius: 0;
   color: #121312;
   font-family: var(--hud-font-display);
   overflow: hidden;
@@ -1000,7 +1017,7 @@
   background: transparent;
   border: 1px solid transparent;
   border-left: 2px solid transparent;
-  border-radius: 8px;
+  border-radius: 0;
   color: var(--fcs-text);
   font-family: var(--hud-font-display);
   font-size: 13px;
@@ -1049,7 +1066,7 @@
   padding: 4px 8px;
   background: var(--fcs-surface);
   border: 1px solid var(--fcs-hairline);
-  border-radius: 8px;
+  border-radius: 0;
   font-family: var(--hud-font-mono);
   font-variant-numeric: tabular-nums;
   font-size: 11px;
@@ -1130,11 +1147,11 @@
   padding: 6px 14px;
   background: var(--fcs-surface);
   border: 1px solid var(--fcs-hairline-strong);
-  border-radius: 8px;
+  border-radius: 0;
   font-family: var(--hud-font-display);
   font-size: 12px;
   font-weight: 500;
-  letter-spacing: 0;
+  letter-spacing: var(--fcs-track);
   color: var(--fcs-text-2);
   z-index: 22;
 }
@@ -1163,7 +1180,7 @@
   gap: 5px;
   font-size: 10px;
   font-weight: 500;
-  letter-spacing: 0;
+  letter-spacing: var(--fcs-track);
 }
 
 .fcs-unit-marker.is-ally .fcs-um-top {
