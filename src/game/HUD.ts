@@ -60,6 +60,16 @@ const RADAR_CSS_SIZE = 196;
 const RADAR_RANGE_METERS = 220;
 const RADAR_SCOPE_RADIUS = 84;
 
+
+const PART_LABELS: Record<string, string> = {
+  engine: 'ENGINE', fuel: 'FUEL', ammo: 'AMMO',
+  track_left: 'TRACK L', track_right: 'TRACK R',
+  wheels_left: 'WHEELS L', wheels_right: 'WHEELS R',
+  turret_ring: 'TURRET', gun: 'GUN', launcher: 'LAUNCHER',
+};
+function partLabelFor(id: string): string {
+  return PART_LABELS[id] ?? id.toUpperCase();
+}
 function clamp(v: number, min: number, max: number): number {
   if (!Number.isFinite(v)) return min;
   return v < min ? min : v > max ? max : v;
@@ -130,6 +140,17 @@ export class HUD {
   private readonly pdTurretGroupEl: SVGGElement;
   private readonly hpReadoutEl: HTMLSpanElement;
   private readonly hpSegEls: HTMLDivElement[] = [];
+  private partsRowsEl: HTMLDivElement | null = null;
+  private fireStripEl: HTMLDivElement | null = null;
+  private lastPartsKey = '';
+  private lastDollSig = '';
+  private pdHullFillEl: SVGPolygonElement | null = null;
+  private pdTurretFillEl: SVGPolygonElement | null = null;
+  private pdTrackEls: SVGRectElement[] = [];
+  private pdGunEls: SVGElement[] = [];
+  private hitResultEl: HTMLDivElement | null = null;
+  private respawnReasonEl: HTMLSpanElement | null = null;
+  private lastRespawnReason = '';
   private readonly speedNumEl: HTMLSpanElement;
   private readonly cannonStatusEl: HTMLSpanElement;
   private readonly cannonBarFillEl: HTMLDivElement;
@@ -192,6 +213,7 @@ export class HUD {
     this.boreReloadCircleEl = reticles.boreReloadCircle;
     this.boreRangeTextEl = reticles.boreRangeText;
     this.hitMarkerEl = reticles.hitMarker;
+    this.hitResultEl = reticles.hitResult;
     this.killBannerEl = reticles.killBanner;
     this.damageArcEl = reticles.damageArc;
     this.lockBoxEl = reticles.lockBox;
@@ -247,6 +269,7 @@ export class HUD {
     this.respawnBannerEl = respawn.banner;
     this.respawnSecEl = respawn.sec;
     this.respawnBarFillEl = respawn.barFill;
+    this.respawnReasonEl = respawn.reason;
     this.root.appendChild(this.respawnBannerEl);
 
     // 10. Briefing / Asset Loading / Pause Overlay
@@ -463,6 +486,22 @@ export class HUD {
       this.killBannerEl.style.opacity = '0';
     }
 
+    // 4c. Hit result readout under the hit marker
+    if (this.hitResultEl) {
+      const hi = clamp01(t.hitResultIntensity);
+      if (hi > 0.01 && t.hitResultText) {
+        if (this.hitResultEl.textContent !== t.hitResultText) {
+          this.hitResultEl.textContent = t.hitResultText;
+        }
+        const bx = t.gunnerBore.visible ? t.gunnerBore.x : window.innerWidth * 0.5;
+        const by = (t.gunnerBore.visible ? t.gunnerBore.y : window.innerHeight * 0.5) + 30;
+        this.hitResultEl.style.opacity = (hi * 0.95).toFixed(2);
+        this.hitResultEl.style.transform = `translate3d(${bx.toFixed(1)}px, ${by.toFixed(1)}px, 0) translate(-50%, -50%)`;
+      } else {
+        this.hitResultEl.style.opacity = '0';
+      }
+    }
+
     // 5. Guided-munition seeker lock box
     const lk = t.lockOn;
     const showLock =
@@ -503,8 +542,8 @@ export class HUD {
       this.damageArcEl.style.opacity = '0';
     }
 
-    // 2. Low-HP (<35%) Hull Breach Vignette + Incoming Hit Flash
-    const hpRatio = t.alive ? clamp01(t.hp / Math.max(1, t.maxHp)) : 0;
+    // 2. Low-crew (<35%) casualty vignette + incoming hit flash
+    const hpRatio = t.alive ? clamp01(t.crewAlive / Math.max(1, t.crewTotal)) : 0;
     let vignetteAlpha = 0;
     if (!t.alive) {
       vignetteAlpha = 0.55;
@@ -519,6 +558,115 @@ export class HUD {
     this.damageVignetteEl.style.opacity = vignetteAlpha.toFixed(2);
   }
 
+  /** Rebuild the parts rows when the vehicle class / module set changes,
+   *  then refresh per-row state text (cached — DOM writes only on change). */
+  private updatePartsRows(t: HUDTelemetry): void {
+    const parts = t.parts ?? [];
+    const key = `${t.vehicleClass}|${parts.map((p) => p.id).join(',')}`;
+    if (!this.partsRowsEl) return;
+    if (key !== this.lastPartsKey) {
+      this.lastPartsKey = key;
+      this.partsRowsEl.innerHTML = '';
+      for (const p of parts) {
+        const row = document.createElement('div');
+        row.className = 'fcs-part-row';
+        const label = document.createElement('span');
+        label.className = 'fcs-part-label';
+        label.textContent = partLabelFor(p.id);
+        const state = document.createElement('span');
+        state.className = 'fcs-part-state';
+        row.append(label, state);
+        row.dataset.sig = '';
+        this.partsRowsEl.appendChild(row);
+      }
+      // Crew row: label + one pip per seat with role letter underneath
+      const crewRow = document.createElement('div');
+      crewRow.className = 'fcs-part-row fcs-crew-row';
+      const crewLabel = document.createElement('span');
+      crewLabel.className = 'fcs-part-label';
+      crewLabel.textContent = 'Crew';
+      const pips = document.createElement('span');
+      pips.className = 'fcs-crew-pips';
+      for (const c of t.crewPips ?? []) {
+        const seat = document.createElement('span');
+        seat.className = 'fcs-crew-seat';
+        const pip = document.createElement('i');
+        pip.className = `fcs-crew-pip is-${c.state}`;
+        const letter = document.createElement('b');
+        letter.textContent = c.role;
+        seat.append(pip, letter);
+        pips.appendChild(seat);
+      }
+      crewRow.append(crewLabel, pips);
+      crewRow.dataset.sig = '';
+      this.partsRowsEl.appendChild(crewRow);
+    }
+
+    const rows = this.partsRowsEl.children;
+    for (let i = 0; i < parts.length && i < rows.length; i++) {
+      const p = parts[i];
+      const row = rows[i] as HTMLElement;
+      const stateEl = row.lastElementChild as HTMLElement;
+      const repairing = p.repairSec > 0;
+      const txt = repairing
+        ? `REPAIR ${Math.max(1, Math.ceil(p.repairSec))} S`
+        : p.state === 'ok'
+          ? 'OK'
+          : p.state === 'damaged'
+            ? 'DAMAGED'
+            : 'DESTROYED';
+      const sig = `${p.state}|${repairing ? Math.ceil(p.repairSec) : 0}`;
+      if (row.dataset.sig !== sig) {
+        row.dataset.sig = sig;
+        stateEl.textContent = txt;
+        stateEl.className = `fcs-part-state is-${repairing ? 'repair' : p.state}`;
+      }
+    }
+    // Crew row pip states (last row)
+    const crewRow = rows[rows.length - 1] as HTMLElement | undefined;
+    if (crewRow && t.crewPips) {
+      const pips = crewRow.querySelectorAll('.fcs-crew-pip');
+      const sig = t.crewPips.map((c) => c.state).join(',');
+      if (crewRow.dataset.csig !== sig) {
+        crewRow.dataset.csig = sig;
+        t.crewPips.forEach((c, i) => {
+          const pip = pips[i];
+          if (pip) pip.className = `fcs-crew-pip is-${c.state}`;
+        });
+      }
+    }
+  }
+
+  /** Tint paper-doll regions by the worst module state inside them. */
+  private updatePaperDollDamage(t: HUDTelemetry): void {
+    const parts = t.parts;
+    if (!parts || parts.length === 0) return;
+    let hull = 0, track = 0, turret = 0;
+    for (const p of parts) {
+      // a module mid-repair reads as 'being fixed' -> amber, not danger red
+      const rank = p.repairSec > 0 ? 1 : p.state === 'destroyed' ? 2 : p.state === 'damaged' ? 1 : 0;
+      if (rank === 0) continue;
+      if (p.id === 'track_left' || p.id === 'track_right' || p.id === 'wheels_left' || p.id === 'wheels_right') track = Math.max(track, rank);
+      else if (p.id === 'turret_ring' || p.id === 'gun' || p.id === 'launcher') turret = Math.max(turret, rank);
+      else hull = Math.max(hull, rank);
+    }
+    const sig = `${hull}${track}${turret}`;
+    if (sig === this.lastDollSig) return;
+    this.lastDollSig = sig;
+    const apply = (els: SVGElement[], rank: number, fillToo: boolean): void => {
+      const stroke = rank === 2 ? '#D0574A' : rank === 1 ? 'rgba(232,169,56,0.9)' : '';
+      const fill = rank === 2 ? 'rgba(208,87,74,0.28)' : rank === 1 ? 'rgba(232,169,56,0.16)' : '';
+      for (const el of els) {
+        el.style.stroke = stroke;
+        if (fillToo) el.style.fill = fill;
+      }
+    };
+    apply(this.pdTrackEls, track, true);
+    if (this.pdHullFillEl) apply([this.pdHullFillEl], hull, true);
+    if (this.pdTurretFillEl) apply([this.pdTurretFillEl], turret, true);
+    apply(this.pdGunEls, turret, false);
+  }
+
   private updateVehiclePanel(t: HUDTelemetry): void {
     // 1. Live SVG Tank Paper-Doll Rotations
     // Screen CW rotation for world yaw relative to cameraYaw is `cameraYaw - worldYaw`
@@ -528,9 +676,9 @@ export class HUD {
     this.pdHullGroupEl.setAttribute('transform', `rotate(${hullScreenDeg.toFixed(2)} 48 48)`);
     this.pdTurretGroupEl.setAttribute('transform', `rotate(${turretScreenDeg.toFixed(2)} 48 48)`);
 
-    // 2. Segmented Hull Armor HP Bar
-    const maxHp = Math.max(1, Math.round(t.maxHp));
-    const curHp = t.alive ? clamp(Math.ceil(t.hp), 0, maxHp) : 0;
+    // 2. Parts block: module rows, crew pips, fire strip, paper-doll tint
+    const maxHp = Math.max(1, Math.round(t.crewTotal));
+    const curHp = t.alive ? clamp(Math.round(t.crewAlive), 0, maxHp) : 0;
     const hpRatio = curHp / maxHp;
 
     const dmgState: 'ok' | 'warn' | 'crit' | 'dead' = !t.alive
@@ -548,7 +696,7 @@ export class HUD {
       this.vehiclePanelEl.classList.toggle('is-dead', dmgState === 'dead');
     }
 
-    const hpStr = `${curHp} / ${maxHp}`;
+    const hpStr = `${curHp}/${maxHp}`;
     if (hpStr !== this.lastHpStr) {
       this.lastHpStr = hpStr;
       this.hpReadoutEl.textContent = hpStr;
@@ -560,21 +708,17 @@ export class HUD {
             : 'var(--fcs-text)';
     }
 
-    const activeColor =
-      dmgState === 'crit' || dmgState === 'dead'
-        ? 'var(--fcs-danger)'
-        : 'var(--fcs-text-2)';
+    this.updatePartsRows(t);
+    this.updatePaperDollDamage(t);
 
-    const exactFilled = hpRatio * HP_SEGMENT_COUNT;
-    for (let i = 0; i < HP_SEGMENT_COUNT; i++) {
-      const seg = this.hpSegEls[i];
-      const cellFill = clamp01(exactFilled - i);
-      if (cellFill <= 0.02) {
-        seg.style.backgroundColor = 'var(--fcs-hairline)';
-        seg.style.opacity = '1';
+    if (this.fireStripEl) {
+      if (t.onFire) {
+        const ext = t.fireExtSec;
+        const txt = ext >= 0 ? `FIRE · EXTINGUISHER ${ext.toFixed(1)} S` : 'FIRE';
+        if (this.fireStripEl.textContent !== txt) this.fireStripEl.textContent = txt;
+        this.fireStripEl.style.display = 'block';
       } else {
-        seg.style.backgroundColor = activeColor;
-        seg.style.opacity = (0.35 + 0.65 * cellFill).toFixed(2);
+        this.fireStripEl.style.display = 'none';
       }
     }
 
@@ -1262,6 +1406,10 @@ export class HUD {
         this.maxObservedRespawn = rem;
       }
       this.respawnSecEl.textContent = `Back in ${rem.toFixed(1)} s`;
+      if (this.respawnReasonEl) {
+        const rsn = t.deathReason ?? '';
+        if (this.respawnReasonEl.textContent !== rsn) this.respawnReasonEl.textContent = rsn;
+      }
       const progress = clamp01(1 - rem / Math.max(0.1, this.maxObservedRespawn));
       this.respawnBarFillEl.style.width = `${(progress * 100).toFixed(1)}%`;
     }
@@ -1369,6 +1517,7 @@ export class HUD {
     boreReloadCircle: SVGCircleElement;
     boreRangeText: HTMLSpanElement;
     hitMarker: HTMLDivElement;
+    hitResult: HTMLDivElement;
     killBanner: HTMLDivElement;
     damageArc: HTMLDivElement;
     lockBox: HTMLDivElement;
@@ -1474,6 +1623,11 @@ export class HUD {
     `;
     layer.appendChild(hitMarker);
 
+    // 4b. Hit result readout (RICOCHET / NO PENETRATION / PENETRATION · …)
+    const hitResult = document.createElement('div');
+    hitResult.className = 'fcs-hit-result';
+    layer.appendChild(hitResult);
+
     // 5. TARGET DESTROYED Micro-Banner
     const killBanner = document.createElement('div');
     killBanner.className = 'fcs-kill-banner';
@@ -1510,6 +1664,7 @@ export class HUD {
       boreReloadCircle,
       boreRangeText,
       hitMarker,
+      hitResult,
       killBanner,
       damageArc,
       lockBox,
@@ -1599,6 +1754,10 @@ export class HUD {
 
     const hullGroup = svg.querySelector('#fcs-pd-hull') as SVGGElement;
     const turretGroup = svg.querySelector('#fcs-pd-turret') as SVGGElement;
+    this.pdHullFillEl = svg.querySelector('.fcs-pd-hull-fill') as SVGPolygonElement | null;
+    this.pdTurretFillEl = svg.querySelector('.fcs-pd-turret-fill') as SVGPolygonElement | null;
+    this.pdTrackEls = Array.from(svg.querySelectorAll<SVGRectElement>('.fcs-pd-track-fill'));
+    this.pdGunEls = Array.from(svg.querySelectorAll<SVGElement>('.fcs-pd-gun-stroke'));
 
     pdCol.append(svg);
 
@@ -1606,28 +1765,27 @@ export class HUD {
     const sysCol = document.createElement('div');
     sysCol.className = 'fcs-systems-col';
 
-    // 1. Segmented Hull Armor HP Block
+    // 1. Vehicle Parts Block (module states + crew pips + fire strip)
     const hpBlock = document.createElement('div');
-    hpBlock.className = 'fcs-bar-block';
+    hpBlock.className = 'fcs-bar-block fcs-parts-block';
     const hpHeader = document.createElement('div');
     hpHeader.className = 'fcs-bar-header';
     const hpTitle = document.createElement('span');
     hpTitle.className = 'fcs-bar-title';
-    hpTitle.textContent = 'Hull';
+    hpTitle.textContent = 'Parts';
     const hpReadout = document.createElement('span');
     hpReadout.className = 'fcs-bar-readout';
     hpReadout.textContent = '0 / 0';
     hpHeader.append(hpTitle, hpReadout);
 
-    const hpSegments = document.createElement('div');
-    hpSegments.className = 'fcs-hp-segments';
-    for (let i = 0; i < HP_SEGMENT_COUNT; i++) {
-      const seg = document.createElement('div');
-      seg.className = 'fcs-hp-seg';
-      this.hpSegEls.push(seg);
-      hpSegments.appendChild(seg);
-    }
-    hpBlock.append(hpHeader, hpSegments);
+    const fireStrip = document.createElement('div');
+    fireStrip.className = 'fcs-fire-strip';
+    fireStrip.style.display = 'none';
+    const partsRows = document.createElement('div');
+    partsRows.className = 'fcs-parts-rows';
+    hpBlock.append(hpHeader, fireStrip, partsRows);
+    this.partsRowsEl = partsRows;
+    this.fireStripEl = fireStrip;
 
     // 2. Speedometer Row
     const driveRow = document.createElement('div');
@@ -1804,6 +1962,7 @@ export class HUD {
     banner: HTMLDivElement;
     sec: HTMLSpanElement;
     barFill: HTMLDivElement;
+    reason: HTMLSpanElement;
   } {
     const banner = document.createElement('div');
     banner.className = 'hud-plate fcs-respawn-banner';
@@ -1816,14 +1975,18 @@ export class HUD {
     sec.className = 'fcs-respawn-sec';
     sec.textContent = 'Back in 3.0 s';
 
+    const reason = document.createElement('span');
+    reason.className = 'fcs-respawn-reason';
+    reason.textContent = '';
+
     const bar = document.createElement('div');
     bar.className = 'fcs-respawn-bar';
     const barFill = document.createElement('div');
     barFill.className = 'fcs-respawn-bar-fill';
     bar.appendChild(barFill);
 
-    banner.append(title, sec, bar);
-    return { banner, sec, barFill };
+    banner.append(title, reason, sec, bar);
+    return { banner, sec, barFill, reason };
   }
 
   private buildBriefingOverlay(): {

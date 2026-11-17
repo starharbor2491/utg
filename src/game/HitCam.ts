@@ -1,101 +1,13 @@
 import type { ModuleHealthState, ModuleId, ShellHitXRayReport } from './types';
 
-interface ModuleBoxVis {
-  id: ModuleId;
-  shortName: string;
-  space: 'hull' | 'turret';
-  isCrew: boolean;
-  min: [number, number, number];
-  max: [number, number, number];
-}
-
-/**
- * Exact 3D internal module & crew layout matching Tank.ts hitboxes:
- * - Hull space: +Z forward, +Y up (0 = track bottom), +X vehicle left.
- * - Turret space: relative to turret pivot [0, 1.62, -0.50].
- */
-export const MBT_INTERNAL_MODULES: readonly ModuleBoxVis[] = [
-  {
-    id: 'track_left',
-    shortName: 'L-TRACK',
-    space: 'hull',
-    isCrew: false,
-    min: [1.22, 0.05, -3.55],
-    max: [1.86, 0.92, 3.45],
-  },
-  {
-    id: 'track_right',
-    shortName: 'R-TRACK',
-    space: 'hull',
-    isCrew: false,
-    min: [-1.86, 0.05, -3.55],
-    max: [-1.22, 0.92, 3.45],
-  },
-  {
-    id: 'engine',
-    shortName: 'ENGINE',
-    space: 'hull',
-    isCrew: false,
-    min: [-1.05, 0.35, -3.75],
-    max: [1.05, 1.42, -1.55],
-  },
-  {
-    id: 'ammo_hull',
-    shortName: 'HULL AMMO',
-    space: 'hull',
-    isCrew: false,
-    min: [-0.46, 0.26, -0.85],
-    max: [0.46, 0.62, 0.12],
-  },
-  {
-    id: 'driver',
-    shortName: 'DRIVER',
-    space: 'hull',
-    isCrew: true,
-    min: [-0.62, 0.45, 1.35],
-    max: [0.18, 1.42, 2.75],
-  },
-  {
-    id: 'turret_ring',
-    shortName: 'TURRET RING',
-    space: 'hull',
-    isCrew: false,
-    min: [-1.08, 1.38, -1.55],
-    max: [1.08, 1.66, 0.55],
-  },
-  {
-    id: 'cannon_breech',
-    shortName: 'BREECH / GUN',
-    space: 'turret',
-    isCrew: false,
-    min: [-0.34, 0.12, -0.45],
-    max: [0.34, 0.66, 4.95],
-  },
-  {
-    id: 'gunner',
-    shortName: 'GUNNER',
-    space: 'turret',
-    isCrew: true,
-    min: [-0.98, 0.05, -0.65],
-    max: [-0.36, 0.88, 0.48],
-  },
-  {
-    id: 'loader',
-    shortName: 'LOADER',
-    space: 'turret',
-    isCrew: true,
-    min: [0.36, 0.05, -0.82],
-    max: [0.98, 0.88, 0.35],
-  },
-  {
-    id: 'ammo_bustle',
-    shortName: 'AMMO RACK',
-    space: 'turret',
-    isCrew: false,
-    min: [-0.84, 0.24, -2.68],
-    max: [0.84, 0.72, -1.55],
-  },
-];
+const MODULE_SHORT: Partial<Record<ModuleId, string>> = {
+  engine: 'ENGINE', fuel: 'FUEL', ammo: 'AMMO',
+  track_left: 'L-TRACK', track_right: 'R-TRACK',
+  wheels_left: 'L-WHEELS', wheels_right: 'R-WHEELS',
+  turret_ring: 'TURRET', gun: 'GUN', launcher: 'LAUNCHER',
+  driver: 'DRIVER', gunner: 'GUNNER', commander: 'CMDR', loader: 'LOADER',
+};
+const CREW_MODULE_IDS = new Set<ModuleId>(['driver', 'gunner', 'commander', 'loader']);
 
 const BOX_EDGES: readonly [number, number][] = [
   [0, 1], [1, 2], [2, 3], [3, 0],
@@ -190,8 +102,8 @@ export class HitCam {
       this.displayTimer > 1.2 &&
       this.activeReport?.weapon === 'cannon'
     ) {
-      this.activeReport.hpRemaining = report.hpRemaining;
-      const pct = Math.max(0, Math.min(100, (report.hpRemaining / report.maxHp) * 100));
+      this.activeReport.crewAlive = report.crewAlive;
+      const pct = Math.max(0, Math.min(100, (report.crewAlive / Math.max(1, report.crewTotal)) * 100));
       this.hpFillEl.style.width = `${pct.toFixed(0)}%`;
       return;
     }
@@ -207,6 +119,10 @@ export class HitCam {
       this.headerStatusEl.textContent = report.killReason ?? 'TARGET DESTROYED';
       this.headerStatusEl.style.color = '#ff4b3a';
       this.rootEl.style.borderColor = 'rgba(217,70,54,0.75)';
+    } else if (report.ricochet || !report.penetrated) {
+      this.headerStatusEl.textContent = report.ricochet ? 'RICOCHET' : 'NO PENETRATION';
+      this.headerStatusEl.style.color = '#eae6dc';
+      this.rootEl.style.borderColor = 'rgba(232,169,56,0.34)';
     } else if (report.hitModules.length > 0) {
       this.headerStatusEl.textContent = 'CRITICAL DAMAGE';
       this.headerStatusEl.style.color = '#e8a938';
@@ -217,7 +133,7 @@ export class HitCam {
       this.rootEl.style.borderColor = 'rgba(232,169,56,0.34)';
     }
 
-    const pct = Math.max(0, Math.min(100, (report.hpRemaining / report.maxHp) * 100));
+    const pct = Math.max(0, Math.min(100, (report.crewAlive / Math.max(1, report.crewTotal)) * 100));
     this.hpFillEl.style.width = `${pct.toFixed(0)}%`;
 
     this.injuryListEl.innerHTML = '';
@@ -460,10 +376,12 @@ export class HitCam {
 
     const placedLabels: [number, number][] = [];
 
-    // 3. Draw all 10 internal modules & crew (lit up as the shell/spall wave reaches them!)
-    for (const mod of MBT_INTERNAL_MODULES) {
+    // 3. Draw this class's internal modules & crew (lit up as the shell/spall wave reaches them!)
+    for (const mod of rep.moduleBoxes ?? []) {
       const hitInfo = hitTimingMap.get(mod.id);
-      const postState = rep.allModuleStates[mod.id];
+      const postState = mod.state;
+      const isCrew = CREW_MODULE_IDS.has(mod.id);
+      const shortName = MODULE_SHORT[mod.id] ?? mod.id.toUpperCase();
 
       let stateToRender: ModuleHealthState = 'ok';
       let justStruckFlash = 0;
@@ -478,7 +396,7 @@ export class HitCam {
         stateToRender = postState;
       }
 
-      let stroke = mod.isCrew ? 'rgba(130, 195, 215, 0.26)' : 'rgba(143, 168, 118, 0.24)';
+      let stroke = isCrew ? 'rgba(130, 195, 215, 0.26)' : 'rgba(143, 168, 118, 0.24)';
       let fill: string | null = null;
       let lw = 0.9;
 
@@ -502,7 +420,7 @@ export class HitCam {
       );
 
       // Draw crew head sphere on top of crew torso box
-      if (mod.isCrew) {
+      if (isCrew) {
         const cxLocal = (mod.min[0] + mod.max[0]) * 0.5;
         const czLocal = (mod.min[2] + mod.max[2]) * 0.5;
         const hyLocal = mod.max[1] + 0.14;
@@ -532,7 +450,7 @@ export class HitCam {
           ctx.font = 'bold 8.5px ui-monospace, SFMono-Regular, Menlo, monospace';
           ctx.textAlign = 'center';
           ctx.fillStyle = stateToRender === 'destroyed' ? '#ffd0ca' : '#ffe6ad';
-          ctx.fillText(mod.shortName, labelX, labelY - 3);
+          ctx.fillText(shortName, labelX, labelY - 3);
         }
       }
     }

@@ -632,7 +632,7 @@ export class BallisticsManager {
       const scatterAng = Math.random() * Math.PI * 2;
       // Rockets use their own tight dispersion; guns keep the bot scatter
       const scatterMag = spec.rocket
-        ? spec.dispersionRad * (0.6 + Math.random() * 0.8)
+        ? spec.dispersionRad * shooter.dispersionMult * (0.6 + Math.random() * 0.8)
         : (0.045 + Math.random() * 0.055) * (Math.random() < 0.82 ? 1.0 : 0.35);
       this._segDir
         .addScaledVector(this._tangentA, Math.cos(scatterAng) * scatterMag)
@@ -729,7 +729,7 @@ export class BallisticsManager {
     const baseDisp = !shooter.isHuman
       ? 0.075
       : beltSpec
-        ? beltSpec.dispersionRad
+        ? beltSpec.dispersionRad * shooter.dispersionMult
         : MG_DISPERSION_RAD;
     const spread = Math.sqrt(Math.random()) * baseDisp;
     this._coaxSpreadDir
@@ -1062,7 +1062,8 @@ export class BallisticsManager {
             this._attackerPos,
             this._segDir,
             'cannon',
-            s.shellSpec ?? undefined
+            s.shellSpec ?? undefined,
+            { attacker: s.shooter }
           );
           onDamage({
             victim: directVictim,
@@ -1137,7 +1138,7 @@ export class BallisticsManager {
               const falloff = 1 - effDist / R;
               const splashDmg = s.splashDamage * falloff;
               if (splashDmg >= 0.5) {
-                const killed = tank.takeDamage(splashDmg, this._hitPoint.clone(), this._attackerPos);
+                const killed = tank.takeDamage(splashDmg, this._hitPoint.clone(), this._attackerPos, undefined, 'cannon', s.shellSpec ?? undefined, { attacker: s.shooter, blastCenter: this._hitPoint, blastRadius: R });
                 onDamage({
                   victim: tank,
                   attacker: s.shooter,
@@ -1286,7 +1287,8 @@ export class BallisticsManager {
             this._attackerPos,
             this._segDir,
             'mg',
-            m.beltSpec ?? undefined
+            m.beltSpec ?? undefined,
+            { attacker: m.shooter }
           );
           onDamage({
             victim: hitTank,
@@ -1322,7 +1324,7 @@ export class BallisticsManager {
               if (d < m.splashRadius * 0.5) {
                 const sDmg = m.splashDamage * (1 - d / (m.splashRadius * 0.5));
                 if (sDmg >= 0.2) {
-                  const sKilled = tank.takeDamage(sDmg, this._hitPoint.clone(), this._attackerPos, this._segDir, 'mg', m.beltSpec ?? undefined);
+                  const sKilled = tank.takeDamage(sDmg, this._hitPoint.clone(), this._attackerPos, this._segDir, 'mg', m.beltSpec ?? undefined, { attacker: m.shooter, blastCenter: this._hitPoint, blastRadius: m.splashRadius * 0.5 });
                   onDamage({
                     victim: tank,
                     attacker: m.shooter,
@@ -1360,7 +1362,7 @@ export class BallisticsManager {
               if (d < m.splashRadius) {
                 const sDmg = m.splashDamage * (1 - d / m.splashRadius);
                 if (sDmg >= 0.2) {
-                  const sKilled = tank.takeDamage(sDmg, worldHit.point.clone(), this._attackerPos, this._segDir, 'mg', m.beltSpec ?? undefined);
+                  const sKilled = tank.takeDamage(sDmg, worldHit.point.clone(), this._attackerPos, this._segDir, 'mg', m.beltSpec ?? undefined, { attacker: m.shooter, blastCenter: worldHit.point, blastRadius: m.splashRadius });
                   onDamage({
                     victim: tank,
                     attacker: m.shooter,

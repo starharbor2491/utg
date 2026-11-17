@@ -1,6 +1,26 @@
 import * as THREE from 'three';
 import { instantiateTankRig, type InstantiatedTankRig, type LoadedGameAssets } from './AssetLoader';
-import { MBT_INTERNAL_MODULES } from './HitCam';
+import {
+  DAMAGE_LAYOUTS,
+  FIRE_COOKOFF_PER_S,
+  FIRE_COOKOFF_PROPELLANT_PER_S,
+  FIRE_DURATION_S,
+  FIRE_DPS_HULL,
+  FIRE_EXTINGUISH_AT_S,
+  FIRE_EXTINGUISH_CHANCE,
+  KILL_CREDIT_WINDOW_S,
+  MIN_CREW_ALIVE,
+  REPAIR_TIME_S,
+  CREW_RECOVER_S,
+  effectiveArmorMm,
+  integrityState,
+  isRicochet,
+  moduleMaxIntegrity,
+  postPenPathMm,
+  rayBox,
+  type CrewRole,
+  type ModuleRuntime,
+} from './DamageModel';
 import type {
   ModuleHealthState,
   ModuleId,
@@ -27,6 +47,8 @@ const NORMAL_SHELLS: readonly [ShellSpec, ShellSpec] = [
     splashDamage: 0,
     splashRadius: 0,
     penetrationDepth: 4.5,
+    penMm: 600,
+    moduleDamage: { slug: 1.2, spall: 0.35, spallCount: 14 },
     spallCount: 12,
     spallWeight: 0.52,
     explosionScale: 0.65,
@@ -42,6 +64,8 @@ const NORMAL_SHELLS: readonly [ShellSpec, ShellSpec] = [
     splashDamage: 175,
     splashRadius: 10.5,
     penetrationDepth: 1.75,
+    penMm: 60,
+    moduleDamage: { slug: 0.8, spall: 0.3, spallCount: 10 },
     spallCount: 16,
     spallWeight: 0.34,
     explosionScale: 1.18,
@@ -60,6 +84,8 @@ const HEAVY_SHELLS: readonly [ShellSpec, ShellSpec] = [
     splashDamage: 70,
     splashRadius: 3.5,
     penetrationDepth: 4.35,
+    penMm: 420,
+    moduleDamage: { slug: 1.4, spall: 0.4, spallCount: 16 },
     spallCount: 20,
     spallWeight: 0.58,
     explosionScale: 1.15,
@@ -75,6 +101,8 @@ const HEAVY_SHELLS: readonly [ShellSpec, ShellSpec] = [
     splashDamage: 260,
     splashRadius: 14.5,
     penetrationDepth: 2.0,
+    penMm: 90,
+    moduleDamage: { slug: 1.0, spall: 0.35, spallCount: 12 },
     spallCount: 18,
     spallWeight: 0.44,
     explosionScale: 1.58,
@@ -93,6 +121,8 @@ const IFV_BELTS: readonly [ShellSpec, ShellSpec] = [
     splashDamage: 0,
     splashRadius: 0,
     penetrationDepth: 2.35,
+    penMm: 90,
+    moduleDamage: { slug: 0.55, spall: 0.15, spallCount: 5 },
     spallCount: 5,
     spallWeight: 0.34,
     explosionScale: 0.25,
@@ -108,6 +138,8 @@ const IFV_BELTS: readonly [ShellSpec, ShellSpec] = [
     splashDamage: 16,
     splashRadius: 3.2,
     penetrationDepth: 0.95,
+    penMm: 15,
+    moduleDamage: { slug: 0.3, spall: 0.1, spallCount: 2 },
     spallCount: 6,
     spallWeight: 0.25,
     explosionScale: 0.36,
@@ -126,6 +158,8 @@ const HUMVEE_50CAL: readonly [ShellSpec, ShellSpec] = [
     splashDamage: 0,
     splashRadius: 0,
     penetrationDepth: 1.2,
+    penMm: 22,
+    moduleDamage: { slug: 0.24, spall: 0.08, spallCount: 2 },
     spallCount: 3,
     spallWeight: 0.3,
     explosionScale: 0.18,
@@ -141,6 +175,8 @@ const HUMVEE_50CAL: readonly [ShellSpec, ShellSpec] = [
     splashDamage: 6,
     splashRadius: 2.4,
     penetrationDepth: 0.9,
+    penMm: 8,
+    moduleDamage: { slug: 0.1, spall: 0, spallCount: 0 },
     spallCount: 4,
     spallWeight: 0.28,
     explosionScale: 0.3,
@@ -169,6 +205,8 @@ const ROCKET_SHELLS: readonly [ShellSpec, ShellSpec] = [
     splashDamage: 380,
     splashRadius: 13,
     penetrationDepth: 1.4,
+    penMm: 60,
+    moduleDamage: { slug: 0.9, spall: 0.3, spallCount: 12 },
     spallCount: 22,
     spallWeight: 0.5,
     explosionScale: 1.8,
@@ -186,6 +224,8 @@ const ROCKET_SHELLS: readonly [ShellSpec, ShellSpec] = [
     splashDamage: 120,
     splashRadius: 5,
     penetrationDepth: 3.2,
+    penMm: 700,
+    moduleDamage: { slug: 1.2, spall: 0.4, spallCount: 12 },
     spallCount: 14,
     spallWeight: 0.55,
     explosionScale: 1.2,
@@ -200,8 +240,6 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
   normal: {
     vehicleClass: 'normal',
     displayName: 'NORMAL MBT',
-    maxHp: 1000,
-    armorDamageMult: 1.0,
     maxForwardSpeed: 17.2, // ~62 km/h
     maxReverseSpeed: 9.2,
     forwardAccel: 10.8,
@@ -232,8 +270,6 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
   heavy: {
     vehicleClass: 'heavy',
     displayName: 'HEAVY TANK',
-    maxHp: 1650,
-    armorDamageMult: 0.62,
     maxForwardSpeed: 11.8, // ~42 km/h heavy juggernaut
     maxReverseSpeed: 5.8,
     forwardAccel: 6.8,
@@ -264,8 +300,6 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
   ifv: {
     vehicleClass: 'ifv',
     displayName: 'IFV (AUTO-MG)',
-    maxHp: 780,
-    armorDamageMult: 1.15,
     maxForwardSpeed: 20.5, // ~74 km/h rapid recon IFV
     maxReverseSpeed: 10.5,
     forwardAccel: 12.0,
@@ -296,8 +330,6 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
   humvee: {
     vehicleClass: 'humvee',
     displayName: 'HUMVEE (M2 .50CAL)',
-    maxHp: 420,
-    armorDamageMult: 1.5,
     maxForwardSpeed: 25, // ~90 km/h gun truck
     maxReverseSpeed: 8,
     forwardAccel: 8,
@@ -329,8 +361,6 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
   rocket: {
     vehicleClass: 'rocket',
     displayName: 'MLRS ROCKET ARTY',
-    maxHp: 520,
-    armorDamageMult: 1.35,
     maxForwardSpeed: 18.5, // ~67 km/h launcher truck
     maxReverseSpeed: 5.5,
     forwardAccel: 6.2,
@@ -409,71 +439,43 @@ function intersectRayAABB(
 }
 
 const MODULE_LABELS: Record<ModuleId, { label: string; damagedEffect: string; destroyedEffect: string }> = {
-  track_left: {
-    label: 'LEFT TRACK',
-    damagedEffect: 'TRACTION REDUCED',
-    destroyedEffect: 'SEVERED (IMMOBILIZED)',
-  },
-  track_right: {
-    label: 'RIGHT TRACK',
-    damagedEffect: 'TRACTION REDUCED',
-    destroyedEffect: 'SEVERED (IMMOBILIZED)',
-  },
-  engine: {
-    label: 'ENGINE PACK',
-    damagedEffect: 'POWER LOSS (-55%)',
-    destroyedEffect: 'DESTROYED (ENGINE FIRE)',
-  },
-  driver: {
-    label: 'DRIVER',
-    damagedEffect: 'DAZED (SLOW STEER)',
-    destroyedEffect: 'KNOCKED OUT (NO DRIVE)',
-  },
-  ammo_hull: {
-    label: 'HULL AMMO RACK',
-    damagedEffect: 'PROPELLANT DAMAGED',
-    destroyedEffect: 'DETONATED (INSTANT KILL)',
-  },
-  turret_ring: {
-    label: 'TURRET RING',
-    damagedEffect: 'TRAVERSE SLOWED',
-    destroyedEffect: 'JAMMED (TURRET LOCKED)',
-  },
-  cannon_breech: {
-    label: 'CANNON BREECH',
-    damagedEffect: 'DISPERSION INCREASED',
-    destroyedEffect: 'DESTROYED (GUN DISABLED)',
-  },
-  gunner: {
-    label: 'GUNNER',
-    damagedEffect: 'CONCUSSED',
-    destroyedEffect: 'KNOCKED OUT (NO AIM)',
-  },
-  loader: {
-    label: 'LOADER',
-    damagedEffect: 'WOUNDED (+50% RELOAD)',
-    destroyedEffect: 'KNOCKED OUT (2X RELOAD)',
-  },
-  ammo_bustle: {
-    label: 'TURRET AMMO RACK',
-    damagedEffect: 'BLOWOUT PANEL VENTING',
-    destroyedEffect: 'DETONATED (INSTANT KILL)',
-  },
+  engine: { label: 'ENGINE', damagedEffect: 'POWER LOSS (-40%)', destroyedEffect: 'DESTROYED (IMMOBILE)' },
+  fuel: { label: 'FUEL', damagedEffect: 'FUEL LEAK', destroyedEffect: 'FIRE / EXPLOSION' },
+  ammo: { label: 'AMMO', damagedEffect: 'PROPELLANT DAMAGED', destroyedEffect: 'DETONATION / COOK-OFF' },
+  track_left: { label: 'LEFT TRACK', damagedEffect: 'TRACTION REDUCED', destroyedEffect: 'SEVERED (IMMOBILIZED)' },
+  track_right: { label: 'RIGHT TRACK', damagedEffect: 'TRACTION REDUCED', destroyedEffect: 'SEVERED (IMMOBILIZED)' },
+  wheels_left: { label: 'LEFT WHEELS', damagedEffect: 'TYRE DAMAGE', destroyedEffect: 'WHEELS DESTROYED' },
+  wheels_right: { label: 'RIGHT WHEELS', damagedEffect: 'TYRE DAMAGE', destroyedEffect: 'WHEELS DESTROYED' },
+  turret_ring: { label: 'TURRET RING', damagedEffect: 'TRAVERSE SLOWED', destroyedEffect: 'JAMMED (TURRET LOCKED)' },
+  gun: { label: 'GUN', damagedEffect: 'DISPERSION INCREASED', destroyedEffect: 'GUN DISABLED' },
+  launcher: { label: 'LAUNCHER', damagedEffect: 'RELOAD SLOWED', destroyedEffect: 'LAUNCHER DESTROYED' },
+  driver: { label: 'DRIVER', damagedEffect: 'WOUNDED (SLOW)', destroyedEffect: 'KNOCKED OUT' },
+  gunner: { label: 'GUNNER', damagedEffect: 'CONCUSSED', destroyedEffect: 'KNOCKED OUT' },
+  commander: { label: 'COMMANDER', damagedEffect: 'WOUNDED', destroyedEffect: 'KNOCKED OUT' },
+  loader: { label: 'LOADER', damagedEffect: 'WOUNDED', destroyedEffect: 'KNOCKED OUT' },
 };
 
-function createFreshModuleStates(): Record<ModuleId, ModuleHealthState> {
-  return {
-    track_left: 'ok',
-    track_right: 'ok',
-    engine: 'ok',
-    driver: 'ok',
-    ammo_hull: 'ok',
-    turret_ring: 'ok',
-    cannon_breech: 'ok',
-    gunner: 'ok',
-    loader: 'ok',
-    ammo_bustle: 'ok',
-  };
+const ALL_MODULE_IDS: readonly ModuleId[] = [
+  'engine', 'fuel', 'ammo', 'track_left', 'track_right', 'wheels_left', 'wheels_right',
+  'turret_ring', 'gun', 'launcher', 'driver', 'gunner', 'commander', 'loader',
+];
+
+function createModuleStates(cls: VehicleClass): Map<ModuleId, import('./DamageModel').ModuleRuntime> {
+  const layout = DAMAGE_LAYOUTS[cls];
+  const map = new Map<ModuleId, import('./DamageModel').ModuleRuntime>();
+  for (const def of layout.modules) {
+    const maxI = moduleMaxIntegrity(def.id);
+    map.set(def.id, {
+      id: def.id,
+      integrity: maxI,
+      maxIntegrity: maxI,
+      part: 'hull',
+      external: false,
+      crew: def.crew ?? null,
+      boxes: [],
+    });
+  }
+  return map;
 }
 
 const _tmpVecA = new THREE.Vector3();
@@ -484,6 +486,28 @@ const _seekOrigin = new THREE.Vector3();
 const _seekDir = new THREE.Vector3();
 const _seekTo = new THREE.Vector3();
 const _seekLos = new THREE.Vector3();
+
+// Damage-model scratch (never stored)
+const _partInvM4 = new THREE.Matrix4();
+const _hO = new THREE.Vector3();
+const _hD = new THREE.Vector3();
+const _tO = new THREE.Vector3();
+const _tD = new THREE.Vector3();
+const _rayOrigin = new THREE.Vector3();
+const _entryW = new THREE.Vector3();
+const _v3b = new THREE.Vector3();
+const _slugO = new THREE.Vector3();
+const _spallOrg = new THREE.Vector3();
+const _spallDir = new THREE.Vector3();
+const _upRef = new THREE.Vector3();
+const _basisA = new THREE.Vector3();
+const _basisB = new THREE.Vector3();
+const _sO = new THREE.Vector3();
+const _sD = new THREE.Vector3();
+const _sO2 = new THREE.Vector3();
+const _sD2 = new THREE.Vector3();
+const _blastO = new THREE.Vector3();
+const _blastD = new THREE.Vector3();
 
 export class Tank implements TankEntity {
   public readonly id: string;
@@ -500,26 +524,45 @@ export class Tank implements TankEntity {
   public gunPitch = 0;
   public speed = 0;
 
-  public hp: number;
-  public readonly maxHp: number;
+  public hitCounter = 0;
+  public crewAlive = 0;
+  public crewTotal = 0;
   public alive = true;
   public respawnTimer = 0;
   private spawnProtect = 0;
 
   public cannonCooldown = 0;
   public mgCooldown = 0;
+  public dispersionMult = 1;
   public mgHeat = 0;
   public mgOverheated = false;
   public selectedShellIndex: 0 | 1 = 0;
   public lastXRayReport: ShellHitXRayReport | null = null;
 
-  public modules: Record<ModuleId, ModuleHealthState> = createFreshModuleStates();
-  private trackRepairTimer = 0;
-  private driverRecoverTimer = 0;
-  private gunnerRecoverTimer = 0;
-  private breechRepairTimer = 0;
-  private engineFireTimer = 0;
+  // ---- Damage model state ----
+  /** Per-class module integrity map (only modules in the class layout exist). */
+  public readonly modules: Map<ModuleId, ModuleRuntime> = new Map();
+  /** Part bounding boxes in part-local metres, measured at rig build. */
+  private hullBoundsMin = new THREE.Vector3();
+  private hullBoundsSize = new THREE.Vector3();
+  private turretBoundsMin = new THREE.Vector3();
+  private turretBoundsSize = new THREE.Vector3();
+  private layout = DAMAGE_LAYOUTS.normal;
+  /** Module repair countdowns (destroyed -> damaged). */
+  private repairTimers = new Map<ModuleId, number>();
+  /** Crew seat recovery countdowns (destroyed -> wounded refill). */
+  private crewOutTimers = new Map<CrewRole, number>();
+  /** Internal fire state. */
+  private fireT = 0;
+  private fireElapsed = 0;
+  private firePropellant = false;
+  private extinguisherDone = false;
   private fireSmokeAccum = 0;
+  private cookOffAccum = 0;
+  /** Kill credit: last enemy to damage this tank. */
+  private lastAttacker: TankEntity | null = null;
+  private lastDamageAt = -999;
+  private _clock = 0;
 
   public readonly rig: InstantiatedTankRig;
 
@@ -540,6 +583,17 @@ export class Tank implements TankEntity {
   private _dkWeapon: 'cannon' | 'mg' = 'cannon';
   private _dkDamage = 0;
   private _dkShellSpec: ShellSpec | null = null;
+  private _dkKillReason: string | null = null;
+  /** True while inside takeDamage — kills there are reported by the caller via the return value. */
+  private _inTakeDamage = false;
+  /** Kill reason of the most recent death (until respawn). */
+  public get lastKillReason(): string | null {
+    return this._dkKillReason;
+  }
+  /** Per-class module boxes (part-local metres) for the X-Ray hit cam. */
+  private _xrayBoxes: NonNullable<ShellHitXRayReport['moduleBoxes']> = [];
+  /** Wired by main.ts — internal kills (fire cook-off, ammo/fuel detonation) report here for scoring/feed. */
+  public onKillEvent: ((ev: { victim: TankEntity; attacker: TankEntity | null; killed: boolean; hitPoint: THREE.Vector3; weapon: 'cannon' | 'mg'; amount: number; killReason: string | null }) => void) | null = null;
   /** Wired by main.ts — spawns the persistent physical wreck on kill */
   public onDestroyed: ((info: WreckKillInfo) => void) | null = null;
 
@@ -584,11 +638,10 @@ export class Tank implements TankEntity {
     this.isHuman = isHuman;
     this.callsign = callsign;
     this.stats = TANK_STATS[vehicleClass];
-    this.maxHp = this.stats.maxHp;
-    this.hp = this.maxHp;
 
     this.rig = instantiateTankRig(assets, vehicleClass, team);
     this.root = this.rig.root;
+    this._initDamageModel(vehicleClass);
 
     this.respawnAt(spawnPos, spawnYaw);
   }
@@ -695,80 +748,140 @@ export class Tank implements TankEntity {
     this.mgCooldown = Math.max(0, this.mgCooldown - safeDt);
     this.spawnProtect = Math.max(0, this.spawnProtect - safeDt);
 
-    if (this.trackRepairTimer > 0) {
-      this.trackRepairTimer = Math.max(0, this.trackRepairTimer - safeDt);
-      if (this.trackRepairTimer === 0) {
-        if (this.modules.track_left === 'destroyed') this.modules.track_left = 'damaged';
-        if (this.modules.track_right === 'destroyed') this.modules.track_right = 'damaged';
+    this._clock += safeDt;
+
+    // ---- module repairs & crew seat recovery (need >=2 crew, only while not on fire) ----
+    const canRecover = this.alive && this.fireT <= 0 && this.crewAlive >= MIN_CREW_ALIVE;
+    if (canRecover) {
+      for (const [id, t] of this.repairTimers) {
+        const nt = t - safeDt;
+        if (nt <= 0) {
+          const rt = this.modules.get(id);
+          if (rt && rt.integrity <= 0) rt.integrity = 0.6; // destroyed -> damaged
+          this.repairTimers.delete(id);
+        } else {
+          this.repairTimers.set(id, nt);
+        }
+      }
+      for (const [role, t] of this.crewOutTimers) {
+        const nt = t - safeDt;
+        if (nt <= 0) {
+          this.crewOutTimers.delete(role);
+          const rt = this.modules.get(role as ModuleId);
+          if (rt && rt.integrity <= 0) {
+            let otherAlive = false;
+            for (const c of this.modules.values()) {
+              if (c.crew && c.id !== role && c.integrity > 0) {
+                otherAlive = true;
+                break;
+              }
+            }
+            if (otherAlive) {
+              rt.integrity = 0.5; // seat refilled by another crewman (wounded)
+              this._recountCrew();
+            }
+          }
+        } else {
+          this.crewOutTimers.set(role, nt);
+        }
       }
     }
-    if (this.driverRecoverTimer > 0) {
-      this.driverRecoverTimer = Math.max(0, this.driverRecoverTimer - safeDt);
-    }
-    if (this.gunnerRecoverTimer > 0) {
-      this.gunnerRecoverTimer = Math.max(0, this.gunnerRecoverTimer - safeDt);
-    }
-    if (this.breechRepairTimer > 0) {
-      this.breechRepairTimer = Math.max(0, this.breechRepairTimer - safeDt);
-      if (this.breechRepairTimer === 0 && this.modules.cannon_breech === 'destroyed') {
-        this.modules.cannon_breech = 'damaged';
-      }
-    }
-    if (this.engineFireTimer > 0 && this.alive) {
-      this.engineFireTimer = Math.max(0, this.engineFireTimer - safeDt);
+
+    // ---- internal fire: burns hull crew + engine, cooks off ammo ----
+    if (this.fireT > 0 && this.alive) {
+      this.fireT = Math.max(0, this.fireT - safeDt);
+      this.fireElapsed += safeDt;
       this.fireSmokeAccum += safeDt;
       if (this.fireSmokeAccum >= 0.14) {
         this.fireSmokeAccum = 0;
-        const sinE = Math.sin(this.hullYaw);
-        const cosE = Math.cos(this.hullYaw);
-        _tmpVecA.set(
-          this.position.x - sinE * 2.5,
-          this.position.y + 1.55,
-          this.position.z - cosE * 2.5
-        );
-        callbacks?.onWreckSmoke?.(_tmpVecA);
+        callbacks?.onWreckSmoke?.(this._fireAnchorPos(_tmpVecA));
       }
-      this.hp = Math.max(1, this.hp - 24 * safeDt);
+      if (!this.extinguisherDone && this.fireElapsed >= FIRE_EXTINGUISH_AT_S) {
+        this.extinguisherDone = true;
+        if (Math.random() < FIRE_EXTINGUISH_CHANCE) this.fireT = 0;
+      }
+      for (const rt of this.modules.values()) {
+        if (rt.integrity <= 0) continue;
+        const isHullCrew = rt.crew !== null && rt.boxes[0]?.part === 'hull';
+        if (rt.id === 'engine' || isHullCrew) {
+          this._damageModule(rt.id, FIRE_DPS_HULL * safeDt);
+        }
+      }
+      this.cookOffAccum += safeDt * (this.firePropellant ? FIRE_COOKOFF_PROPELLANT_PER_S : FIRE_COOKOFF_PER_S);
+      if (this.cookOffAccum >= 1 && this.alive) {
+        this.cookOffAccum -= 1;
+        const ammo = this.modules.get('ammo');
+        if (ammo && ammo.integrity > 0) {
+          ammo.integrity = 0;
+          this._recountCrew();
+          this.killTank(true, 'COOK-OFF');
+        }
+      }
+    } else {
+      this.fireSmokeAccum = 0;
     }
 
-    const tracksSevered =
-      this.modules.track_left === 'destroyed' || this.modules.track_right === 'destroyed';
-    const tracksDamaged =
-      this.modules.track_left === 'damaged' || this.modules.track_right === 'damaged';
-    const driverOut = this.driverRecoverTimer > 0;
+    // ---- derived module effects ----
+    const mst = (id: ModuleId): ModuleHealthState => {
+      const rt = this.modules.get(id);
+      return rt ? integrityState(rt.integrity) : 'ok';
+    };
+    const tracksSevered = mst('track_left') === 'destroyed' || mst('track_right') === 'destroyed';
+    const driverOut = mst('driver') === 'destroyed';
+    const gunnerOut = mst('gunner') === 'destroyed';
 
     let mobilityMult = 1.0;
     let turnMult = 1.0;
-    if (tracksSevered) {
-      mobilityMult = 0.0;
-      turnMult = 0.15;
-    } else if (driverOut) {
-      mobilityMult = 0.0;
-      turnMult = 0.0;
+    let wheelPull = 0;
+    if (tracksSevered || driverOut || mst('engine') === 'destroyed') {
+      mobilityMult = 0;
+      turnMult = tracksSevered ? 0.15 : 0;
     } else {
-      if (tracksDamaged) {
-        mobilityMult *= 0.65;
+      if (mst('track_left') === 'damaged') mobilityMult *= 0.75;
+      if (mst('track_right') === 'damaged') mobilityMult *= 0.75;
+      if (mst('engine') === 'damaged') mobilityMult *= 0.6;
+      if (mst('driver') === 'damaged') {
+        mobilityMult *= 0.7;
         turnMult *= 0.7;
       }
-      if (this.modules.engine === 'destroyed') {
-        mobilityMult *= 0.14;
-        turnMult *= 0.35;
-      } else if (this.modules.engine === 'damaged') {
-        mobilityMult *= 0.48;
-      }
-      if (this.modules.driver === 'damaged') {
-        turnMult *= 0.65;
+      if (this.stats.drive === 'wheeled') {
+        const wl = mst('wheels_left');
+        const wr = mst('wheels_right');
+        if (wl === 'destroyed' || wr === 'destroyed') {
+          mobilityMult *= 0.35;
+          if (wl === 'destroyed') wheelPull += 0.5;
+          if (wr === 'destroyed') wheelPull -= 0.5;
+        } else {
+          if (wl === 'damaged') mobilityMult *= 0.8;
+          if (wr === 'damaged') mobilityMult *= 0.8;
+        }
       }
     }
 
-    const gunnerDisabled = this.gunnerRecoverTimer > 0;
+    const gunSt = mst('gun');
+    const launcherSt = mst('launcher');
+    const primarySt = mst(this.stats.salvoSize ? 'launcher' : 'gun');
+    const primaryOut = primarySt === 'destroyed';
+    const gunnerDisabled = gunnerOut;
     const isIFV = !this.stats.hasMainCannon;
     // On IFV ("only machine gun, infinite ammo"), both LMB (fireCannon) and Space (fireMG) fire the 30mm autocannon/MG!
     const rawMGTrigger = isIFV ? Boolean(intent?.fireCannon || intent?.fireMG) : Boolean(intent?.fireMG);
-    const gunBarrelBroken = isIFV && this.modules.cannon_breech === 'destroyed';
+    // Classes without a separate main cannon lose their only weapon when 'gun' dies;
+    // MBTs/heavy keep the coax MG when the main gun is knocked out.
+    const mgWeaponOut = !this.stats.hasMainCannon && gunSt === 'destroyed';
     const wantsMG = Boolean(
-      rawMGTrigger && this.stats.hasCoaxMG && !this.mgOverheated && !gunnerDisabled && !gunBarrelBroken
+      rawMGTrigger && this.stats.hasCoaxMG && !this.mgOverheated && !gunnerDisabled && !mgWeaponOut
     );
+    this.dispersionMult = gunSt === 'damaged' ? 2.5 : 1.0;
+    const loaderSt = mst('loader');
+    const reloadMult =
+      (launcherSt === 'damaged' ? 2 : 1) *
+      (loaderSt === 'destroyed' ? 1.6 : loaderSt === 'damaged' ? 1.43 : 1);
+    const ringSt = mst('turret_ring');
+    const turretTraverseMult =
+      (ringSt === 'destroyed' ? 0 : ringSt === 'damaged' ? 0.5 : 1) * (mst('gunner') === 'damaged' ? 0.7 : 1);
+    const canFirePrimary = !primaryOut && !gunnerOut;
+    void primarySt;
 
     if (this.stats.infiniteMG) {
       this.mgHeat = 0;
@@ -796,7 +909,7 @@ export class Tank implements TankEntity {
     const rawThrottle = intent ? THREE.MathUtils.clamp(intent.throttle, -1, 1) : 0;
     const rawSteer = intent ? THREE.MathUtils.clamp(intent.steer, -1, 1) : 0;
     const throttle = rawThrottle * mobilityMult;
-    const steer = rawSteer * turnMult;
+    const steer = rawSteer * turnMult + wheelPull * Math.min(1, Math.abs(this.speed) / 4);
     const brake = Boolean(intent?.brake) || tracksSevered || driverOut;
 
     this.prevSpeed = this.speed;
@@ -951,8 +1064,7 @@ export class Tank implements TankEntity {
 
     // Fire main cannon (Normal MBT & Heavy Tank) or rocket pod salvo (MLRS)
     if (this.stats.hasMainCannon) {
-      const canFireCannon =
-        this.modules.cannon_breech !== 'destroyed' && this.gunnerRecoverTimer <= 0;
+      const canFireCannon = canFirePrimary;
 
       if (this.stats.salvoSize) {
         const salvoSize = this.stats.salvoSize;
@@ -987,13 +1099,7 @@ export class Tank implements TankEntity {
           this.salvoGuideTarget = this.seekerLocked ? this.seekerTarget : null;
         }
       } else if (intent?.fireCannon && this.cannonCooldown <= 0 && canFireCannon) {
-        const loaderPenalty =
-          this.modules.loader === 'destroyed'
-            ? 2.0
-            : this.modules.loader === 'damaged'
-              ? 1.5
-              : 1.0;
-        this.cannonCooldown = this.stats.cannonReloadTime * loaderPenalty;
+        this.cannonCooldown = this.stats.cannonReloadTime * reloadMult;
         this.getMuzzleWorld(_tmpVecA, _tmpVecB);
         callbacks?.onFireCannon?.(this, _tmpVecA, _tmpVecB, this.activeShell);
       }
@@ -1023,14 +1129,13 @@ export class Tank implements TankEntity {
   }
 
   private updateTurretAndGunAim(worldAimPoint: THREE.Vector3, dt: number): void {
-    if (this.gunnerRecoverTimer > 0) return;
+    const rtGunner = this.modules.get('gunner');
+    if (rtGunner && rtGunner.integrity <= 0) return; // gunner out: no aiming
 
+    const rtRing = this.modules.get('turret_ring');
     const ringFactor =
-      this.modules.turret_ring === 'destroyed'
-        ? 0.0
-        : this.modules.turret_ring === 'damaged'
-          ? 0.42
-          : 1.0;
+      (rtRing && rtRing.integrity <= 0 ? 0 : rtRing && rtRing.integrity <= 0.6 ? 0.5 : 1) *
+      (rtGunner && rtGunner.integrity > 0 && rtGunner.integrity <= 0.6 ? 0.7 : 1);
 
     // Ancestor-only matrix update (root -> hullTiltGroup: 2 matrices instead of 35!)
     this.rig.hullTiltGroup.updateWorldMatrix(true, false);
@@ -1382,389 +1487,699 @@ export class Tank implements TankEntity {
     this.suspRollVel -= relSin * this.stats.recoilImpulse * 5.0;
   }
 
+  // ===================== DAMAGE MODEL =====================
+
+  private _initDamageModel(cls: VehicleClass): void {
+    this.layout = DAMAGE_LAYOUTS[cls];
+    for (const [id, rt] of createModuleStates(cls)) this.modules.set(id, rt);
+    this.root.updateMatrixWorld(true);
+    this._measurePartBounds(this.rig.hullTiltGroup, this.rig.turretPivot as THREE.Object3D, this.hullBoundsMin, this.hullBoundsSize);
+    this._measurePartBounds(this.rig.turretPivot as THREE.Object3D, null, this.turretBoundsMin, this.turretBoundsSize);
+    if (this.turretBoundsSize.lengthSq() < 1e-4) {
+      this.turretBoundsMin.copy(this.hullBoundsMin);
+      this.turretBoundsSize.copy(this.hullBoundsSize);
+    }
+    // Build module runtimes with local-metre boxes + world anchors.
+    for (const def of this.layout.modules) {
+      const rt = this.modules.get(def.id);
+      if (!rt) continue;
+      for (const nb of def.boxes) {
+        const isHull = nb.part === 'hull';
+        const bMin2 = isHull ? this.hullBoundsMin : this.turretBoundsMin;
+        const bSize2 = isHull ? this.hullBoundsSize : this.turretBoundsSize;
+        rt.boxes.push({
+          part: nb.part,
+          external: nb.external,
+          min: [
+            bMin2.x + nb.min[0] * bSize2.x,
+            bMin2.y + nb.min[1] * bSize2.y,
+            bMin2.z + nb.min[2] * bSize2.z,
+          ],
+          max: [
+            bMin2.x + nb.max[0] * bSize2.x,
+            bMin2.y + nb.max[1] * bSize2.y,
+            bMin2.z + nb.max[2] * bSize2.z,
+          ],
+        });
+      }
+      rt.part = def.boxes[0].part;
+      rt.external = def.boxes.some((b) => b.external);
+      rt.crew = def.crew ?? null;
+    }
+    this._recountCrew();
+    this._buildXrayBoxes();
+  }
+
+  /** Union of mesh geometry bounds expressed in `space`'s local frame, skipping `skip` subtree. */
+  private _measurePartBounds(
+    space: THREE.Object3D,
+    skip: THREE.Object3D | null,
+    outMin: THREE.Vector3,
+    outSize: THREE.Vector3
+  ): void {
+    space.updateWorldMatrix(true, true);
+    const inv = new THREE.Matrix4().copy(space.matrixWorld).invert();
+    const box = new THREE.Box3();
+    box.makeEmpty();
+    const tmpM = new THREE.Matrix4();
+    const tmpV = new THREE.Vector3();
+    const cb = new THREE.Box3();
+    space.traverse((o) => {
+      if (skip) {
+        let p: THREE.Object3D | null = o;
+        let inside = false;
+        while (p) {
+          if (p === skip) { inside = true; break; }
+          p = p.parent;
+        }
+        if (inside) return;
+      }
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.geometry) return;
+      if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+      const gb = mesh.geometry.boundingBox;
+      if (!gb || gb.isEmpty()) return;
+      tmpM.multiplyMatrices(inv, mesh.matrixWorld);
+      cb.copy(gb).applyMatrix4(tmpM);
+      box.union(cb);
+      void tmpV;
+    });
+    if (box.isEmpty()) {
+      outMin.set(-2, 0, -3);
+      outSize.set(4, 2, 6);
+      return;
+    }
+    outMin.copy(box.min);
+    outSize.copy(box.max).sub(box.min);
+  }
+
+  private _rayToPartLocal(
+    part: THREE.Object3D,
+    o: THREE.Vector3,
+    d: THREE.Vector3,
+    outO: THREE.Vector3,
+    outD: THREE.Vector3
+  ): void {
+    part.updateWorldMatrix(true, false);
+    _partInvM4.copy(part.matrixWorld).invert();
+    outO.copy(o).applyMatrix4(_partInvM4);
+    outD.copy(d).transformDirection(_partInvM4);
+  }
+
+  /** Entry face of an AABB for a ray already in that box's local space. */
+  private _entryFace(
+    ox: number, oy: number, oz: number,
+    dx: number, dy: number, dz: number,
+    minx: number, miny: number, minz: number,
+    maxx: number, maxy: number, maxz: number
+  ): { face: 'front' | 'side' | 'rear' | 'top' | 'bottom'; cos: number } {
+    // largest entry t wins the slab -> that axis is the entered face
+    let bestT = -Infinity;
+    let axis = 0;
+    const axes: [number, number, number, number, number][] = [
+      [ox, dx, minx, maxx, 0],
+      [oy, dy, miny, maxy, 1],
+      [oz, dz, minz, maxz, 2],
+    ];
+    for (const [o, d, mn, mx, ax] of axes) {
+      if (Math.abs(d) < 1e-9) continue;
+      const t1 = (mn - o) / d;
+      const t2 = (mx - o) / d;
+      const tEnter = Math.min(t1, t2);
+      if (tEnter > bestT) {
+        bestT = tEnter;
+        axis = ax;
+      }
+    }
+    if (axis === 0) return { face: 'side', cos: Math.abs(dx) };
+    if (axis === 1) {
+      // +Y up: entering through top means dir.y < 0
+      return { face: dy < 0 ? 'top' : 'bottom', cos: Math.abs(dy) };
+    }
+    // z: +Z forward; front face is maxz (dir.z < 0 enters it)
+    return { face: dz < 0 ? 'front' : 'rear', cos: Math.abs(dz) };
+  }
+
+  /** |dot(dirLocal, tiltedFaceNormal)| for an armour zone slope.
+   *  The face's outward normal is rotated about its horizontal axis so it
+   *  tips upward by slopeDeg (glacis/skirt slope). */
+  private _slopeFaceCos(
+    face: 'front' | 'side' | 'rear' | 'top' | 'bottom',
+    slopeDeg: number,
+    lx: number, ly: number, lz: number,
+    ld: THREE.Vector3,
+    bMin: THREE.Vector3,
+    bMax: THREE.Vector3
+  ): number {
+    // outward unit normal of the entered face
+    let nx = 0, ny = 0, nz = 0;
+    if (face === 'front') nz = 1;
+    else if (face === 'rear') nz = -1;
+    else if (face === 'top') ny = 1;
+    else if (face === 'bottom') ny = -1;
+    else nx = lx >= (bMin.x + bMax.x) * 0.5 ? 1 : -1;
+    if (face === 'top' || face === 'bottom') return face === 'top' ? Math.abs(ld.y) : Math.abs(ld.y);
+    const s = (slopeDeg * Math.PI) / 180;
+    const cs = Math.cos(s), sn = Math.sin(s);
+    // tilt the normal toward +Y (up-slope), renormalize
+    const tx = nx * cs, ty = ny * cs + sn, tz = nz * cs;
+    const tl = Math.hypot(tx, ty, tz) || 1;
+    return Math.abs((ld.x * tx + ld.y * ty + ld.z * tz) / tl);
+  }
+
+  /** Part-space bounds used by the damage model (references, no alloc). */
+  public getDamageBounds(): {
+    hullMin: THREE.Vector3; hullSize: THREE.Vector3;
+    turretMin: THREE.Vector3; turretSize: THREE.Vector3;
+  } {
+    return {
+      hullMin: this.hullBoundsMin, hullSize: this.hullBoundsSize,
+      turretMin: this.turretBoundsMin, turretSize: this.turretBoundsSize,
+    };
+  }
+
+  /** Health state of one module for the HUD parts panel (null if absent). */
+  public moduleHealth(id: ModuleId): ModuleHealthState | null {
+    const rt = this.modules.get(id);
+    return rt ? integrityState(rt.integrity) : null;
+  }
+
+  /** Seconds left on a destroyed->damaged auto-repair (0 when not repairing). */
+  public moduleRepairRemaining(id: ModuleId): number {
+    return this.repairTimers.get(id) ?? 0;
+  }
+
+  public get isBurning(): boolean {
+    return this.fireT > 0 && this.alive;
+  }
+
+  /** Seconds until the one-shot extinguisher attempt; -1 when not pending. */
+  public get fireExtinguisherIn(): number {
+    if (this.fireT <= 0 || this.extinguisherDone || this.fireElapsed >= FIRE_EXTINGUISH_AT_S) return -1;
+    return FIRE_EXTINGUISH_AT_S - this.fireElapsed;
+  }
+
+  private _recountCrew(): void {
+    let alive = 0;
+    let total = 0;
+    for (const rt of this.modules.values()) {
+      if (!rt.crew) continue;
+      total++;
+      if (rt.integrity > 0) alive++;
+    }
+    this.crewTotal = total;
+    this.crewAlive = alive;
+  }
+
+  private _startFire(propellant: boolean): void {
+    if (this.fireT > 0 || !this.alive) return;
+    this.fireT = FIRE_DURATION_S;
+    this.fireElapsed = 0;
+    this.firePropellant = propellant;
+    this.extinguisherDone = false;
+    this.cookOffAccum = 0;
+  }
+
+  /** Applies damage to a module; handles destroy side-effects. Returns true if it was destroyed by this hit. */
+  private _damageModule(id: ModuleId, dmg: number): boolean {
+    const rt = this.modules.get(id);
+    if (!rt || rt.integrity <= 0 || dmg <= 0 || !this.alive) return false;
+    const wasAlive = rt.integrity > 0;
+    // Fragile soft-skins: integrityScale divides incoming damage (identical
+    // kill thresholds to scaling max integrity, but modules spawn 'ok').
+    const scale = this.layout.integrityScale ?? 1;
+    rt.integrity = Math.max(0, rt.integrity - dmg / scale);
+    const destroyedNow = wasAlive && rt.integrity <= 0;
+    if (rt.crew) this._recountCrew();
+    if (destroyedNow) this._onModuleDestroyed(id);
+    return destroyedNow;
+  }
+
+  private _onModuleDestroyed(id: ModuleId): void {
+    const soft = this.layout.softSkin;
+    if (id === 'engine') {
+      if (Math.random() < 0.3) this._startFire(false);
+    } else if (id === 'fuel') {
+      this._startFire(false);
+      if (soft && Math.random() < 0.35) {
+        this.killTank(true, 'FUEL EXPLOSION');
+        return;
+      }
+    } else if (id === 'ammo') {
+      if (Math.random() < 0.8) {
+        this.killTank(true, 'AMMO DETONATION');
+      } else {
+        this._startFire(true);
+      }
+    } else if (id === 'driver' || id === 'gunner' || id === 'commander' || id === 'loader') {
+      this.crewOutTimers.set(id as CrewRole, CREW_RECOVER_S);
+    } else {
+      const t = REPAIR_TIME_S[id];
+      if (t && this.crewAlive >= MIN_CREW_ALIVE) this.repairTimers.set(id, t);
+    }
+  }
+
+  private _checkKO(): void {
+    if (this.alive && this.crewAlive < MIN_CREW_ALIVE && this.crewTotal > 0) {
+      this.killTank(false, 'CREW KNOCKED OUT');
+    }
+  }
+
+  /** HE blast: per-module falloff; interior gated by armour on the face toward the blast. */
+  private _applyBlast(center: THREE.Vector3, radius: number, spec: ShellSpec): void {
+    if (radius <= 0) return;
+    const splashFactor = (spec.splashDamage > 0 ? spec.splashDamage : 60) / 400;
+    const penGate = (spec.penMm ?? 0) * 0.5;
+    const anchor = new THREE.Vector3();
+    const toBlast = new THREE.Vector3();
+    const dirLocal = new THREE.Vector3();
+    const partObj = (p: 'hull' | 'turret') => (p === 'hull' ? this.rig.hullTiltGroup : this.rig.turretPivot);
+    for (const rt of this.modules.values()) {
+      if (rt.integrity <= 0) continue;
+      // representative point = centre of first box, transformed to world
+      const bx = rt.boxes[0];
+      if (!bx) continue;
+      const part = partObj(bx.part);
+      part.updateWorldMatrix(true, false);
+      anchor.set(
+        (bx.min[0] + bx.max[0]) * 0.5,
+        (bx.min[1] + bx.max[1]) * 0.5,
+        (bx.min[2] + bx.max[2]) * 0.5
+      );
+      part.localToWorld(anchor);
+      const d = anchor.distanceTo(center);
+      if (d >= radius) continue;
+      const fall = 1 - d / radius;
+      const dmg = splashFactor * fall * fall;
+      if (dmg <= 0.01) continue;
+      if (rt.external) {
+        this._damageModule(rt.id, dmg);
+        continue;
+      }
+      // interior: armour on the face toward the blast must be < penMm*0.5
+      toBlast.subVectors(center, anchor);
+      this._rayToPartLocal(part, anchor, toBlast.normalize(), _blastO, _blastD);
+      const ax = Math.abs(_blastD.x), ay = Math.abs(_blastD.y), az = Math.abs(_blastD.z);
+      let face: 'front' | 'side' | 'rear' | 'top' | 'bottom';
+      if (ax >= ay && ax >= az) face = 'side';
+      else if (ay >= az) face = _blastD.y > 0 ? 'top' : 'bottom';
+      else face = _blastD.z > 0 ? 'front' : 'rear';
+      const armor = bx.part === 'hull' ? this.layout.hullArmor : this.layout.turretArmor;
+      if (armor[face] < penGate) this._damageModule(rt.id, dmg);
+    }
+    if (!this.alive) return;
+    this._checkKO();
+  }
+
   public takeDamage(
     amount: number,
     hitWorldPos: THREE.Vector3,
     attackerPos?: THREE.Vector3,
     shellDirWorld?: THREE.Vector3,
     weapon: 'cannon' | 'mg' = 'cannon',
-    shellSpec?: ShellSpec
-  ): boolean {
-    if (!this.alive || amount <= 0 || this.spawnProtect > 0) return false;
-
-    this._dkHitPoint.copy(hitWorldPos);
-    if (shellDirWorld) {
-      this._dkShellDir.copy(shellDirWorld);
-      this._dkHasDir = true;
-    } else {
-      this._dkHasDir = false;
+    shellSpec?: ShellSpec,
+    opts?: {
+      attacker?: TankEntity | null;
+      blastCenter?: THREE.Vector3;
+      blastRadius?: number;
     }
+  ): boolean {
+    if (!this.alive || this.spawnProtect > 0) return false;
+    const blastC = opts?.blastCenter;
+    const blastR = opts?.blastRadius ?? 0;
+    const hasBlast = !!blastC && blastR > 0;
+    if (amount <= 0 && !shellSpec && !hasBlast) return false;
+
+    this._inTakeDamage = true;
+    this._dkHitPoint.copy(hitWorldPos);
+    this._dkHasDir = !!shellDirWorld;
+    if (shellDirWorld) this._dkShellDir.copy(shellDirWorld);
     this._dkWeapon = weapon;
     this._dkDamage = amount;
     this._dkShellSpec = shellSpec ?? null;
-
-    const scaledAmt = amount * this.stats.armorDamageMult;
-
-    if (shellDirWorld && this.stats.drive === 'tracked') {
-      return this.applyLocationalPenetration(scaledAmt, hitWorldPos, shellDirWorld, weapon, shellSpec);
+    this.hitCounter++;
+    if (opts?.attacker && opts.attacker.team !== this.team) {
+      this.lastAttacker = opts.attacker;
+      this.lastDamageAt = this._clock;
     }
 
-    this.lastXRayReport = null;
-    this.hp = Math.max(0, this.hp - scaledAmt);
-    if (this.hp <= 0) {
-      this.killTank(false);
-      return true;
-    }
-    void attackerPos;
-    return false;
-  }
-
-  private applyLocationalPenetration(
-    baseAmount: number,
-    hitWorldPos: THREE.Vector3,
-    shellDirWorld: THREE.Vector3,
-    weapon: 'cannon' | 'mg',
-    shellSpec?: ShellSpec
-  ): boolean {
-    this.rig.hullTiltGroup.updateWorldMatrix(true, false);
-    const localHit = _tmpVecA.copy(hitWorldPos);
-    this.rig.hullTiltGroup.worldToLocal(localHit);
-
-    const invQuat = _tmpQuat.setFromRotationMatrix(this.rig.hullTiltGroup.matrixWorld).invert();
-    const localDir = _tmpVecB.copy(shellDirWorld).applyQuaternion(invQuat).normalize();
-
-    const rayBackX = localHit.x - localDir.x * 3.0;
-    const rayBackY = localHit.y - localDir.y * 3.0;
-    const rayBackZ = localHit.z - localDir.z * 3.0;
-
-    const tHull = intersectRayAABB(
-      rayBackX,
-      rayBackY,
-      rayBackZ,
-      localDir.x,
-      localDir.y,
-      localDir.z,
-      7.5,
-      [-1.88, 0.04, -3.96],
-      [1.88, 1.60, 3.86]
-    );
-
-    const cosT = Math.cos(this.turretRelYaw);
-    const sinT = Math.sin(this.turretRelYaw);
-    const hullToTurretPos = (hx: number, hy: number, hz: number): [number, number, number] => {
-      const rx = hx;
-      const ry = hy - 1.62;
-      const rz = hz + 0.5;
-      return [rx * cosT - rz * sinT, ry, rx * sinT + rz * cosT];
-    };
-    const hullToTurretDir = (dx: number, dy: number, dz: number): [number, number, number] => [
-      dx * cosT - dz * sinT,
-      dy,
-      dx * sinT + dz * cosT,
-    ];
-
-    const [tbOx, tbOy, tbOz] = hullToTurretPos(rayBackX, rayBackY, rayBackZ);
-    const [tbDx, tbDy, tbDz] = hullToTurretDir(localDir.x, localDir.y, localDir.z);
-    const tTurret = intersectRayAABB(
-      tbOx,
-      tbOy,
-      tbOz,
-      tbDx,
-      tbDy,
-      tbDz,
-      7.5,
-      [-1.50, 0.0, -2.95],
-      [1.50, 0.98, 1.38]
-    );
-    const tGun = intersectRayAABB(
-      tbOx,
-      tbOy,
-      tbOz,
-      tbDx,
-      tbDy,
-      tbDz,
-      7.5,
-      [-0.26, 0.16, 1.0],
-      [0.26, 0.62, 5.35]
-    );
-
-    let bestEntryT: number | null = null;
-    for (const cand of [tHull, tTurret, tGun]) {
-      if (cand !== null && (bestEntryT === null || cand < bestEntryT)) {
-        bestEntryT = cand;
-      }
-    }
-
-    let ex = THREE.MathUtils.clamp(localHit.x, -1.86, 1.86);
-    let ey = THREE.MathUtils.clamp(localHit.y, 0.22, 2.48);
-    let ez = THREE.MathUtils.clamp(localHit.z, -3.92, 3.82);
-    if (bestEntryT !== null) {
-      ex = rayBackX + localDir.x * bestEntryT;
-      ey = rayBackY + localDir.y * bestEntryT;
-      ez = rayBackZ + localDir.z * bestEntryT;
-    }
-
-    let armorZone = 'FRONT GLACIS';
-    let zoneDmgMult = 1.0;
-    if (ey > 1.60) {
-      const [tex, , tez] = hullToTurretPos(ex, ey, ez);
-      if (tez > 1.25) {
-        armorZone = 'GUN BARREL / MANTLET';
-        zoneDmgMult = 0.85;
-      } else if (tez < -1.1) {
-        armorZone = 'TURRET BUSTLE';
-        zoneDmgMult = 1.35;
-      } else if (Math.abs(tex) > 1.05) {
-        armorZone = 'TURRET SIDE';
-        zoneDmgMult = 1.2;
-      } else {
-        armorZone = 'TURRET CHEEK';
-        zoneDmgMult = this.stats.vehicleClass === 'heavy' ? 0.72 : 0.95;
-      }
-    } else if (Math.abs(ex) > 1.22 && ey < 1.02) {
-      armorZone = ex > 0 ? 'LEFT TRACK SPONSON' : 'RIGHT TRACK SPONSON';
-      zoneDmgMult = 0.72;
-    } else if (ez < -1.45) {
-      armorZone = 'REAR ENGINE DECK';
-      zoneDmgMult = 1.45;
-    } else if (Math.abs(ex) > 1.25) {
-      armorZone = ex > 0 ? 'LEFT SIDE HULL' : 'RIGHT SIDE HULL';
-      zoneDmgMult = 1.25;
-    } else if (this.stats.vehicleClass === 'heavy') {
-      zoneDmgMult = 0.75;
-    }
-
-    const isAPAutocannon = Boolean(shellSpec && shellSpec.penetrationDepth >= 1.5);
-    const penLen = shellSpec
-      ? shellSpec.penetrationDepth
-      : weapon === 'cannon'
-        ? 2.85
-        : 0.65;
-    const penEnd: [number, number, number] = [
-      ex + localDir.x * penLen,
-      ey + localDir.y * penLen,
-      ez + localDir.z * penLen,
-    ];
-
-    const upRef = Math.abs(localDir.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
-    const basisA = new THREE.Vector3().crossVectors(localDir, upRef).normalize();
-    const basisB = new THREE.Vector3().crossVectors(basisA, localDir).normalize();
-
-    const spallOrigin: [number, number, number] = [
-      ex + localDir.x * 0.22,
-      ey + localDir.y * 0.22,
-      ez + localDir.z * 0.22,
-    ];
-
+    const spec = shellSpec;
+    const md = spec?.moduleDamage;
+    const penMm = spec?.penMm ?? 0;
+    const hitModules = new Map<ModuleId, { dmg: number; dist: number }>();
     const spallRays: XRaySpallRay[] = [];
-    const moduleBestHit = new Map<ModuleId, { dist: number; weight: number }>();
+    let armorZone = 'EXTERIOR';
+    let ricochet = false;
+    let penetrated = false;
+    let entryPart: 'hull' | 'turret' | null = null;
+    let ex = 0, ey = 0, ez = 0;
+    const penEnd: [number, number, number] = [0, 0, 0];
 
-    const canReachInterior = weapon === 'cannon' || isAPAutocannon || this.stats.vehicleClass === 'ifv';
+    // ---------- HE blast path (splash victims / dedicated blast calls) ----------
+    if (hasBlast && blastC && spec) {
+      this._applyBlast(blastC, blastR, spec);
+      if (!this.alive) { this._inTakeDamage = false; this._finishDamageReport(armorZone, weapon, spec, hitModules, spallRays, ex, ey, ez, penEnd, entryPart, ricochet, penetrated); return true; }
+      // splash-only callers pass no shellDirWorld -> done after blast
+      if (!shellDirWorld) {
+        this._inTakeDamage = false;
+        this._finishDamageReport(armorZone, weapon, spec, hitModules, spallRays, ex, ey, ez, penEnd, entryPart, ricochet, penetrated);
+        return false;
+      }
+    }
 
-    const testRayAgainstModules = (
-      rox: number,
-      roy: number,
-      roz: number,
-      rdx: number,
-      rdy: number,
-      rdz: number,
-      rLen: number,
-      weight: number
-    ): { hitAny: boolean } => {
-      let hitAny = false;
-      const [tox, toy, toz] = hullToTurretPos(rox, roy, roz);
-      const [tdx, tdy, tdz] = hullToTurretDir(rdx, rdy, rdz);
+    // ---------- direct-hit path ----------
+    if (shellDirWorld) {
+      const dir = _tmpVecB.copy(shellDirWorld).normalize();
+      // ray origin: 6 m behind the impact point
+      const ro = _rayOrigin.copy(hitWorldPos).addScaledVector(dir, -6);
+      // transform into both part spaces
+      this._rayToPartLocal(this.rig.hullTiltGroup, ro, dir, _hO, _hD);
+      this._rayToPartLocal(this.rig.turretPivot as THREE.Object3D, ro, dir, _tO, _tD);
 
-      for (const mod of MBT_INTERNAL_MODULES) {
-        if (
-          !canReachInterior &&
-          mod.id !== 'track_left' &&
-          mod.id !== 'track_right' &&
-          mod.id !== 'cannon_breech'
-        ) {
-          continue;
-        }
+      const tHull = rayBox(_hO.x, _hO.y, _hO.z, _hD.x, _hD.y, _hD.z,
+        this.hullBoundsMin.x, this.hullBoundsMin.y, this.hullBoundsMin.z,
+        this.hullBoundsMin.x + this.hullBoundsSize.x, this.hullBoundsMin.y + this.hullBoundsSize.y, this.hullBoundsMin.z + this.hullBoundsSize.z, 40);
+      const tTurret = rayBox(_tO.x, _tO.y, _tO.z, _tD.x, _tD.y, _tD.z,
+        this.turretBoundsMin.x, this.turretBoundsMin.y, this.turretBoundsMin.z,
+        this.turretBoundsMin.x + this.turretBoundsSize.x, this.turretBoundsMin.y + this.turretBoundsSize.y, this.turretBoundsMin.z + this.turretBoundsSize.z, 40);
 
-        const t =
-          mod.space === 'hull'
-            ? intersectRayAABB(rox, roy, roz, rdx, rdy, rdz, rLen, mod.min, mod.max)
-            : intersectRayAABB(tox, toy, toz, tdx, tdy, tdz, rLen, mod.min, mod.max);
+      let entryT = Infinity;
+      if (tHull !== null && tHull < entryT) { entryT = tHull; entryPart = 'hull'; }
+      if (tTurret !== null && tTurret < entryT) { entryT = tTurret; entryPart = 'turret'; }
 
-        if (t !== null) {
-          hitAny = true;
-          const prev = moduleBestHit.get(mod.id);
-          if (!prev) {
-            moduleBestHit.set(mod.id, { dist: t, weight });
-          } else {
-            prev.dist = Math.min(prev.dist, t);
-            prev.weight += weight;
+      // entry point in world space
+      const entryWorld = _entryW.copy(ro).addScaledVector(dir, Number.isFinite(entryT) ? entryT : 0);
+      ex = entryWorld.x; ey = entryWorld.y; ez = entryWorld.z;
+
+      // local coords of entry for the XRay report
+      if (entryPart === 'turret') {
+        this.rig.turretPivot.updateWorldMatrix(true, false);
+        _tmpVecA.copy(entryWorld);
+        (this.rig.turretPivot as THREE.Object3D).worldToLocal(_tmpVecA);
+      } else {
+        this.rig.hullTiltGroup.worldToLocal(_tmpVecA.copy(entryWorld));
+      }
+      const lx = _tmpVecA.x, ly = _tmpVecA.y, lz = _tmpVecA.z;
+
+      // ---------- external modules: direct box hits regardless of armour ----------
+      const slugScale = Math.min(1, penMm / 40);
+      const extSlug = md ? md.slug * slugScale : amount * 0.004 * slugScale;
+      if (extSlug > 0) {
+        for (const rt of this.modules.values()) {
+          if (rt.integrity <= 0) continue;
+          for (const bx of rt.boxes) {
+            if (!bx.external) continue;
+            const part = bx.part === 'hull' ? this.rig.hullTiltGroup : (this.rig.turretPivot as THREE.Object3D);
+            const o = bx.part === 'hull' ? _hO : _tO;
+            const d = bx.part === 'hull' ? _hD : _tD;
+            const t = rayBox(o.x, o.y, o.z, d.x, d.y, d.z, bx.min[0], bx.min[1], bx.min[2], bx.max[0], bx.max[1], bx.max[2], 40);
+            if (t !== null && t > entryT - 0.8 && t < entryT + 4.5) {
+              const prev = hitModules.get(rt.id);
+              const add = extSlug * (bx.external ? 1 : 0.5);
+              if (prev) prev.dmg += add; else hitModules.set(rt.id, { dmg: add, dist: t });
+              break; // one box per module is enough
+            }
           }
         }
       }
-      return { hitAny };
-    };
 
-    const mainSlugWeight = weapon === 'cannon' ? 2.2 : isAPAutocannon ? 0.72 : 0.32;
-    testRayAgainstModules(ex, ey, ez, localDir.x, localDir.y, localDir.z, penLen, mainSlugWeight);
-
-    const numSpall = shellSpec ? shellSpec.spallCount : weapon === 'cannon' ? 14 : 2;
-    const spallWeight = shellSpec ? shellSpec.spallWeight : weapon === 'cannon' ? 0.38 : 0.08;
-    for (let i = 0; i < numSpall; i++) {
-      const ang = (i / Math.max(1, numSpall)) * Math.PI * 2 + (i % 2) * 0.25;
-      const coneSpread = penLen > 3.2 ? 0.11 + (i % 3) * 0.08 : 0.18 + (i % 3) * 0.14;
-      const sdx = localDir.x + basisA.x * Math.cos(ang) * coneSpread + basisB.x * Math.sin(ang) * coneSpread;
-      const sdy = localDir.y + basisA.y * Math.cos(ang) * coneSpread + basisB.y * Math.sin(ang) * coneSpread;
-      const sdz = localDir.z + basisA.z * Math.cos(ang) * coneSpread + basisB.z * Math.sin(ang) * coneSpread;
-      const sNorm = Math.hypot(sdx, sdy, sdz) || 1;
-      const ndx = sdx / sNorm;
-      const ndy = sdy / sNorm;
-      const ndz = sdz / sNorm;
-
-      const spallLen = weapon === 'cannon' ? 1.15 + (i % 3) * 0.35 : 0.75;
-      const res = testRayAgainstModules(
-        spallOrigin[0],
-        spallOrigin[1],
-        spallOrigin[2],
-        ndx,
-        ndy,
-        ndz,
-        spallLen,
-        spallWeight
-      );
-
-      spallRays.push({
-        start: spallOrigin,
-        end: [
-          spallOrigin[0] + ndx * spallLen,
-          spallOrigin[1] + ndy * spallLen,
-          spallOrigin[2] + ndz * spallLen,
-        ],
-        hitModule: res.hitAny,
-      });
-    }
-
-    const hitModules: XRayModuleHitEntry[] = [];
-    let catastrophicKillReason: string | null = null;
-
-    for (const [modId, hitData] of moduleBestHit.entries()) {
-      const prev = this.modules[modId];
-      if (prev === 'destroyed') continue;
-
-      let next: ModuleHealthState = prev;
-      const isAmmo = modId === 'ammo_hull' || modId === 'ammo_bustle';
-      const destroyThresh = isAmmo ? 2.05 : 1.05;
-
-      if (weapon === 'cannon') {
-        if (hitData.weight >= destroyThresh || prev === 'damaged') {
-          next = 'destroyed';
-        } else {
-          next = 'damaged';
+      // ---------- armour + penetration on the entry part ----------
+      if (entryPart !== null && Number.isFinite(entryT)) {
+        const isHull = entryPart === 'hull';
+        const lo = isHull ? _hO : _tO;
+        const ld = isHull ? _hD : _tD;
+        const armor = isHull ? this.layout.hullArmor : this.layout.turretArmor;
+        const bMin = isHull ? this.hullBoundsMin : this.turretBoundsMin;
+        const bMax = isHull
+          ? _v3b.copy(this.hullBoundsMin).add(this.hullBoundsSize)
+          : _v3b.copy(this.turretBoundsMin).add(this.turretBoundsSize);
+        const faceInfo = this._entryFace(lo.x, lo.y, lo.z, ld.x, ld.y, ld.z, bMin.x, bMin.y, bMin.z, bMax.x, bMax.y, bMax.z);
+        // Armour zones: normalized face rect -> mm + slope-tilted normal
+        const zones = (isHull ? this.layout.hullZones : this.layout.turretZones)?.[faceInfo.face];
+        let zoneMm = armor[faceInfo.face];
+        let zoneCos = faceInfo.cos;
+        if (zones && zones.length > 0) {
+          const sx = Math.max(1e-6, bMax.x - bMin.x);
+          const sy = Math.max(1e-6, bMax.y - bMin.y);
+          const sz = Math.max(1e-6, bMax.z - bMin.z);
+          let u = 0, v = 0;
+          if (faceInfo.face === 'side') {
+            u = (lz - bMin.z) / sz; v = (ly - bMin.y) / sy;
+          } else if (faceInfo.face === 'top' || faceInfo.face === 'bottom') {
+            u = (lx - bMin.x) / sx; v = (lz - bMin.z) / sz;
+          } else {
+            u = (lx - bMin.x) / sx; v = (ly - bMin.y) / sy;
+          }
+          const zone = zones.find((z) => u >= z.u0 && u <= z.u1 && v >= z.v0 && v <= z.v1);
+          if (zone) {
+            zoneMm = zone.mm;
+            if (zone.slopeDeg > 0) zoneCos = this._slopeFaceCos(faceInfo.face, zone.slopeDeg, lx, ly, lz, ld, bMin, bMax);
+          }
         }
-      } else if (shellSpec) {
-        // IFV 30mm APDS/HEI autocannon belts reliably shred modules over a short burst!
-        const chance = isAmmo ? 0.25 : 0.52;
-        if (Math.random() < chance) {
-          next = prev === 'ok' ? 'damaged' : 'destroyed';
+        const faceMm = zoneMm;
+        const effMm = effectiveArmorMm(faceMm, zoneCos);
+        armorZone = `${faceInfo.face.toUpperCase()} ${isHull ? 'HULL' : 'TURRET'}`;
+        penetrated = penMm > effMm && penMm > 0;
+        ricochet = !penetrated && penMm > 0 && isRicochet(faceMm, penMm, zoneCos);
+
+        if (penetrated && md) {
+          const pathLen = postPenPathMm(penMm, effMm);
+          // slug: damages internal modules along the path in BOTH part spaces
+          const slugOriginWorld = _slugO.copy(entryWorld).addScaledVector(dir, 0.15);
+          this._rayDamageModules(hitModules, slugOriginWorld, dir, pathLen, md.slug, null);
+          // spall cone
+          const numSpall = md.spallCount;
+          if (numSpall > 0 && md.spall > 0) {
+            const spallOrigin = _spallOrg.copy(entryWorld).addScaledVector(dir, 0.25);
+            const upRef = Math.abs(dir.y) < 0.9 ? _upRef.set(0, 1, 0) : _upRef.set(1, 0, 0);
+            const basisA = _basisA.crossVectors(dir, upRef).normalize();
+            const basisB = _basisB.crossVectors(basisA, dir).normalize();
+            const spread = 0.42;
+            const spallLen = 2.4;
+            for (let i = 0; i < numSpall; i++) {
+              const ang = (i / numSpall) * Math.PI * 2 + (i % 2) * 0.3;
+              _spallDir
+                .copy(dir)
+                .addScaledVector(basisA, Math.cos(ang) * spread)
+                .addScaledVector(basisB, Math.sin(ang) * spread)
+                .normalize();
+              const before = hitModules.size;
+              void before;
+              // record ray for xray
+              spallRays.push({
+                start: [spallOrigin.x, spallOrigin.y, spallOrigin.z],
+                end: [spallOrigin.x + _spallDir.x * spallLen, spallOrigin.y + _spallDir.y * spallLen, spallOrigin.z + _spallDir.z * spallLen],
+                hitModule: false,
+              });
+              this._rayDamageModules(hitModules, spallOrigin, _spallDir, spallLen, md.spall, spallRays[spallRays.length - 1]);
+            }
+          }
+          penEnd[0] = lx + _hD.x * pathLen; // approx in entry part local
+          penEnd[1] = ly + _hD.y * pathLen;
+          penEnd[2] = lz + _hD.z * pathLen;
+        } else if (ricochet) {
+          // spark only — no internal damage; externals already collected
+        } else if (!md && amount > 0) {
+          // generic small-arms / unknown spec: trickle damage along a short path
+          const fakeSlug = amount * 0.004;
+          const slugOriginWorld = _slugO.copy(entryWorld).addScaledVector(dir, 0.15);
+          this._rayDamageModules(hitModules, slugOriginWorld, dir, 1.2, fakeSlug, null);
         }
-      } else if (Math.random() < 0.22) {
-        next = prev === 'ok' ? 'damaged' : 'destroyed';
       }
 
-      if (next === prev) continue;
-      this.modules[modId] = next;
-
-      if (modId === 'track_left' || modId === 'track_right') {
-        if (next === 'destroyed') {
-          this.trackRepairTimer = 11.0;
-          this.speed *= 0.15;
-        }
-      } else if (modId === 'engine' && next === 'destroyed') {
-        this.engineFireTimer = 7.5;
-      } else if (modId === 'driver' && next === 'destroyed') {
-        this.driverRecoverTimer = 7.5;
-      } else if (modId === 'gunner' && next === 'destroyed') {
-        this.gunnerRecoverTimer = 9.0;
-      } else if (modId === 'cannon_breech' && next === 'destroyed') {
-        this.breechRepairTimer = 14.0;
-      } else if (isAmmo && next === 'destroyed') {
-        catastrophicKillReason = 'AMMO RACK DETONATED';
+      // HE direct hit also blasts the victim itself
+      if (spec && spec.splashDamage > 0 && spec.splashRadius > 0 && !hasBlast) {
+        this._applyBlast(hitWorldPos, spec.splashRadius, spec);
       }
-
-      const meta = MODULE_LABELS[modId];
-      hitModules.push({
-        id: modId,
-        label: meta.label,
-        effectText: next === 'destroyed' ? meta.destroyedEffect : meta.damagedEffect,
-        newState: next,
-        hitTime01: THREE.MathUtils.clamp(hitData.dist / Math.max(0.5, penLen), 0.05, 0.92),
-      });
+    } else if (spec && spec.splashDamage > 0 && hasBlast) {
+      // already applied above
     }
 
-    hitModules.sort((a, b) => a.hitTime01 - b.hitTime01);
-
-    const crewOutCount =
-      (this.modules.driver === 'destroyed' ? 1 : 0) +
-      (this.modules.gunner === 'destroyed' ? 1 : 0) +
-      (this.modules.loader === 'destroyed' ? 1 : 0);
-    if (!catastrophicKillReason && crewOutCount >= 2) {
-      catastrophicKillReason = 'CREW KNOCKED OUT';
+    // ---------- apply accumulated module damage ----------
+    const destroyedNow: ModuleId[] = [];
+    for (const [id, rec] of hitModules) {
+      if (this._damageModule(id, rec.dmg)) destroyedNow.push(id);
     }
-
-    const totalDmg = baseAmount * zoneDmgMult + hitModules.length * (weapon === 'cannon' ? 40 : 8);
-    if (catastrophicKillReason) {
-      this.hp = 0;
-    } else {
-      this.hp = Math.max(0, this.hp - totalDmg);
-      if (this.hp <= 0) {
-        catastrophicKillReason = 'HULL INTEGRITY BREACHED';
-      }
+    if (!this.alive) {
+      this._inTakeDamage = false;
+      this._finishDamageReport(armorZone, weapon, spec, hitModules, spallRays, ex, ey, ez, penEnd, entryPart, ricochet, penetrated);
+      return true;
     }
+    this._checkKO();
+    const killed = !this.alive;
 
-    const killed = this.hp <= 0;
-    if (killed) {
-      this.killTank(catastrophicKillReason === 'AMMO RACK DETONATED');
-    }
-
-    // Show X-Ray Hit Cam on every cannon hit, kill, or module-damaging autocannon/MG round!
-    if (weapon === 'cannon' || killed || hitModules.length > 0) {
-      this.lastXRayReport = {
-        armorZone,
-        killed,
-        killReason: catastrophicKillReason,
-        weapon: shellSpec ? 'cannon' : weapon,
-        entryLocal: [ex, ey, ez],
-        penEndLocal: penEnd,
-        dirLocal: [localDir.x, localDir.y, localDir.z],
-        turretRelYaw: this.turretRelYaw,
-        spallRays,
-        hitModules,
-        allModuleStates: { ...this.modules },
-        hpRemaining: this.hp,
-        maxHp: this.maxHp,
-      };
-    } else {
-      this.lastXRayReport = null;
-    }
-
+    this._inTakeDamage = false;
+    this._finishDamageReport(armorZone, weapon, spec, hitModules, spallRays, ex, ey, ez, penEnd, entryPart, ricochet, penetrated);
+    void destroyedNow;
+    void attackerPos;
     return killed;
   }
 
-  private killTank(ammoBlowout: boolean): void {
+  /** Ray vs all internal module boxes (both part spaces); accumulates damage. */
+  private _rayDamageModules(
+    hitModules: Map<ModuleId, { dmg: number; dist: number }>,
+    worldOrigin: THREE.Vector3,
+    worldDir: THREE.Vector3,
+    len: number,
+    dmgPer: number,
+    spallRay: XRaySpallRay | null
+  ): void {
+    this._rayToPartLocal(this.rig.hullTiltGroup, worldOrigin, worldDir, _sO, _sD);
+    this._rayToPartLocal(this.rig.turretPivot as THREE.Object3D, worldOrigin, worldDir, _sO2, _sD2);
+    let anyHit = false;
+    for (const rt of this.modules.values()) {
+      if (rt.integrity <= 0) continue;
+      for (const bx of rt.boxes) {
+        if (bx.external) continue;
+        const o = bx.part === 'hull' ? _sO : _sO2;
+        const d = bx.part === 'hull' ? _sD : _sD2;
+        const t = rayBox(o.x, o.y, o.z, d.x, d.y, d.z, bx.min[0], bx.min[1], bx.min[2], bx.max[0], bx.max[1], bx.max[2], len);
+        if (t !== null) {
+          anyHit = true;
+          const prev = hitModules.get(rt.id);
+          if (prev) prev.dmg += dmgPer; else hitModules.set(rt.id, { dmg: dmgPer, dist: t });
+        }
+      }
+    }
+    if (spallRay) spallRay.hitModule = anyHit;
+  }
+
+  private _finishDamageReport(
+    armorZone: string,
+    weapon: 'cannon' | 'mg',
+    spec: ShellSpec | undefined,
+    hitModules: Map<ModuleId, { dmg: number; dist: number }>,
+    spallRays: XRaySpallRay[],
+    ex: number, ey: number, ez: number,
+    penEnd: [number, number, number],
+    entryPart: 'hull' | 'turret' | null,
+    ricochet: boolean,
+    penetrated: boolean
+  ): void {
+    const entries: XRayModuleHitEntry[] = [];
+    const states: Record<ModuleId, ModuleHealthState> = {} as Record<ModuleId, ModuleHealthState>;
+    for (const id of ALL_MODULE_IDS) {
+      const rt = this.modules.get(id);
+      states[id] = rt ? integrityState(rt.integrity) : 'ok';
+    }
+    // sort by distance along path
+    const sorted = [...hitModules.entries()].sort((a, b) => a[1].dist - b[1].dist);
+    for (const [id, rec] of sorted) {
+      const rt = this.modules.get(id);
+      const meta = MODULE_LABELS[id];
+      const st = rt ? integrityState(rt.integrity) : 'ok';
+      entries.push({
+        id,
+        label: meta.label,
+        effectText: st === 'destroyed' ? meta.destroyedEffect : meta.damagedEffect,
+        newState: st,
+        hitTime01: THREE.MathUtils.clamp(rec.dist / 4, 0.05, 0.95),
+      });
+    }
+    this.lastXRayReport = {
+      armorZone: ricochet ? `${armorZone} (RICOCHET)` : armorZone,
+      penetrated,
+      ricochet,
+      killed: !this.alive,
+      killReason: this.alive ? null : this._dkKillReason,
+      weapon: spec ? 'cannon' : weapon,
+      entryLocal: [ex, ey, ez],
+      penEndLocal: penEnd,
+      dirLocal: [0, 0, 0],
+      turretRelYaw: this.turretRelYaw,
+      spallRays,
+      hitModules: entries,
+      allModuleStates: states,
+      crewAlive: this.crewAlive,
+      crewTotal: this.crewTotal,
+      moduleBoxes: this._xrayBoxes.map((b) => ({
+        ...b,
+        state: (() => {
+          const rt = this.modules.get(b.id);
+          return rt ? integrityState(rt.integrity) : ('ok' as ModuleHealthState);
+        })(),
+      })),
+    };
+    void entryPart;
+  }
+
+  /** QA/selftest: apply raw module damage bypassing ballistics. */
+  public debugDamageModule(id: ModuleId, amount: number): void {
+    this._damageModule(id, amount);
+    this._checkKO();
+  }
+
+  /** World position of the burning module (fuel > ammo > engine > hull centre). */
+  private _fireAnchorPos(out: THREE.Vector3): THREE.Vector3 {
+    for (const id of ['fuel', 'ammo', 'engine'] as ModuleId[]) {
+      const rt = this.modules.get(id);
+      const bx = rt?.boxes[0];
+      if (rt && rt.integrity <= 0 && bx) {
+        const part = bx.part === 'hull' ? this.rig.hullTiltGroup : (this.rig.turretPivot as THREE.Object3D);
+        part.updateWorldMatrix(true, false);
+        out.set(
+          (bx.min[0] + bx.max[0]) * 0.5,
+          (bx.min[1] + bx.max[1]) * 0.5,
+          (bx.min[2] + bx.max[2]) * 0.5
+        );
+        part.localToWorld(out);
+        return out;
+      }
+    }
+    const sinE = Math.sin(this.hullYaw);
+    const cosE = Math.cos(this.hullYaw);
+    out.set(this.position.x - sinE * 2.5, this.position.y + 1.55, this.position.z - cosE * 2.5);
+    return out;
+  }
+
+  private _resetDamageState(): void {
+    for (const rt of this.modules.values()) {
+      rt.integrity = rt.maxIntegrity;
+    }
+    this.repairTimers.clear();
+    this.crewOutTimers.clear();
+    this.fireT = 0;
+    this.fireElapsed = 0;
+    this.firePropellant = false;
+    this.extinguisherDone = false;
+    this.fireSmokeAccum = 0;
+    this.cookOffAccum = 0;
+    this._recountCrew();
+  }
+
+  /** Precompute X-Ray module boxes (part-local metres) with live states. */
+  private _buildXrayBoxes(): void {
+    const out: { id: ModuleId; space: 'hull' | 'turret'; min: [number, number, number]; max: [number, number, number]; state: ModuleHealthState }[] = [];
+    for (const rt of this.modules.values()) {
+      const st = integrityState(rt.integrity);
+      for (const bx of rt.boxes) {
+        out.push({
+          id: rt.id,
+          space: bx.part,
+          min: [bx.min[0], bx.min[1], bx.min[2]],
+          max: [bx.max[0], bx.max[1], bx.max[2]],
+          state: st,
+        });
+      }
+    }
+    // keep geometry stable; refresh states each report instead
+    this._xrayBoxes = out;
+  }
+
+  private killTank(catastrophic: boolean, reason?: string): void {
+    if (!this.alive) return;
     this.alive = false;
-    this.engineFireTimer = 0;
+    this.fireT = 0;
     this.respawnTimer = this.isHuman ? 5.0 : 7.0;
+    this._dkKillReason = reason ?? (catastrophic ? 'DETONATION' : 'CREW KNOCKED OUT');
 
-    // Catastrophic kill: ammo rack, rocket/HE blast >= 400 dmg, any cannon/rocket
-    // kill on wheeled hulls, or 25% of other cannon kills.
-    const spec = this._dkShellSpec;
-    const isRocket = !!spec?.rocket;
-    const isCannon = this._dkWeapon === 'cannon';
-    const catastrophic =
-      ammoBlowout ||
-      ((isRocket || (spec?.splashRadius ?? 0) > 0) && this._dkDamage >= 400) ||
-      (this.stats.drive === 'wheeled' && (isCannon || isRocket)) ||
-      (isCannon && Math.random() < 0.25);
+    // Kill credit: last enemy to damage this tank within the credit window.
+    const killer =
+      this.lastAttacker && this._clock - this.lastDamageAt <= KILL_CREDIT_WINDOW_S
+        ? this.lastAttacker
+        : null;
 
+    // Wreck: catastrophic = ammo/fuel explosion or heavy blast; crew KO burns.
     if (this.onDestroyed) {
       this.onDestroyed({
         tank: this,
@@ -1773,6 +2188,17 @@ export class Tank implements TankEntity {
         weapon: this._dkWeapon,
         damage: this._dkDamage,
         catastrophic,
+      });
+    }
+    if (!this._inTakeDamage) {
+      this.onKillEvent?.({
+        victim: this,
+        attacker: killer,
+        killed: true,
+        hitPoint: this._dkHitPoint,
+        weapon: this._dkWeapon,
+        amount: this._dkDamage,
+        killReason: this._dkKillReason,
       });
     }
     this.root.visible = false;
@@ -1786,7 +2212,10 @@ export class Tank implements TankEntity {
     this.gunPitch = 0;
     this.speed = 0;
     this.prevSpeed = 0;
-    this.hp = this.maxHp;
+    this.hitCounter = 0;
+    this._dkKillReason = null;
+    this.lastAttacker = null;
+    this.lastDamageAt = -999;
     this.alive = true;
     this.respawnTimer = 0;
     this.spawnProtect = 3.0;
@@ -1795,13 +2224,7 @@ export class Tank implements TankEntity {
     this.mgHeat = 0;
     this.mgOverheated = false;
     this.lastXRayReport = null;
-    this.modules = createFreshModuleStates();
-    this.trackRepairTimer = 0;
-    this.driverRecoverTimer = 0;
-    this.gunnerRecoverTimer = 0;
-    this.breechRepairTimer = 0;
-    this.engineFireTimer = 0;
-    this.fireSmokeAccum = 0;
+    this._resetDamageState();
     this.suspPitch = 0;
     this.suspRoll = 0;
     this.suspRollTarget = 0;

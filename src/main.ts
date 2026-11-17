@@ -2,7 +2,7 @@ import * as THREE from 'three';
 
 import { instantiateTankRig, loadAllGameAssets } from './game/AssetLoader';
 import { World } from './game/World';
-import { Tank } from './game/Tank';
+import { Tank, TANK_STATS } from './game/Tank';
 import { EffectsManager } from './game/Effects';
 import { DestructionManager } from './game/Destruction';
 import { BallisticsManager, predictBarrelImpact } from './game/Ballistics';
@@ -48,6 +48,49 @@ function projectWorldToScreen(
   out.visible = scratch.z >= -1 && scratch.z <= 1.0;
   out.x = (scratch.x * 0.5 + 0.5) * width;
   out.y = (-scratch.y * 0.5 + 0.5) * height;
+}
+
+/** Fixed display order for the vehicle parts panel. */
+const PARTS_ORDER: readonly { id: string; label: string; group: 'hull' | 'track' | 'turret' | 'gun' }[] = [
+  { id: 'engine', label: 'ENGINE', group: 'hull' },
+  { id: 'fuel', label: 'FUEL', group: 'hull' },
+  { id: 'ammo', label: 'AMMO', group: 'hull' },
+  { id: 'track_left', label: 'TRACK L', group: 'track' },
+  { id: 'track_right', label: 'TRACK R', group: 'track' },
+  { id: 'wheels_left', label: 'WHEELS L', group: 'track' },
+  { id: 'wheels_right', label: 'WHEELS R', group: 'track' },
+  { id: 'turret_ring', label: 'TURRET', group: 'turret' },
+  { id: 'gun', label: 'GUN', group: 'gun' },
+  { id: 'launcher', label: 'LAUNCHER', group: 'gun' },
+];
+const CREW_PIP_ORDER: readonly { id: string; letter: 'D' | 'G' | 'C' | 'L' }[] = [
+  { id: 'driver', letter: 'D' },
+  { id: 'gunner', letter: 'G' },
+  { id: 'commander', letter: 'C' },
+  { id: 'loader', letter: 'L' },
+];
+
+function buildPartsTelemetry(t: Tank): { id: string; state: 'ok' | 'damaged' | 'destroyed'; repairSec: number }[] {
+  const wheeled = t.modules.has('wheels_left');
+  const out: { id: string; state: 'ok' | 'damaged' | 'destroyed'; repairSec: number }[] = [];
+  for (const p of PARTS_ORDER) {
+    if (p.id.startsWith('track_') && wheeled) continue;
+    if (p.id.startsWith('wheels_') && !wheeled) continue;
+    const st = t.moduleHealth(p.id as never);
+    if (!st) continue;
+    out.push({ id: p.id, state: st, repairSec: t.moduleRepairRemaining(p.id as never) });
+  }
+  return out;
+}
+
+function buildCrewPipsTelemetry(t: Tank): { role: 'D' | 'G' | 'C' | 'L'; state: 'ok' | 'wounded' | 'out' }[] {
+  const out: { role: 'D' | 'G' | 'C' | 'L'; state: 'ok' | 'wounded' | 'out' }[] = [];
+  for (const c of CREW_PIP_ORDER) {
+    const st = t.moduleHealth(c.id as never);
+    if (!st) continue;
+    out.push({ role: c.letter, state: st === 'ok' ? 'ok' : st === 'damaged' ? 'wounded' : 'out' });
+  }
+  return out;
 }
 
 function markerCodeForClass(cls: VehicleClass): string {
@@ -162,6 +205,19 @@ async function bootstrap(): Promise<void> {
   // Persistent physical wrecks for every kill (current roster + prebuilt human vehicles)
   match.forEachTankEver((t) => {
     t.onDestroyed = (info) => destruction.spawnWreck(info);
+    // Internal kills (cook-off, fire) happen outside Ballistics' onDamage path.
+    t.onKillEvent = (ev) => {
+      match.onDamage({
+        victim: ev.victim,
+        attacker: ev.attacker,
+        amount: ev.amount,
+        killed: ev.killed,
+        hitPoint: ev.hitPoint,
+        weapon: ev.weapon,
+        xrayReport: ev.victim.lastXRayReport,
+        killReason: ev.killReason,
+      });
+    };
   });
 
   // Bots = every tank except the human (tanks[0]); stable for the whole match
@@ -248,6 +304,8 @@ async function bootstrap(): Promise<void> {
 
   let hitMarkerKind: 'none' | 'hit' | 'kill' = 'none';
   let hitMarkerTimer = 0;
+  let hitResultText = '';
+  let hitResultTimer = 0;
   let incomingDamageYaw = 0;
   let incomingDamageTimer = 0;
 
@@ -274,6 +332,21 @@ async function bootstrap(): Promise<void> {
     }
 
     if (attacker?.isHuman && victim.team !== 'blue') {
+      const xr = ev.xrayReport;
+      if (xr) {
+        if (xr.ricochet) hitResultText = 'RICOCHET';
+        else if (xr.penetrated) {
+          const broke = xr.hitModules
+            .filter((h) => h.newState !== 'ok')
+            .sort((a, b) => Number(b.newState === 'destroyed') - Number(a.newState === 'destroyed'))
+            .slice(0, 2)
+            .map((h) => `${h.label} ${h.newState === 'destroyed' ? 'DESTROYED' : 'DAMAGED'}`);
+          hitResultText = 'PENETRATION' + (broke.length ? ` · ${broke.join(' · ')}` : '');
+        } else {
+          hitResultText = 'NO PENETRATION';
+        }
+        hitResultTimer = 1.2;
+      }
       if (killedNow) {
         kills++;
         hitMarkerKind = 'kill';
@@ -468,8 +541,7 @@ async function bootstrap(): Promise<void> {
       m.el.style.display = 'flex';
       m.el.style.transform = `translate3d(${sx.toFixed(1)}px, ${sy.toFixed(1)}px, 0) translate(-50%, -100%)`;
       m.distEl.textContent = ` · ${Math.round(dist)} m`;
-      const hpPct = THREE.MathUtils.clamp((e.hp / e.maxHp) * 100, 0, 100);
-      m.barFillEl.style.width = `${hpPct.toFixed(0)}%`;
+      // Unit markers no longer show HP bars (damage model: crew/modules).
     }
   };
 
@@ -656,6 +728,7 @@ async function bootstrap(): Promise<void> {
 
     hitMarkerTimer = Math.max(0, hitMarkerTimer - dt);
     if (hitMarkerTimer <= 0) hitMarkerKind = 'none';
+    hitResultTimer = Math.max(0, hitResultTimer - dt);
     incomingDamageTimer = Math.max(0, incomingDamageTimer - dt);
 
     const reloadProg =
@@ -669,8 +742,15 @@ async function bootstrap(): Promise<void> {
       hasMainCannon: playerTank.stats.hasMainCannon,
       hasCoaxMG: playerTank.stats.hasCoaxMG,
       infiniteMG: playerTank.stats.infiniteMG,
-      hp: playerTank.hp,
-      maxHp: playerTank.maxHp,
+      crewAlive: playerTank.crewAlive,
+      crewTotal: playerTank.crewTotal,
+      parts: buildPartsTelemetry(playerTank),
+      crewPips: buildCrewPipsTelemetry(playerTank),
+      onFire: playerTank.isBurning,
+      fireExtSec: playerTank.fireExtinguisherIn,
+      hitResultText,
+      hitResultIntensity: THREE.MathUtils.clamp(hitResultTimer / 1.2, 0, 1),
+      deathReason: playerTank.alive ? null : playerTank.lastKillReason,
       alive: playerTank.alive,
       respawnRemaining: playerTank.respawnTimer,
       speedKmh: playerTank.speed * 3.6,
@@ -1063,6 +1143,113 @@ async function bootstrap(): Promise<void> {
         stepSimulation(1 / 30);
       }
     },
+    /** F4b screenshot helper: fires a crafted real takeDamage shot at the
+     *  nearest suitable enemy so the hit-result readout / HitCam show
+     *  RICOCHET, NO PENETRATION or PENETRATION · … for real. */
+    probeHitForTest: (kind: 'ricochet' | 'pen' | 'nopen') => {
+      const human = match.human;
+      const wantCls = kind === 'pen' ? 'humvee' : kind === 'ricochet' ? 'normal' : 'heavy';
+      let victim: Tank | null = null;
+      let best = Infinity;
+      for (const t of allTanks) {
+        if (t.team === human.team || !t.alive) continue;
+        if (kind === 'pen' && t.stats.vehicleClass !== 'humvee') continue;
+        if (kind !== 'pen' && t.stats.vehicleClass === 'humvee') continue;
+        const d = t.position.distanceToSquared(human.position);
+        if (d < best) { best = d; victim = t; }
+      }
+      if (!victim) {
+        for (const t of allTanks) {
+          if (t.team === human.team || !t.alive) continue;
+          const d = t.position.distanceToSquared(human.position);
+          if (d < best) { best = d; victim = t; }
+        }
+      }
+      if (!victim) return { error: 'no enemy' };
+      const v = victim;
+      (v as unknown as { spawnProtect: number }).spawnProtect = 0;
+      const db = v.getDamageBounds();
+      const part = v.rig.hullTiltGroup;
+      part.updateWorldMatrix(true, false);
+      const lp = new THREE.Vector3();
+      const A = new THREE.Vector3();
+      const M = new THREE.Vector3();
+      const D = new THREE.Vector3();
+      const L = 120;
+      let spec: ShellSpec | undefined;
+      let dmg = 2.8;
+      let weapon: 'cannon' | 'mg' = 'mg';
+      if (kind === 'ricochet') {
+        // grazing shot across the front plate, ~80 deg off the face normal
+        spec = TANK_STATS.normal.shells[0];
+        dmg = spec.directDamage; weapon = 'cannon';
+        lp.set(
+          db.hullMin.x + db.hullSize.x * 0.12,
+          db.hullMin.y + db.hullSize.y * 0.55,
+          db.hullMin.z + db.hullSize.z - 0.15
+        );
+        A.copy(lp).applyMatrix4(part.matrixWorld);
+        D.set(-0.985, 0, -0.173).transformDirection(part.matrixWorld).normalize();
+      } else if (kind === 'pen') {
+        // .50 cal into the hull side plate of a soft-skin
+        spec = TANK_STATS.humvee.shells[0];
+        dmg = spec.directDamage; weapon = 'cannon';
+        lp.set(db.hullMin.x + db.hullSize.x, db.hullMin.y + db.hullSize.y * 0.5, db.hullMin.z + db.hullSize.z * 0.5);
+        A.copy(lp).applyMatrix4(part.matrixWorld);
+        D.set(-1, 0, 0).transformDirection(part.matrixWorld).normalize();
+      } else {
+        // 7.62 coax vs heavy front: never penetrates
+        lp.set(
+          db.hullMin.x + db.hullSize.x * 0.5,
+          db.hullMin.y + db.hullSize.y * 0.55,
+          db.hullMin.z + db.hullSize.z - 0.15
+        );
+        A.copy(lp).applyMatrix4(part.matrixWorld);
+        D.set(0, -0.02, -1).transformDirection(part.matrixWorld).normalize();
+      }
+      M.copy(A).addScaledVector(D, -L);
+      const killed = v.takeDamage(dmg, A, M, D, weapon, spec, { attacker: human });
+      // Route through the same DamageEvent path Ballistics uses so the
+      // hit marker / hit-result readout / HitCam / scoring all fire.
+      handleDamage({
+        victim: v,
+        attacker: human,
+        amount: dmg,
+        killed,
+        hitPoint: A,
+        weapon,
+        xrayReport: v.lastXRayReport,
+        killReason: v.lastKillReason,
+      });
+      return {
+        ok: true,
+        victim: v.id,
+        cls: v.stats.vehicleClass,
+        penetrated: v.lastXRayReport?.penetrated ?? null,
+        ricochet: v.lastXRayReport?.ricochet ?? null,
+        killed,
+        text: hitResultText,
+      };
+    },
+    /** F4b screenshot helper: puts the player MBT into a damaged state —
+     *  engine destroyed, left track mid-repair, loader out, fuel fire burning. */
+    damageShowcaseForTest: () => {
+      const t = match.human;
+      if (!t.alive) t.respawnAt(t.position.clone(), t.hullYaw);
+      t.debugDamageModule('track_left', 999);
+      for (let i = 0; i < 4 * 30; i++) stepSimulation(1 / 30); // repair 12 -> ~8 s
+      t.debugDamageModule('engine', 999);
+      t.debugDamageModule('fuel', 999);   // starts the fire
+      t.debugDamageModule('loader', 999); // crew seat out
+      for (let i = 0; i < 2 * 30; i++) stepSimulation(1 / 30); // fire ~2 s in
+      return {
+        alive: t.alive,
+        crew: `${t.crewAlive}/${t.crewTotal}`,
+        burning: t.isBurning,
+        fireExtIn: t.fireExtinguisherIn,
+        trackRepair: t.moduleRepairRemaining('track_left'),
+      };
+    },
     /** Precise teleport for verification shots (x, z, yaw radians). */
     teleportForTest: (x: number, z: number, yaw = 0) => {
       const t = match.human;
@@ -1123,6 +1310,7 @@ async function bootstrap(): Promise<void> {
         return out;
       })(),
     }),
+    getKillReasonHistogram: () => ({ ...match.killReasons }),
     getRiverCrossings: () => ({
       // [botIndex][riverIndex] crossing counts; river 0 = south (~z=-170), 1 = north (~z=+170)
       perBot: riverCrossings.map((r) => [r[0], r[1]]),
@@ -1148,7 +1336,15 @@ async function bootstrap(): Promise<void> {
         team: t.team,
         cls: t.stats.vehicleClass,
         alive: t.alive,
-        hp: Math.round(t.hp),
+        crewAlive: t.crewAlive,
+        crewTotal: t.crewTotal,
+        killReason: t.alive ? null : t.lastKillReason,
+        modules: Object.fromEntries(
+          [...t.modules.entries()].map(([id, rt]) => [
+            id,
+            rt.integrity <= 0 ? 'destroyed' : rt.integrity <= 0.6 ? 'damaged' : 'ok',
+          ])
+        ),
         x: Math.round(t.position.x * 10) / 10,
         z: Math.round(t.position.z * 10) / 10,
         seeker: t.seekerLock
@@ -1183,6 +1379,246 @@ async function bootstrap(): Promise<void> {
      *  from the player's rocket launcher. Runs guided (locked), unguided
      *  (no lock) and decoy (burning wreck in front of target, 3 salvos)
      *  scenarios; reports hits, min miss distance and decoy count. */
+    /** F4a: per-class module-based self-test (destroyed-module immunity, crew KO,
+     *  80-degree ricochet, 7.62 vs MBT). Runs on live match tanks, restores state. */
+    damageSelfTest: () => {
+      const victim =
+        allTanks.find((t) => t.stats.vehicleClass === 'normal' && !t.isHuman) ?? allTanks[1];
+      const od = victim.onDestroyed;
+      const ok = victim.onKillEvent;
+      victim.onDestroyed = null;
+      victim.onKillEvent = null;
+      const home = victim.position.clone();
+      const homeYaw = victim.hullYaw;
+      const checks: Record<string, unknown> = {};
+      const spot = new THREE.Vector3(0, world.getHeightAt(0, 0), 0);
+      const M = new THREE.Vector3();
+      const A = new THREE.Vector3();
+      const D = new THREE.Vector3();
+      const fresh = () => {
+        victim.respawnAt(spot, 0);
+        (victim as unknown as { spawnProtect: number }).spawnProtect = 0;
+      };
+      try {
+        // 1. Destroyed modules ignore further damage
+        fresh();
+        victim.debugDamageModule('engine', 999);
+        const e1 = victim.modules.get('engine')!.integrity;
+        victim.debugDamageModule('engine', 50);
+        const e2 = victim.modules.get('engine')!.integrity;
+        checks.destroyedModuleIgnoresDamage = e1 <= 0 && e2 === e1;
+
+        // 2. Crew knockout: < 2 living crew = out (non-catastrophic)
+        fresh();
+        victim.debugDamageModule('driver', 999);
+        victim.debugDamageModule('gunner', 999);
+        victim.debugDamageModule('commander', 999);
+        checks.crewKnockout = !victim.alive && victim.lastKillReason === 'CREW KNOCKED OUT';
+        fresh();
+        victim.debugDamageModule('driver', 999);
+        victim.debugDamageModule('gunner', 999);
+        victim.debugDamageModule('loader', 999);
+        checks.crewKOSecondTry = !victim.alive;
+
+        // 3. Ricochet at ~80 deg off the front face: no penetration, no internal damage
+        fresh();
+        const apfsds = TANK_STATS.normal.shells[0];
+        // Solve the intercept against the real hull AABB: dir ~ (-0.985,0,-0.173) is
+        // 80 deg off the +Z face normal; entry picked left-of-centre so the grazing
+        // ray crosses the front plane before any side plane.
+        victim.root.updateMatrixWorld(true);
+        const hb = new THREE.Box3().setFromObject(victim.rig.hullTiltGroup);
+        const ex = hb.min.x + (hb.max.x - hb.min.x) * 0.12;
+        const ey = hb.min.y + (hb.max.y - hb.min.y) * 0.55;
+        const ez = hb.max.z - 0.15;
+        D.set(-0.985, 0, -0.173).normalize();
+        const L = 60;
+        M.set(ex - D.x * L, ey - D.y * L, ez - D.z * L);
+        A.copy(M).addScaledVector(D, L - 1);
+        victim.takeDamage(apfsds.directDamage, A, M, D, 'cannon', apfsds, { attacker: null });
+        const rr = victim.lastXRayReport;
+        checks.ricochet80 = !!rr && rr.ricochet === true && rr.penetrated === false;
+        checks._ricochetDebug = rr
+          ? { zone: rr.armorZone, pen: rr.penetrated, ric: rr.ricochet, hits: rr.hitModules.length, entry: rr.entryLocal.map((v) => Math.round(v * 100) / 100), dir: rr.dirLocal.map((v) => Math.round(v * 100) / 100) }
+          : null;
+
+        // 4. 7.62 coax vs MBT front: never penetrates, never destroys a module
+        fresh();
+        let allOk = true;
+        let anyPen = false;
+        for (let i = 0; i < 15; i++) {
+          const ox = (i - 7) * 0.35;
+          M.set(spot.x + ox, spot.y + 1.4, spot.z + 60);
+          A.set(spot.x + ox * 0.5, spot.y + 1.4 + (i % 3) * 0.3, spot.z + 2.2);
+          D.subVectors(A, M).normalize();
+          const killed = victim.takeDamage(2.8, A, M, D, 'mg', undefined, { attacker: null });
+          void killed;
+          const rep = victim.lastXRayReport;
+          if (rep?.penetrated) anyPen = true;
+          for (const rt of victim.modules.values()) {
+            if (rt.integrity <= 0) allOk = false;
+          }
+        }
+        checks.coaxNeverPensMBT = !anyPen && allOk;
+
+        // 5. Fresh tanks of every class: all modules 'ok', crew full —
+        //    integrityScale is an incoming-damage multiplier, not a spawn
+        //    handicap, so mobility/dispersion penalties must not apply.
+        const spawnOK: Record<string, boolean> = {};
+        const seenCls = new Set<string>();
+        for (const t2 of allTanks) {
+          if (t2.isHuman) continue;
+          const cls = t2.stats.vehicleClass;
+          if (seenCls.has(cls)) continue;
+          seenCls.add(cls);
+          const od2 = t2.onDestroyed;
+          const ok2 = t2.onKillEvent;
+          t2.onDestroyed = null;
+          t2.onKillEvent = null;
+          const home2 = t2.position.clone();
+          const yaw2 = t2.hullYaw;
+          t2.respawnAt(spot, 0);
+          (t2 as unknown as { spawnProtect: number }).spawnProtect = 0;
+          let modulesOk = true;
+          for (const rt of t2.modules.values()) {
+            if (rt.integrity <= 0.6) { modulesOk = false; break; }
+          }
+          // mobility-affecting modules must all be ok -> no speed penalty;
+          // crew must be full -> no wounded-seat penalty either
+          spawnOK[cls] = modulesOk && t2.crewAlive === t2.crewTotal;
+          t2.onDestroyed = od2;
+          t2.onKillEvent = ok2;
+          t2.respawnAt(home2, yaw2);
+          (t2 as unknown as { spawnProtect: number }).spawnProtect = 0;
+        }
+        checks.freshTanksAllOk = seenCls.size === 5 && Object.values(spawnOK).every(Boolean);
+        checks._spawnOK = spawnOK;
+      } finally {
+        victim.onDestroyed = od;
+        victim.onKillEvent = ok;
+        victim.respawnAt(home, homeYaw);
+        (victim as unknown as { spawnProtect: number }).spawnProtect = 0;
+      }
+      const pass = Object.values(checks).every(Boolean);
+      return { pass, checks };
+    },
+
+    /** F4a balance matrix: attacker shell x victim class x aspect, 40 trials of
+     *  up-to-40 shots through the real takeDamage path. Returns pen% and
+     *  median shots-to-KO ('inf' when <50% of trials kill). */
+    damageMatrix: () => {
+      const TRIALS = 40;
+      const MAX_SHOTS = 40;
+      interface DMRow { attacker: string; victim: VehicleClass; aspect: string; penPct: number; medianKO: number | 'inf'; kos: number }
+      const shellList: { name: string; spec: ShellSpec | undefined; dmg: number; weapon: 'cannon' | 'mg' }[] = [
+        { name: 'APFSDS', spec: TANK_STATS.normal.shells[0], dmg: TANK_STATS.normal.shells[0].directDamage, weapon: 'cannon' },
+        { name: 'MBT-HE', spec: TANK_STATS.normal.shells[1], dmg: TANK_STATS.normal.shells[1].directDamage, weapon: 'cannon' },
+        { name: 'APCBC', spec: TANK_STATS.heavy.shells[0], dmg: TANK_STATS.heavy.shells[0].directDamage, weapon: 'cannon' },
+        { name: 'Hvy-HE', spec: TANK_STATS.heavy.shells[1], dmg: TANK_STATS.heavy.shells[1].directDamage, weapon: 'cannon' },
+        { name: 'APDS-T', spec: TANK_STATS.ifv.shells[0], dmg: TANK_STATS.ifv.shells[0].directDamage, weapon: 'cannon' },
+        { name: 'IFV-HEI', spec: TANK_STATS.ifv.shells[1], dmg: TANK_STATS.ifv.shells[1].directDamage, weapon: 'cannon' },
+        { name: 'M2-.50', spec: TANK_STATS.humvee.shells[0], dmg: TANK_STATS.humvee.shells[0].directDamage, weapon: 'cannon' },
+        { name: '7.62', spec: undefined, dmg: 2.8, weapon: 'mg' },
+        { name: 'Rkt-HE', spec: TANK_STATS.rocket.shells[0], dmg: TANK_STATS.rocket.shells[0].directDamage, weapon: 'cannon' },
+        { name: 'Rkt-AT', spec: TANK_STATS.rocket.shells[1], dmg: TANK_STATS.rocket.shells[1].directDamage, weapon: 'cannon' },
+      ];
+      const victimClasses: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket'];
+      const aspects = ['front', 'side', 'rear', 'top'] as const;
+      const victimOf = new Map<VehicleClass, Tank>();
+      for (const t of allTanks) {
+        if (!t.isHuman && !victimOf.has(t.stats.vehicleClass)) victimOf.set(t.stats.vehicleClass, t);
+      }
+      // Suppress wreck spawning + scoring while the matrix runs.
+      const saved = new Map<Tank, { od: Tank['onDestroyed']; ok: Tank['onKillEvent'] }>();
+      for (const v of victimOf.values()) {
+        saved.set(v, { od: v.onDestroyed, ok: v.onKillEvent });
+        v.onDestroyed = null;
+        v.onKillEvent = null;
+      }
+      const rows: DMRow[] = [];
+      const P = new THREE.Vector3();
+      const M = new THREE.Vector3();
+      const A = new THREE.Vector3();
+      const D = new THREE.Vector3();
+      const C = new THREE.Vector3();
+      const _dmLP = new THREE.Vector3();
+      try {
+        for (const sh of shellList) {
+          for (const vc of victimClasses) {
+            const victim = victimOf.get(vc);
+            if (!victim) continue;
+            const home = victim.position.clone();
+            const homeYaw = victim.hullYaw;
+            for (const aspect of aspects) {
+              const koShots: number[] = [];
+              let pens = 0;
+              for (let trial = 0; trial < TRIALS; trial++) {
+                P.set(0, world.getHeightAt(0, 0), 0);
+                victim.respawnAt(P, 0);
+                (victim as unknown as { spawnProtect: number }).spawnProtect = 0;
+                C.set(P.x, P.y + 1.4, P.z);
+                const reach = victim.stats.collisionRadius * 0.8;
+                // 'side' alternates flanks per trial so both crew sides are engaged
+                const sideSign = trial % 2 === 0 ? 1 : -1;
+                for (let shot = 1; shot <= MAX_SHOTS; shot++) {
+                  // Sample a uniformly random point on the entered face rectangle
+                  // (part-local bounds -> world via the part's matrix), muzzle 150 m out.
+                  {
+                    const db = victim.getDamageBounds();
+                    const useTurret = false; // face shots always enter the hull box first
+                    const mn = useTurret ? db.turretMin : db.hullMin;
+                    const sz = useTurret ? db.turretSize : db.hullSize;
+                    const part = useTurret ? (victim.rig.turretPivot as THREE.Object3D) : victim.rig.hullTiltGroup;
+                    part.updateWorldMatrix(true, false);
+                    const rx = Math.random(), ry = Math.random();
+                    // local face point: front=+Z max, rear=-Z min, side=+/-X, top=+Y max
+                    if (aspect === 'front') _dmLP.set(mn.x + sz.x * rx, mn.y + sz.y * ry, mn.z + sz.z);
+                    else if (aspect === 'rear') _dmLP.set(mn.x + sz.x * rx, mn.y + sz.y * ry, mn.z);
+                    else if (aspect === 'side') _dmLP.set(sideSign > 0 ? mn.x + sz.x : mn.x, mn.y + sz.y * ry, mn.z + sz.z * rx);
+                    else _dmLP.set(mn.x + sz.x * rx, mn.y + sz.y, mn.z + sz.z * ry); // top
+                    A.copy(_dmLP).applyMatrix4(part.matrixWorld);
+                    // 150 m standoff along the aspect direction + small lateral jitter
+                    if (aspect === 'front') M.set(A.x + (Math.random() - 0.5) * 2, A.y + (Math.random() - 0.5) * 1.5, A.z + 150);
+                    else if (aspect === 'rear') M.set(A.x + (Math.random() - 0.5) * 2, A.y + (Math.random() - 0.5) * 1.5, A.z - 150);
+                    else if (aspect === 'side') M.set(A.x + sideSign * 150, A.y + (Math.random() - 0.5) * 1.5, A.z + (Math.random() - 0.5) * 3);
+                    else M.set(A.x + (Math.random() - 0.5) * 2, A.y + 150, A.z + (Math.random() - 0.5) * 2);
+                  }
+                  D.subVectors(A, M).normalize();
+                  victim.takeDamage(sh.dmg, A, M, D, sh.weapon, sh.spec, { attacker: null });
+                  if (shot === 1 && victim.lastXRayReport?.penetrated) pens++;
+                  if (!victim.alive) { koShots.push(shot); break; }
+                }
+              }
+              koShots.sort((a, b) => a - b);
+              const koCount = koShots.length;
+              const medianKO =
+                koCount < Math.ceil(TRIALS * 0.5)
+                  ? ('inf' as const)
+                  : koCount % 2 === 1
+                    ? koShots[(koCount - 1) / 2]
+                    : Math.round((koShots[koCount / 2 - 1] + koShots[koCount / 2]) / 2);
+              rows.push({
+                attacker: sh.name,
+                victim: vc,
+                aspect,
+                penPct: Math.round((pens / TRIALS) * 1000) / 10,
+                medianKO,
+                kos: koCount,
+              });
+            }
+            victim.respawnAt(home, homeYaw);
+            (victim as unknown as { spawnProtect: number }).spawnProtect = 0;
+          }
+        }
+      } finally {
+        for (const [v, cb] of saved) {
+          v.onDestroyed = cb.od;
+          v.onKillEvent = cb.ok;
+        }
+      }
+      return { trials: TRIALS, maxShots: MAX_SHOTS, rows };
+    },
+
     guidedTest: () => {
       swapPlayerClassFn?.('rocket');
       const human = match.human;
@@ -1274,7 +1710,7 @@ async function bootstrap(): Promise<void> {
           guidedMinMiss:
             ballistics.guidedMinMiss === Infinity ? null : Math.round(ballistics.guidedMinMiss * 10) / 10,
           targetAlive: target.alive,
-          targetHp: Math.round(target.hp),
+          targetCrew: `${target.crewAlive}/${target.crewTotal}`,
         };
       };
 

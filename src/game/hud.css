@@ -1262,3 +1262,75 @@
   letter-spacing: 0.14em;
   text-transform: uppercase;
 }
+
+/* ---- F4b: vehicle parts block ---- */
+.fcs-parts-block .fcs-bar-header { margin-bottom: 2px; }
+.fcs-fire-strip {
+  margin: 2px 0 3px;
+  padding: 3px 6px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  text-align: center;
+  color: #0e0f0e;
+  background: var(--fcs-danger);
+}
+.fcs-parts-rows { display: flex; flex-direction: column; }
+.fcs-part-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 18px;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.fcs-part-label { color: var(--fcs-text-3); }
+.fcs-part-state { color: var(--fcs-text-3); }
+.fcs-part-state.is-damaged,
+.fcs-part-state.is-repair { color: var(--fcs-accent); }
+.fcs-part-state.is-destroyed { color: var(--fcs-danger); }
+.fcs-part-row.is-dead .fcs-part-label { color: var(--fcs-danger); }
+.fcs-crew-row { height: 26px; }
+.fcs-crew-pips { display: flex; gap: 6px; align-items: flex-end; }
+.fcs-crew-seat { display: flex; flex-direction: column; align-items: center; gap: 1px; }
+.fcs-crew-pip {
+  width: 9px;
+  height: 9px;
+  border: 1px solid var(--fcs-hairline-strong);
+  display: block;
+}
+.fcs-crew-pip.is-ok { background: var(--fcs-text); border-color: var(--fcs-text); }
+.fcs-crew-pip.is-wounded { background: var(--fcs-accent); border-color: var(--fcs-accent); }
+.fcs-crew-pip.is-out { background: transparent; border-color: var(--fcs-danger); }
+.fcs-crew-seat b {
+  font-size: 7px;
+  font-weight: 400;
+  letter-spacing: 0.05em;
+  color: var(--fcs-text-3);
+  line-height: 1;
+}
+.fcs-hit-result {
+  position: absolute;
+  left: 0;
+  top: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fcs-text);
+  text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+  opacity: 0;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.fcs-respawn-reason {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--fcs-danger);
+}

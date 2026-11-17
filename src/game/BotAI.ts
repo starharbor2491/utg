@@ -84,7 +84,7 @@ interface BotBrain {
   unstuckTimer: number;
   unstuckSteer: number;
 
-  lastHp: number;
+  lastHits: number;
   wasAlive: boolean;
 }
 
@@ -180,7 +180,7 @@ export class BotAIManager {
         stuckAccum: 0,
         unstuckTimer: 0,
         unstuckSteer: seed >= 0.5 ? 1 : -1,
-        lastHp: bot.hp,
+        lastHits: bot.hitCounter,
         wasAlive: bot.alive,
       };
       this.brains.set(bot.id, brain);
@@ -553,7 +553,7 @@ export class BotAIManager {
       const intent = this.intents.get(bot.id)!;
 
       // Detect respawn
-      if ((!brain.wasAlive && bot.alive) || bot.hp > brain.lastHp + 1) {
+      if ((!brain.wasAlive && bot.alive) || bot.hitCounter < brain.lastHits) {
         brain.state = 'advance';
         brain.alertTimer = 0;
         brain.losLockTimer = 0;
@@ -567,7 +567,7 @@ export class BotAIManager {
 
       if (!bot.alive) {
         brain.wasAlive = false;
-        brain.lastHp = 0;
+        brain.lastHits = bot.hitCounter;
         brain.state = 'advance';
         brain.target = null;
         brain.targetId = null;
@@ -579,11 +579,11 @@ export class BotAIManager {
         continue;
       }
 
-      // Detect incoming fire via HP drop
-      if (bot.hp < brain.lastHp - 0.01) {
+      // Detect incoming fire via damage events
+      if (bot.hitCounter > brain.lastHits) {
         brain.alertTimer = 16.0;
       }
-      brain.lastHp = bot.hp;
+      brain.lastHits = bot.hitCounter;
       brain.wasAlive = true;
 
       // Drop stale targets (died, same team, or beyond retention range)

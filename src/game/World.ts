@@ -992,10 +992,17 @@ export class World implements TerrainQuery {
           .replace(
             '#include <roughnessmap_fragment>',
             `float roughnessFactor = roughness;
-            // Soft noise-broken silt band along the banks (no repeating pattern)
+            // Smooth value-noise silt breakup along the banks (no grid cells, no repeating arcs)
             vec2 siltP = vWaterWorld.xz * 0.35;
-            float siltN = fract(sin(dot(floor(siltP), vec2(127.1, 311.7))) * 43758.5453);
-            siltN = mix(siltN, fract(sin(dot(floor(siltP * 2.7), vec2(269.5, 183.3))) * 28001.8384), 0.5);
+            vec2 siltCell = floor(siltP);
+            vec2 siltFr = fract(siltP);
+            siltFr = siltFr * siltFr * (3.0 - 2.0 * siltFr);
+            vec2 siltJit = vec2(127.1, 311.7);
+            float sA = fract(sin(dot(siltCell, siltJit)) * 43758.5453);
+            float sB = fract(sin(dot(siltCell + vec2(1.0, 0.0), siltJit)) * 43758.5453);
+            float sC = fract(sin(dot(siltCell + vec2(0.0, 1.0), siltJit)) * 43758.5453);
+            float sD = fract(sin(dot(siltCell + vec2(1.0, 1.0), siltJit)) * 43758.5453);
+            float siltN = mix(mix(sA, sB, siltFr.x), mix(sC, sD, siltFr.x), siltFr.y);
             float siltBreak = smoothstep(0.25, 0.75, siltN + vWaterBank * 0.35);
             diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.22, 0.20, 0.13), siltBreak * smoothstep(0.35, 0.9, vWaterBank) * 0.5);
             roughnessFactor = mix(roughnessFactor, 0.6, siltBreak * 0.3);`

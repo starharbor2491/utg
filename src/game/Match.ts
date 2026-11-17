@@ -105,10 +105,16 @@ export class Match {
     }
   }
 
+  /** KO-reason histogram across the match (AMMO DETONATION / FUEL EXPLOSION / CREW KNOCKED OUT / COOK-OFF). */
+  public readonly killReasons: Record<string, number> = {};
+
   onDamage(ev: DamageEvent): void {
     const victim = ev.victim;
     const attacker = ev.attacker;
-    if (!ev.killed || !attacker || attacker.team === victim.team) return;
+    if (!ev.killed) return;
+    const reason = ev.killReason ?? ev.xrayReport?.killReason ?? 'UNKNOWN';
+    this.killReasons[reason] = (this.killReasons[reason] ?? 0) + 1;
+    if (!attacker || attacker.team === victim.team) return;
     this.score[attacker.team]++;
     const accent = attacker.isHuman ? 'kill' : victim.isHuman ? 'death' : 'info';
     this._pushFeed(`${attacker.callsign} destroyed ${victim.callsign}`, accent, attacker, victim);

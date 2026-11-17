@@ -118,13 +118,16 @@ export interface ShellSpec {
     /** Burning wrecks can steal the seeker */
     decoyable: boolean;
   };
+  /** Penetration capability in mm of RHA-equivalent armour (APFSDS/HEAT/APDS;
+   *  small-arms and HE get low values). Absent = non-penetrating. */
+  penMm?: number;
+  /** Per-module damage on penetration: slug along path, spall cone. */
+  moduleDamage?: { slug: number; spall: number; spallCount: number };
 }
 
 export interface TankStats {
   vehicleClass: VehicleClass;
   displayName: string;
-  maxHp: number;
-  armorDamageMult: number;
   maxForwardSpeed: number;   // m/s
   maxReverseSpeed: number;   // m/s
   forwardAccel: number;      // m/s^2
@@ -183,19 +186,8 @@ export interface TankIntent {
   selectShell?: 0 | 1 | null;
 }
 
-export type ModuleId =
-  | 'track_left'
-  | 'track_right'
-  | 'engine'
-  | 'driver'
-  | 'ammo_hull'
-  | 'turret_ring'
-  | 'cannon_breech'
-  | 'gunner'
-  | 'loader'
-  | 'ammo_bustle';
-
-export type ModuleHealthState = 'ok' | 'damaged' | 'destroyed';
+export type { ModuleId, ModuleHealthState, CrewRole, ModulePart } from './DamageModel';
+import type { ModuleId, ModuleHealthState } from './DamageModel';
 
 export interface XRaySpallRay {
   start: [number, number, number];
@@ -214,6 +206,10 @@ export interface XRayModuleHitEntry {
 
 export interface ShellHitXRayReport {
   armorZone: string;
+  /** Shell defeated the effective armour on the entry face (internal damage possible). */
+  penetrated: boolean;
+  /** Shell ricocheted off the face (no internal damage). */
+  ricochet: boolean;
   killed: boolean;
   killReason: string | null;
   weapon: 'cannon' | 'mg';
@@ -231,8 +227,17 @@ export interface ShellHitXRayReport {
   hitModules: XRayModuleHitEntry[];
   /** Snapshot of all module states on the victim tank after impact */
   allModuleStates: Record<ModuleId, ModuleHealthState>;
-  hpRemaining: number;
-  maxHp: number;
+  /** Living crew count after impact (replaces hpRemaining/maxHp) */
+  crewAlive: number;
+  crewTotal: number;
+  /** Per-class module boxes in part-local metres for HitCam rendering */
+  moduleBoxes?: readonly {
+    id: ModuleId;
+    space: 'hull' | 'turret';
+    min: [number, number, number];
+    max: [number, number, number];
+    state: ModuleHealthState;
+  }[];
 }
 
 export interface TankEntity {
@@ -256,8 +261,11 @@ export interface TankEntity {
   /** Signed forward ground speed (m/s) */
   speed: number;
 
-  hp: number;
-  readonly maxHp: number;
+  /** Bumped on every damage event — bots use it for hit reactions (replaces hp deltas). */
+  hitCounter: number;
+  /** Living crew count / total crew (drives HUD "CREW n/m" and knock-out checks). */
+  crewAlive: number;
+  crewTotal: number;
   alive: boolean;
   respawnTimer: number;
 
@@ -265,6 +273,8 @@ export interface TankEntity {
   mgCooldown: number;
   mgHeat: number;
   mgOverheated: boolean;
+  /** Gun dispersion multiplier from module damage (damaged gun = 2.5). */
+  dispersionMult: number;
   selectedShellIndex: 0 | 1;
   readonly activeShell: ShellSpec;
   lastXRayReport: ShellHitXRayReport | null;
@@ -286,7 +296,13 @@ export interface TankEntity {
     attackerPos?: THREE.Vector3,
     shellDirWorld?: THREE.Vector3,
     weapon?: 'cannon' | 'mg',
-    shellSpec?: ShellSpec
+    shellSpec?: ShellSpec,
+    opts?: {
+      attacker?: TankEntity | null;
+      /** HE blast: world centre + radius; per-module falloff computed internally. */
+      blastCenter?: THREE.Vector3;
+      blastRadius?: number;
+    }
   ): boolean;
   respawnAt(pos: THREE.Vector3, yaw: number): void;
 }
@@ -309,6 +325,8 @@ export interface DamageEvent {
   hitPoint: THREE.Vector3;
   weapon: 'cannon' | 'mg';
   xrayReport?: ShellHitXRayReport | null;
+  /** KO reason for histogram/feed (falls back to xrayReport.killReason). */
+  killReason?: string | null;
 }
 
 export interface ScreenReticlePos {
@@ -357,8 +375,8 @@ export interface HUDTelemetry {
   hasCoaxMG: boolean;
   infiniteMG: boolean;
 
-  hp: number;
-  maxHp: number;
+  crewAlive: number;
+  crewTotal: number;
   alive: boolean;
   respawnRemaining: number;
 
@@ -412,6 +430,20 @@ export interface HUDTelemetry {
     kind: 'none' | 'hit' | 'kill';
     intensity: number; // 0..1
   };
+  /** Parts-panel rows for the player vehicle (module id, state, repair countdown). */
+  parts?: readonly { id: string; state: 'ok' | 'damaged' | 'destroyed'; repairSec: number }[];
+  /** Crew seat pips for the player vehicle. */
+  crewPips?: readonly { role: 'D' | 'G' | 'C' | 'L'; state: 'ok' | 'wounded' | 'out' }[];
+  /** Vehicle fire state for the parts panel strip. */
+  onFire: boolean;
+  /** Seconds until the extinguisher attempt while burning (-1 = none pending). */
+  fireExtSec: number;
+  /** Short result text of the player's latest hit (RICOCHET / NO PENETRATION / PENETRATION · …). */
+  hitResultText: string;
+  hitResultIntensity: number; // 0..1
+  /** Kill reason of the player's most recent death (for the respawn banner). */
+  deathReason: string | null;
+
   /** World azimuth (radians) where the most recent enemy hit came from, with fade 0..1 */
   incomingDamageArc: {
     fromWorldYaw: number;
