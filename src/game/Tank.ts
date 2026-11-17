@@ -606,6 +606,9 @@ export class Tank implements TankEntity {
   public speed = 0;
 
   public hitCounter = 0;
+  /** QA: last takeDamage internals (entry face, pen, modules hit). */
+  public dbgTakeDamage: { amount: number; entryPart: string | null; penetrated: boolean; ricochet: boolean; armorZone: string; modulesHit: number; aliveAfterBlast?: boolean; applied?: number } | null = null;
+  public dbgDamageCalls = 0;
   public crewAlive = 0;
   public crewTotal = 0;
   public alive = true;
@@ -688,10 +691,10 @@ export class Tank implements TankEntity {
   private salvoFired = 0;
   private _rocketsLeft = 0;
   private salvoSpec: ShellSpec | null = null;
-  private salvoGuideTarget: Tank | null = null;
+  private salvoGuideTarget: TankEntity | null = null;
 
   // Guided-munition seeker state (salvo classes only)
-  private seekerTarget: Tank | null = null;
+  private seekerTarget: TankEntity | null = null;
   private seekerProgress = 0;
   private seekerLocked = false;
   private seekerOffTimer = 0;
@@ -780,7 +783,8 @@ export class Tank implements TankEntity {
       onTrackDust?: (pos: THREE.Vector3, intensity01: number) => void;
       onWaterWake?: (pos: THREE.Vector3, intensity01: number) => void;
       onWreckSmoke?: (pos: THREE.Vector3) => void;
-    }
+    },
+    seekerExtras?: readonly TankEntity[]
   ): void {
     const safeDt = Math.min(dt, 0.05);
 
@@ -1140,7 +1144,7 @@ export class Tank implements TankEntity {
       intent &&
       (!this.salvoActive || this.stats.vehicleClass === 'support')
     ) {
-      this._updateSeeker(intent, world, allTanks, safeDt);
+      this._updateSeeker(intent, world, allTanks, safeDt, seekerExtras);
     }
 
     // Fire main cannon (Normal MBT & Heavy Tank) or rocket pod salvo (MLRS)
@@ -1406,7 +1410,8 @@ export class Tank implements TankEntity {
     intent: TankIntent,
     world: TerrainQuery,
     allTanks: readonly Tank[],
-    dt: number
+    dt: number,
+    extras?: readonly TankEntity[]
   ): void {
     const g = this.activeShell.guidance;
     if (!g) return;
@@ -1455,7 +1460,13 @@ export class Tank implements TankEntity {
     this.seekerScanTimer -= dt;
     if (this.seekerScanTimer <= 0 && !this.seekerLocked) {
       this.seekerScanTimer = 0.1;
-      const cand = this._scanSeekerCandidate(world, allTanks, g, coneCos);
+      let cand = this._scanSeekerCandidate(world, allTanks, g, coneCos);
+      if (extras && extras.length) {
+        const alt = this._scanSeekerCandidate(world, extras, g, coneCos);
+        if (alt && (!cand || this._seekerCandidateDot(alt, g, coneCos) > this._seekerCandidateDot(cand, g, coneCos))) {
+          cand = alt;
+        }
+      }
       if (cand !== this.seekerTarget) {
         this.seekerTarget = cand;
         this.seekerProgress = 0;
@@ -1473,7 +1484,7 @@ export class Tank implements TankEntity {
   }
 
   /** Cheap per-frame cone/range/alive test for the current seeker target. */
-  private _seekerInCone(t: Tank, g: NonNullable<ShellSpec['guidance']>, coneCos: number): boolean {
+  private _seekerInCone(t: TankEntity, g: NonNullable<ShellSpec['guidance']>, coneCos: number): boolean {
     if (!t.alive || t.team === this.team) return false;
     _seekTo.set(t.position.x, t.position.y + 1.5, t.position.z).sub(_seekOrigin);
     const dist = _seekTo.length();
@@ -1482,17 +1493,24 @@ export class Tank implements TankEntity {
     return _seekTo.dot(_seekDir) >= coneCos;
   }
 
+  /** Dot of candidate vs seeker aim dir (for preferring drone/tank candidates). */
+  private _seekerCandidateDot(t: TankEntity, _g: NonNullable<ShellSpec['guidance']>, _coneCos: number): number {
+    _seekTo.set(t.position.x, t.position.y + 1.5, t.position.z).sub(_seekOrigin);
+    const dist = _seekTo.length();
+    return dist > 0.001 ? _seekTo.dot(_seekDir) / dist : -1;
+  }
+
   /** 10 Hz scan: enemy nearest the aim ray inside cone+range with clear LOS. */
   private _scanSeekerCandidate(
     world: TerrainQuery,
-    allTanks: readonly Tank[],
+    allTanks: readonly TankEntity[],
     g: NonNullable<ShellSpec['guidance']>,
     coneCos: number
-  ): Tank | null {
+  ): TankEntity | null {
     // Top-2 by aim-ray angle (dot), then LOS-check in order
-    let best: Tank | null = null;
+    let best: TankEntity | null = null;
     let bestDot = coneCos;
-    let second: Tank | null = null;
+    let second: TankEntity | null = null;
     let secondDot = coneCos;
     for (let i = 0; i < allTanks.length; i++) {
       const t = allTanks[i];
@@ -1517,7 +1535,7 @@ export class Tank implements TankEntity {
       const dist = _seekTo.length();
       if (dist < 1) continue;
       _seekLos.copy(_seekTo).multiplyScalar(1 / dist);
-      const checkDist = Math.max(0.5, dist - cand.stats.hitRadius * 0.5 - 1);
+      const checkDist = Math.max(0.5, dist - (cand.stats?.hitRadius ?? 1.2) * 0.5 - 1);
       const hit = world.raycastWorld(_seekOrigin, _seekLos, checkDist);
       if (!hit) return cand;
       // Destructible brush < 12 m doesn't block the seeker
@@ -1799,6 +1817,7 @@ export class Tank implements TankEntity {
     // kill thresholds to scaling max integrity, but modules spawn 'ok').
     const scale = this.layout.integrityScale ?? 1;
     rt.integrity = Math.max(0, rt.integrity - dmg / scale);
+    this.dbgDamageCalls++;
     const destroyedNow = wasAlive && rt.integrity <= 0;
     if (rt.crew) this._recountCrew();
     if (destroyedNow) this._onModuleDestroyed(id);
@@ -1908,6 +1927,7 @@ export class Tank implements TankEntity {
     this._dkDamage = amount;
     this._dkShellSpec = shellSpec ?? null;
     this.hitCounter++;
+    this.dbgTakeDamage = { amount, entryPart: null, penetrated: false, ricochet: false, armorZone: 'PENDING', modulesHit: 0 };
     if (opts?.attacker && opts.attacker.team !== this.team) {
       this.lastAttacker = opts.attacker;
       this.lastDamageAt = this._clock;
@@ -1928,6 +1948,7 @@ export class Tank implements TankEntity {
     // ---------- HE blast path (splash victims / dedicated blast calls) ----------
     if (hasBlast && blastC && spec) {
       this._applyBlast(blastC, blastR, spec);
+      if (this.dbgTakeDamage) this.dbgTakeDamage.aliveAfterBlast = this.alive;
       if (!this.alive) { this._inTakeDamage = false; this._finishDamageReport(armorZone, weapon, spec, hitModules, spallRays, ex, ey, ez, penEnd, entryPart, ricochet, penetrated); return true; }
       // splash-only callers pass no shellDirWorld -> done after blast
       if (!shellDirWorld) {
@@ -2098,6 +2119,7 @@ export class Tank implements TankEntity {
     this._checkKO();
     const killed = !this.alive;
 
+    if (this.dbgTakeDamage) { this.dbgTakeDamage.entryPart = entryPart; this.dbgTakeDamage.penetrated = penetrated; this.dbgTakeDamage.ricochet = ricochet; this.dbgTakeDamage.armorZone = armorZone; this.dbgTakeDamage.modulesHit = hitModules.size; this.dbgTakeDamage.applied = this.dbgDamageCalls; }
     this._inTakeDamage = false;
     this._finishDamageReport(armorZone, weapon, spec, hitModules, spallRays, ex, ey, ez, penEnd, entryPart, ricochet, penetrated);
     void destroyedNow;

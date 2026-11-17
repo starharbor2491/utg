@@ -416,6 +416,19 @@ export interface HUDTelemetry {
   playerTeam: Team;
   fps: number;
 
+  /** F5b: present while the player's FPV drone is airborne — HUD switches
+   *  to the drone overlay and hides vehicle chrome. */
+  fpv?: {
+    battery: number;   // 0..1
+    speedKmh: number;
+    altM: number;
+    rangeM: number;
+    signalBars: number; // 1..5
+    weak: boolean;
+  };
+  /** Support slot-2 status for the vehicle panel: FPV READY / FPV n S / FPV AIRBORNE */
+  fpvSlotStatus?: string;
+
   /** Guided-munition seeker lock box (rocket class only; absent otherwise).
    *  Screen-space position is filled by main.ts each frame. */
   lockOn?: {

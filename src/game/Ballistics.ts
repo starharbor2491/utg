@@ -479,15 +479,41 @@ export class BallisticsManager {
   private readonly _gLosRate = new THREE.Vector3();
   private readonly _gAccel = new THREE.Vector3();
   private readonly _gPerp = new THREE.Vector3();
+  private readonly _tmpD = new THREE.Vector3();
 
   // QA metrics for guidedTest()
   public guidedHits = 0;
   public guidedDecoys = 0;
   public samLaunched = 0;
+  /** F5b: live drone list for counter-drone swept-segment checks. */
+  public droneTargets: readonly {
+    pos: THREE.Vector3;
+    hitRadius: number;
+    alive: boolean;
+    onShotDown: (() => void) | null;
+  }[] = [];
   public guidedMinMiss = Infinity;
   /** When set, every rocket shell tracks closest approach to this entity (miss metric). */
   public missProbeTarget: TankEntity | null = null;
   public missProbeMin = Infinity;
+
+  /** Swept segment vs drone positions; true when a drone was shot down. */
+  private _checkDroneHits(segLen: number): boolean {
+    if (!this.droneTargets.length) return false;
+    for (const dr of this.droneTargets) {
+      if (!dr.alive || !dr.onShotDown) continue;
+      this._tmpD.subVectors(dr.pos, this._prevPos);
+      const tt = THREE.MathUtils.clamp(this._tmpD.dot(this._segDir), 0, segLen);
+      this._tmpD.copy(this._prevPos).addScaledVector(this._segDir, tt);
+      const dx = this._tmpD.x - dr.pos.x, dy = this._tmpD.y - dr.pos.y, dz = this._tmpD.z - dr.pos.z;
+      const rr = dr.hitRadius;
+      if (dx * dx + dy * dy + dz * dz < rr * rr) {
+        dr.onShotDown();
+        return true;
+      }
+    }
+    return false;
+  }
 
   public resetGuidedStats(): void {
     this.guidedHits = 0;
@@ -979,6 +1005,11 @@ export class BallisticsManager {
       if (segLen < 1e-6) continue;
       this._segDir.multiplyScalar(1 / segLen);
 
+      if (this._checkDroneHits(segLen)) {
+        s.active = false;
+        continue;
+      }
+
       // Check living tank intersections
       let hitTank: TankEntity | null = null;
       let bestTankDist = Infinity;
@@ -1230,6 +1261,11 @@ export class BallisticsManager {
       const segLen = this._segDir.length();
       if (segLen < 1e-6) continue;
       this._segDir.multiplyScalar(1 / segLen);
+
+      if (this._checkDroneHits(segLen)) {
+        m.active = false;
+        continue;
+      }
 
       let hitTank: TankEntity | null = null;
       let bestTankDist = Infinity;

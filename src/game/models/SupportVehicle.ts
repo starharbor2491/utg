@@ -50,9 +50,11 @@ function bedMat(color: string, rough: number, metal: number, hRef = 1.9) {
 export function buildFpvDrone(): THREE.Group {
   const g = new THREE.Group();
   g.name = 'fpv_drone';
-  const frameMat = new THREE.MeshStandardMaterial({ color: '#22262a', roughness: 0.6, metalness: 0.5 });
-  const accentMat = new THREE.MeshStandardMaterial({ color: '#8a4a2a', roughness: 0.55, metalness: 0.3 });
-  const rotorMat = new THREE.MeshStandardMaterial({ color: '#0c0d0e', roughness: 0.9, metalness: 0.1, transparent: true, opacity: 0.55 });
+  // ~7-inch FPV: 0.35 m motor-to-motor (built at ~0.59 then scaled 0.6)
+  const frameMat = new THREE.MeshStandardMaterial({ color: '#2b2e33', roughness: 0.88, metalness: 0.25 });
+  const accentMat = new THREE.MeshStandardMaterial({ color: '#4a5238', roughness: 0.7, metalness: 0.2 }); // olive payload tube
+  const rotorMat = new THREE.MeshStandardMaterial({ color: '#141518', roughness: 0.9, metalness: 0.1, transparent: true, opacity: 0.5 });
+  const navMat = (c: string) => new THREE.MeshStandardMaterial({ color: '#111', emissive: new THREE.Color(c), emissiveIntensity: 2.2 });
   const armGeo = new THREE.BoxGeometry(0.62, 0.03, 0.05);
   for (const s of [-1, 1]) {
     const arm = new THREE.Mesh(armGeo, frameMat);
@@ -67,19 +69,35 @@ export function buildFpvDrone(): THREE.Group {
   payload.rotation.x = Math.PI / 2;
   payload.position.set(0, -0.06, 0.05);
   g.add(payload);
+  // red/green nav light pair on the front corners
+  for (const [sx, c] of [[-1, '#ff2a1a'], [1, '#2aff5a']] as const) {
+    const nav = new THREE.Mesh(new THREE.SphereGeometry(0.012, 6, 6), navMat(c));
+    nav.position.set(sx * 0.07, 0.09, 0.12);
+    g.add(nav);
+  }
   const motorGeo = new THREE.CylinderGeometry(0.028, 0.034, 0.05, 8);
-  const discGeo = new THREE.CircleGeometry(0.11, 20);
   for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as const) {
     const px = sx * 0.21;
     const pz = sz * 0.21;
     const motor = new THREE.Mesh(motorGeo, frameMat);
     motor.position.set(px, 0.05, pz);
     g.add(motor);
-    const disc = new THREE.Mesh(discGeo, rotorMat);
+    // rotor blur: 2-blade cross + translucent disc, spins around Y
+    const rotor = new THREE.Group();
+    rotor.position.set(px, 0.085, pz);
+    const bladeGeo = new THREE.BoxGeometry(0.22, 0.004, 0.02);
+    for (const a of [0, Math.PI / 2]) {
+      const blade = new THREE.Mesh(bladeGeo, rotorMat);
+      blade.rotation.y = a;
+      rotor.add(blade);
+    }
+    const disc = new THREE.Mesh(new THREE.CircleGeometry(0.11, 20), rotorMat);
     disc.rotation.x = -Math.PI / 2;
-    disc.position.set(px, 0.085, pz);
-    g.add(disc);
+    rotor.add(disc);
+    rotor.userData.isRotor = true;
+    g.add(rotor);
   }
+  g.scale.setScalar(0.6); // -> 0.35 m motor-to-motor
   return g;
 }
 
@@ -150,7 +168,23 @@ export function buildSupportVehicleRig(team: Team): InstantiatedTankRig {
   const dark = bedMat(isBlue ? '#333a26' : '#4c3f2a', 0.66, 0.24);
   const steel = bedMat('#2c2f2c', 0.45, 0.72);
   const black = bedMat('#141517', 0.7, 0.4);
-  const radarMat = bedMat(isBlue ? '#c8c4ae' : '#b8b4a0', 0.5, 0.35);
+
+  // Bed equipment forward of the turntable (hull-static, on the deck):
+  // generator box, cable reel, stowage rack.
+  const eb = makeBucket();
+  const deckY = 1.38;
+  eb.rbox(dark, 0.85, 0.62, 1.0, 0.04, -0.55, deckY + 0.31, 0.9);   // generator box
+  eb.box(black, 0.5, 0.06, 0.7, -0.55, deckY + 0.6, 1.0);          // gen lid vent
+  eb.cyl(steel, 0.34, 0.34, 0.34, 18, 0.45, deckY + 0.36, 1.35, 0, 0, Math.PI / 2); // cable reel
+  eb.cyl(black, 0.36, 0.36, 0.05, 18, 0.45, deckY + 0.36, 1.35, 0, 0, Math.PI / 2);
+  eb.cyl(dark, 0.1, 0.1, 0.42, 10, 0.45, deckY + 0.36, 1.35, 0, 0, Math.PI / 2);   // reel core
+  // stowage rack: two posts + shelf + crates
+  for (const rz of [0.35, 1.15]) eb.box(steel, 0.06, 0.85, 0.06, 0.78, deckY + 0.43, rz);
+  eb.box(steel, 0.06, 0.85, 0.06, 1.12, deckY + 0.43, 0.75);
+  eb.box(dark, 0.4, 0.05, 0.95, 0.95, deckY + 0.82, 0.75);
+  eb.rbox(paint, 0.3, 0.24, 0.4, 0.02, 0.95, deckY + 0.97, 0.55);
+  eb.rbox(dark, 0.26, 0.2, 0.34, 0.02, 0.95, deckY + 0.95, 0.95);
+  eb.flush(hullTiltGroup);
 
   // ---- turntable on the deck (same pivot as the rocket pod) ----
   const turretPivot = new THREE.Group();
@@ -185,14 +219,21 @@ export function buildSupportVehicleRig(team: Team): InstantiatedTankRig {
   drone.rotation.y = 0.5;
   turretPivot.add(drone);
 
-  // radar panel (spins via articulate)
-  const radarPanel = new THREE.Mesh(new RoundedBoxGeometry(0.72, 0.4, 0.05, 2, 0.02), radarMat);
+  // radar panel: dark olive flat-array with raised frame + recessed matte
+  // face carrying a fine grid of radiating elements (no bright face)
+  const radarPanel = new THREE.Group();
   radarPanel.position.set(0, BED.ringH + BED.drumH + 0.62, BED.mastZ);
-  radarPanel.castShadow = true;
   turretPivot.add(radarPanel);
-  const radarFace = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.3, 0.02), black);
-  radarFace.position.set(0, 0, 0.035);
-  radarPanel.add(radarFace);
+  const rb = makeBucket();
+  rb.box(steel, 0.78, 0.46, 0.04, 0, 0, -0.015);           // raised frame
+  rb.box(dark, 0.68, 0.36, 0.05, 0, 0, 0.005);            // recessed face plate
+  // radiating element grid on the face
+  for (let ix = -2; ix <= 2; ix++) {
+    for (let iy = -1; iy <= 1; iy++) {
+      rb.box(black, 0.09, 0.05, 0.012, ix * 0.13, iy * 0.1, 0.034);
+    }
+  }
+  rb.flush(radarPanel, true);
   let radarAngle = 0;
 
   // ---- elevating beam: sensor head + twin canisters ----

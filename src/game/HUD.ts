@@ -132,6 +132,11 @@ export class HUD {
   private readonly lkBracketsEl: SVGGElement;
   private readonly lkSquareEl: SVGRectElement;
   private readonly lkLabelEl: SVGTextElement;
+  private fpvEl: HTMLDivElement | null = null;
+  private fpvBatteryFillEl: HTMLDivElement | null = null;
+  private fpvStatsEl: HTMLDivElement | null = null;
+  private fpvSignalEl: HTMLDivElement | null = null;
+  private fpvVigEl: HTMLDivElement | null = null;
   private readonly killBannerEl: HTMLDivElement;
   private readonly damageArcEl: HTMLDivElement;
 
@@ -237,6 +242,8 @@ export class HUD {
     this.shellPillEls = vehicle.pillEls;
     this.shellCodeEls = vehicle.pillCodes;
     this.root.appendChild(this.vehiclePanelEl);
+    this.fpvEl = this.buildFpvOverlay();
+    this.root.appendChild(this.fpvEl);
 
     // 7. Bottom-Right 2D Cartographic Radar
     const radar = this.buildRadarPanel();
@@ -336,9 +343,25 @@ export class HUD {
     const safeDt = clamp(dt, 0, 0.25);
     this.elapsedSec += safeDt;
 
+    const fpv = telemetry.fpv ?? null;
+    if (this.fpvEl) this.fpvEl.classList.toggle('is-active', fpv !== null);
+    if (fpv) this.updateFpvOverlay(fpv);
+    if (fpv) {
+      // drone view: hide vehicle chrome, keep radar/minimap/scoreboard
+      this.vehiclePanelEl.style.display = 'none';
+      this.commanderAimEl.style.opacity = '0';
+      this.gunnerBoreEl.style.opacity = '0';
+      this.lockBoxEl.style.opacity = '0';
+      this.lkBracketsEl.style.opacity = '0';
+      this.lkSquareEl.style.opacity = '0';
+      this.lkLabelEl.style.opacity = '0';
+    } else {
+      this.vehiclePanelEl.style.display = '';
+    }
+
     this.updateReticlesAndOptics(telemetry);
     this.updateDamageEffects(telemetry);
-    this.updateVehiclePanel(telemetry);
+    if (!fpv) this.updateVehiclePanel(telemetry);
 
     // Throttle 2D minimap canvas redraw to ~30 Hz to save CPU
     this.radarAccum += safeDt;
@@ -350,6 +373,49 @@ export class HUD {
     this.updateRespawnBanner(telemetry);
     this.updateEventFeed(telemetry);
     this.updateScoreboard(telemetry);
+  }
+
+  private buildFpvOverlay(): HTMLDivElement {
+    const el = document.createElement('div');
+    el.className = 'fcs-fpv';
+    el.innerHTML = `
+      <div class="fcs-fpv-tag">FPV</div>
+      <div class="fcs-fpv-stats">
+        <div class="fcs-fpv-row"><span>BATT</span><div class="fcs-fpv-bar"><div class="fcs-fpv-bar-fill"></div></div><span class="fcs-fpv-val fcs-fpv-battv">100%</span></div>
+        <div class="fcs-fpv-row"><span>SPD</span><span class="fcs-fpv-val fcs-fpv-spd">0 km/h</span></div>
+        <div class="fcs-fpv-row"><span>ALT</span><span class="fcs-fpv-val fcs-fpv-alt">0 m</span></div>
+        <div class="fcs-fpv-row"><span>RNG</span><span class="fcs-fpv-val fcs-fpv-rng">0 m</span></div>
+      </div>
+      <div class="fcs-fpv-signal"><span class="fcs-fpv-sigl">SIGNAL</span><span class="fcs-fpv-bars"></span><span class="fcs-fpv-weak">WEAK SIGNAL</span></div>
+      <div class="fcs-fpv-x"></div>
+      <div class="fcs-fpv-hint">LMB DETONATE · RMB ABORT · W/S THROTTLE</div>
+      <div class="fcs-fpv-vig"></div>`;
+    this.fpvBatteryFillEl = el.querySelector('.fcs-fpv-bar-fill');
+    this.fpvStatsEl = el.querySelector('.fcs-fpv-stats');
+    this.fpvSignalEl = el.querySelector('.fcs-fpv-signal');
+    this.fpvVigEl = el.querySelector('.fcs-fpv-vig');
+    return el;
+  }
+
+  private updateFpvOverlay(f: NonNullable<HUDTelemetry['fpv']>): void {
+    const root = this.fpvEl;
+    if (!root) return;
+    const battPct = Math.round(f.battery * 100);
+    (root.querySelector('.fcs-fpv-battv') as HTMLElement).textContent = `${battPct}%`;
+    if (this.fpvBatteryFillEl) this.fpvBatteryFillEl.style.width = `${battPct}%`;
+    (root.querySelector('.fcs-fpv-spd') as HTMLElement).textContent = `${f.speedKmh} km/h`;
+    (root.querySelector('.fcs-fpv-alt') as HTMLElement).textContent = `${f.altM} m`;
+    (root.querySelector('.fcs-fpv-rng') as HTMLElement).textContent = `${f.rangeM} m`;
+    // signal bars
+    const barsEl = root.querySelector('.fcs-fpv-bars') as HTMLElement;
+    let barsHtml = '';
+    for (let i = 0; i < 5; i++) barsHtml += `<i class="${i < f.signalBars ? 'on' : ''}"></i>`;
+    if (barsEl.dataset.bars !== barsHtml) {
+      barsEl.dataset.bars = barsHtml;
+      barsEl.innerHTML = barsHtml;
+    }
+    root.classList.toggle('is-weak', f.weak);
+    if (this.fpvVigEl) this.fpvVigEl.style.opacity = f.weak ? '0.55' : '0';
   }
 
   private updateScoreboard(t: HUDTelemetry): void {
@@ -382,7 +448,7 @@ export class HUD {
   }
 
   private updateReticlesAndOptics(t: HUDTelemetry): void {
-    const showHudReticles = t.alive && !this.briefingVisible;
+    const showHudReticles = t.alive && !this.briefingVisible && !t.fpv;
 
     // 1. Commander Aim Circle (38px diameter)
     if (showHudReticles && t.commanderAim.visible) {
@@ -504,7 +570,7 @@ export class HUD {
     }
 
     // 5. Guided-munition seeker lock box
-    const lk = t.lockOn;
+    const lk = t.fpv ? undefined : t.lockOn;
     const showLock =
       Boolean(lk && lk.onScreen && lk.progress > 0.02) &&
       showHudReticles &&
@@ -756,7 +822,7 @@ export class HUD {
     let cannonBadge: 'ready' | 'reload' | 'neutral' = 'neutral';
     let cannonStr: string;
     if (t.vehicleClass === 'support' && t.activeShellIndex === 1) {
-      cannonStr = 'FPV · NEXT UPDATE';
+      cannonStr = t.fpvSlotStatus ?? 'FPV · NEXT UPDATE';
       cannonBadge = 'neutral';
     } else if (t.vehicleClass === 'rocket' || t.vehicleClass === 'support') {
       const ordnance = t.vehicleClass === 'support' ? 'SAM' : 'Rockets';

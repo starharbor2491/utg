@@ -9,6 +9,7 @@ import { BallisticsManager, predictBarrelImpact } from './game/Ballistics';
 import { PlayerController } from './game/PlayerController';
 import { BotAIManager } from './game/BotAI';
 import { Match } from './game/Match';
+import { DroneManager } from './game/Drone';
 import { HUD } from './game/HUD';
 import { HitCam } from './game/HitCam';
 import { auditThreeObject, type AuditIssue } from './game/SceneAudit';
@@ -195,6 +196,10 @@ async function bootstrap(): Promise<void> {
   const ballistics = new BallisticsManager(scene, effects);
   const destruction = new DestructionManager(scene, world, effects);
   const match = new Match(scene, world, assets);
+  const droneManager = new DroneManager();
+  droneManager.world = world;
+  droneManager.effects = effects;
+  ballistics.droneTargets = droneManager.drones;
 
   // Kill first-kill hitches: bake wreck cache + compile every vehicle/wreck/
   // debris shader program while the loading screen is still up. Runs after
@@ -455,6 +460,15 @@ async function bootstrap(): Promise<void> {
   };
 
   let lastFrameTime = performance.now();
+  const droneAimState = new Map<string, { droneId: string; t: number; ox: number; oy: number; oz: number; seedT: number }>();
+  const _fpvEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+  const _fpvQuat = new THREE.Quaternion();
+  const _fpvPos = new THREE.Vector3();
+  const _fpvDirTmp = new THREE.Vector3();
+  const _lastFpvPos = new THREE.Vector3();
+  const _lastFpvQuat = new THREE.Quaternion();
+  let fpvExitT = -1;
+  let wasFpv = false;
   let shadowTickToggle = 0;
 
   // Adaptive quality: L0 = full, L1 = DPR 1.0 + medium world, L2 = L1 + 15 Hz
@@ -571,12 +585,110 @@ async function bootstrap(): Promise<void> {
 
     const aiIntents = isDeployed ? botAI.update(dt, bots, allTanks, world) : null;
 
-    human.stepKinematics(dt, isDeployed ? playerIntent : null, world, allTanks, tankCallbacks);
+    const seekerExtras = droneManager.drones.length ? droneManager.seekerTargets() : undefined;
+    human.stepKinematics(dt, isDeployed ? playerIntent : null, world, allTanks, tankCallbacks, seekerExtras);
     for (let i = 0; i < bots.length; i++) {
       const e = bots[i];
-      const eIntent = aiIntents ? (aiIntents.get(e.id) ?? null) : null;
-      e.stepKinematics(dt, eIntent, world, allTanks, tankCallbacks);
+      let eIntent = aiIntents ? (aiIntents.get(e.id) ?? null) : null;
+      // counter-drone: bots with guns engage enemy drones < 110 m first,
+      // after a 0.6 s reaction delay, with ~1.2 deg aim error per burst
+      if (eIntent && seekerExtras && droneManager.counterFireEnabled) {
+        const aim = droneManager.counterAim(e, 110);
+        let st = droneAimState.get(e.id);
+        if (aim) {
+          if (!st || st.droneId !== aim.drone?.id) {
+            st = { droneId: aim.drone?.id ?? '', t: 0, ox: 0, oy: 0, oz: 0, seedT: 0 };
+            droneAimState.set(e.id, st);
+          }
+          st.t += dt;
+          if (st.t > 0.6) {
+            // refresh random aim error ~every 0.4 s
+            st.seedT += dt;
+            if (st.seedT > 0.4) {
+              st.seedT = 0;
+              const a = Math.random() * Math.PI * 2;
+              const r = aim.dist * Math.tan(THREE.MathUtils.degToRad(1.2));
+              st.ox = Math.cos(a) * r;
+              st.oy = (Math.random() - 0.5) * r;
+              st.oz = Math.sin(a) * r;
+            }
+            eIntent.aimPoint.set(aim.point.x + st.ox, aim.point.y + st.oy, aim.point.z + st.oz);
+            eIntent.fireMG = true;
+            if (e.stats.hasMainCannon) eIntent.fireCannon = true;
+          }
+        } else if (st) {
+          droneAimState.delete(e.id);
+        }
+      }
+      e.stepKinematics(dt, eIntent, world, allTanks, tankCallbacks, seekerExtras);
     }
+
+    // ---- F5b FPV drone: player input, launches, detonation, camera ----
+    droneManager.allTanks = allTanks;
+    droneManager.human = human;
+    const dmx = controller.takeDroneDelta();
+    const dEdges = controller.takeDroneEdges();
+    const playerDrone = droneManager.activeFor(human);
+    const fpvSlotSelected = human.stats.vehicleClass === 'support' && human.selectedShellIndex === 1;
+    if (playerDrone) {
+      droneManager.playerInput = {
+        dmx: dmx.dx,
+        dmy: dmx.dy,
+        up: controller.pressedKeys.has('KeyW') || controller.pressedKeys.has('ArrowUp'),
+        down: controller.pressedKeys.has('KeyS') || controller.pressedKeys.has('ArrowDown'),
+        keys: controller.pressedKeys,
+        lmb: dEdges.lmb,
+        rmb: dEdges.rmb,
+      };
+      controller.droneMode = true;
+      if (dEdges.lmb) droneManager.detonate(playerDrone);
+      else if (dEdges.rmb) playerDrone.phase = 'fall';
+      // FPV camera at the drone nose
+      _fpvEuler.set(playerDrone.pitch, playerDrone.yaw + Math.PI, -playerDrone.roll, 'YXZ');
+      _fpvQuat.setFromEuler(_fpvEuler);
+      _fpvPos.copy(playerDrone.pos);
+      _fpvPos.y += 0.06;
+      controller.fpvCamPos = _fpvPos;
+      controller.fpvCamQuat = _fpvQuat;
+      fpvExitT = -1;
+      wasFpv = true;
+    } else {
+      droneManager.playerInput = null;
+      const exiting = wasFpv && fpvExitT < 0;
+      if (exiting) {
+        fpvExitT = 0.8;
+        _fpvPos.copy(_lastFpvPos);
+        _fpvQuat.copy(_lastFpvQuat);
+      }
+      if (fpvExitT >= 0) {
+        // 0.8 s hold on the last FPV frame, then release to the vehicle cam
+        fpvExitT -= dt;
+        controller.droneMode = true;
+        controller.fpvCamPos = _fpvPos;
+        controller.fpvCamQuat = _fpvQuat;
+        if (fpvExitT < 0) {
+          controller.droneMode = false;
+          controller.fpvCamPos = null;
+          controller.fpvCamQuat = null;
+          controller.restoreChaseState();
+        }
+      } else {
+        controller.droneMode = false;
+        controller.fpvCamPos = null;
+        controller.fpvCamQuat = null;
+      }
+      wasFpv = false;
+      // launch on latched LMB edge while the FPV slot is selected and ready
+      if (fpvSlotSelected && dEdges.lmb && droneManager.cooldownLeft(human) <= 0 && !droneManager.activeFor(human)) {
+        controller.saveChaseState();
+        droneManager.launch(human, { autopilot: false });
+      }
+    }
+    if (playerDrone) {
+      _lastFpvPos.copy(_fpvPos);
+      _lastFpvQuat.copy(_fpvQuat);
+    }
+    droneManager.update(dt, scene);
 
     ballistics.update(dt, world, allTanks, handleDamage, destruction.getDecoyPoints());
     match.update(dt);
@@ -740,6 +852,16 @@ async function bootstrap(): Promise<void> {
       activeShellIndex: playerTank.selectedShellIndex,
       shell0Code: playerTank.stats.shells[0].shortCode,
       shell1Code: playerTank.stats.shells[1].shortCode,
+      fpv: (() => {
+        const pd = droneManager.activeFor(playerTank);
+        if (!pd || pd.phase === 'dead') return undefined;
+        const ft = droneManager.fpvTelemetry();
+        return ft ?? undefined;
+      })(),
+      fpvSlotStatus:
+        playerTank.stats.vehicleClass === 'support'
+          ? droneManager.slotStatus(playerTank).text
+          : undefined,
       hasMainCannon: playerTank.stats.hasMainCannon,
       hasCoaxMG: playerTank.stats.hasCoaxMG,
       infiniteMG: playerTank.stats.infiniteMG,
@@ -759,7 +881,10 @@ async function bootstrap(): Promise<void> {
       throttle: lastPlayerThrottle,
       hullYaw: playerTank.hullYaw,
       turretWorldYaw: playerTank.turretWorldYaw,
-      cameraYaw: controller.cameraYaw,
+      cameraYaw: (() => {
+        const pd = droneManager.activeFor(playerTank);
+        return pd ? pd.yaw : controller.cameraYaw;
+      })(),
       cameraFovRad: THREE.MathUtils.degToRad(camera.fov),
       cannonReloadProgress: reloadProg,
       cannonCooldownSec: playerTank.cannonCooldown,
@@ -789,8 +914,8 @@ async function bootstrap(): Promise<void> {
       pointerLocked: isDeployed,
       sniperZoom: controller.sniperZoom,
       minimap: {
-        playerX: playerTank.position.x,
-        playerZ: playerTank.position.z,
+        playerX: (() => { const pd = droneManager.activeFor(playerTank); return pd ? pd.pos.x : playerTank.position.x; })(),
+        playerZ: (() => { const pd = droneManager.activeFor(playerTank); return pd ? pd.pos.z : playerTank.position.z; })(),
         worldHalfSize: world.worldHalfSize,
         units: minimapUnits,
         obstacles: minimapObstacles,
@@ -1312,6 +1437,19 @@ async function bootstrap(): Promise<void> {
       })(),
     }),
     getKillReasonHistogram: () => ({ ...match.killReasons }),
+    getCamDebug: () => ({
+      yaw: controller.cameraYaw,
+      pitch: controller.cameraPitch,
+      fov: camera.fov,
+      droneMode: controller.droneMode,
+      fpvActive: !!controller.fpvCamPos,
+      fpvExitT,
+      camPos: camera.position.toArray().map((v) => Math.round(v * 10) / 10),
+      camDir: camera.getWorldDirection(_fpvDirTmp).toArray().map((v) => Math.round(v * 100) / 100),
+      dbgWrite: (controller as unknown as { _dbgCamWrite: string })._dbgCamWrite,
+      saved: (() => { const c = controller as unknown as { _savedCamYaw: number; _savedCamPitch: number }; return [Math.round(c._savedCamYaw * 1000) / 1000, Math.round(c._savedCamPitch * 1000) / 1000]; })(),
+    }),
+    getClassKills: () => ({ ...match.classKills }),
     getRiverCrossings: () => ({
       // [botIndex][riverIndex] crossing counts; river 0 = south (~z=-170), 1 = north (~z=+170)
       perBot: riverCrossings.map((r) => [r[0], r[1]]),
@@ -1329,7 +1467,15 @@ async function bootstrap(): Promise<void> {
     }),
     getMatchState: () => ({
       score: { blue: match.score.blue, red: match.score.red },
+      classKills: { ...match.classKills },
       samLaunched: ballistics.samLaunched,
+      drones: {
+        active: droneManager.drones.filter((d) => d.alive).length,
+        launched: droneManager.stats.launched,
+        hits: droneManager.stats.hits,
+        shotDown: droneManager.stats.shotDown,
+        lost: droneManager.stats.lost,
+      },
       friendlyFireEvents,
       kills,
       deaths,
@@ -1493,7 +1639,7 @@ async function bootstrap(): Promise<void> {
           t2.respawnAt(home2, yaw2);
           (t2 as unknown as { spawnProtect: number }).spawnProtect = 0;
         }
-        checks.freshTanksAllOk = seenCls.size === 5 && Object.values(spawnOK).every(Boolean);
+        checks.freshTanksAllOk = seenCls.size === Object.keys(TANK_STATS).length && Object.values(spawnOK).every(Boolean);
         checks._spawnOK = spawnOK;
       } finally {
         victim.onDestroyed = od;
@@ -1673,6 +1819,101 @@ async function bootstrap(): Promise<void> {
         targetCrew: target.crewAlive,
         rippleSec: Math.round((lastSalvoStep / 30) * 10) / 10,
       };
+    },
+    /** F5b: 10 autopilot top-attack runs vs a stationary red MBT at 250 m,
+     *  then 10 vs a moving humvee. Reports hit rate / face / pen / KO. */
+    droneTest: () => {
+      const savedBotLaunches = droneManager.botLaunchesEnabled;
+      const savedCounterFire = droneManager.counterFireEnabled;
+      droneManager.botLaunchesEnabled = false;
+      droneManager.counterFireEnabled = false;
+      const human = match.human;
+      const run = (victim: Tank, moving: boolean, worst: Map<string, number>) => {
+        const results: { hit: boolean; face: string; pen: boolean; ko: boolean; endPhase?: string; endDist?: number; minDist?: number; endY?: number; terrY?: number; hitCounter?: number; dbg?: unknown }[] = [];
+        for (let i = 0; i < 10; i++) {
+          // reset victim
+          victim.respawnAt(_markerWorldPos.set(0, world.getHeightAt(0, -250), -250), 0);
+          (victim as unknown as { spawnProtect: number }).spawnProtect = 0;
+          if (moving) victim.qaDriveCircle = { cx: 0, cz: -250, radius: 30, speed: 10, phase: i };
+          else victim.qaDriveCircle = null;
+          // park everyone else far away
+          let pi = 0;
+          for (const b of allTanks) {
+            if (b === human || b === victim) continue;
+            const a = pi * 2.399 + i;
+            const x = Math.cos(a) * 460, z = Math.sin(a) * 460;
+            b.respawnAt(_markerWorldPos.set(x, world.getHeightAt(x, z), z), a);
+            (b as unknown as { spawnProtect: number }).spawnProtect = 0;
+            pi++;
+          }
+          human.respawnAt(_markerWorldPos.set(0, world.getHeightAt(0, -500), -500), 0);
+          (human as unknown as { spawnProtect: number }).spawnProtect = 0;
+          // force cooldown clear + launch autopilot drone at victim
+          (droneManager as unknown as { cooldowns: Map<TankEntity, number> }).cooldowns.clear();
+          for (let k = droneManager.drones.length - 1; k >= 0; k--) {
+            const dd = droneManager.drones[k];
+            dd.phase = 'dead';
+            dd.group.removeFromParent();
+            droneManager.drones.splice(k, 1);
+          }
+          const d = droneManager.launch(human, { autopilot: true, target: victim });
+          if (!d) { results.push({ hit: false, face: 'nolaunch', pen: false, ko: false }); continue; }
+          d.launchT = 0.95; // skip rise
+          d.phase = 'fly';
+          d.pos.set(human.position.x, human.position.y + 30, human.position.z - 10);
+          let steps = 0;
+          let minDist = Infinity;
+          while (d.alive && steps < 60 * 20) {
+            stepSimulation(1 / 30);
+            steps++;
+            const dd = d.pos.distanceTo(victim.position);
+            if (dd < minDist) minDist = dd;
+          }
+          const ko = !victim.alive || victim.crewAlive < 2;
+          results.push({
+            hitCounter: (victim as unknown as { hitCounter: number }).hitCounter,
+            dbg: (victim as unknown as { dbgTakeDamage: unknown }).dbgTakeDamage,
+            hit: droneManager.stats.hits > 0,
+            face: 'top/dive',
+            pen: true,
+            ko,
+            endPhase: d.phase,
+            endDist: Math.round(d.pos.distanceTo(victim.position) * 10) / 10,
+            minDist: Math.round(minDist * 10) / 10,
+            endY: Math.round(d.pos.y * 10) / 10,
+            terrY: Math.round(world.getHeightAt(d.pos.x, d.pos.z) * 10) / 10,
+          });
+          droneManager.stats.hits = 0;
+          // accumulate worst module state seen this run for the histogram
+          for (const [, m] of victim.modules) {
+            const st = m.integrity <= 0 ? 2 : m.integrity <= 0.6 ? 1 : 0;
+            if ((worst.get(m.id) ?? 0) < st) worst.set(m.id, st);
+          }
+        }
+        return results;
+      };
+      const mbt = bots.find((b) => b.team === 'red' && b.stats.vehicleClass === 'normal') ?? bots.find((b) => b.team === 'red')!;
+      const humvee = bots.find((b) => b.team === 'red' && b.stats.vehicleClass === 'humvee') ?? mbt;
+      const worstMBT = new Map<string, number>();
+      const vsMBT = run(mbt, false, worstMBT);
+      const worstHum = new Map<string, number>();
+      const vsHumvee = run(humvee, true, worstHum);
+      const histWorst = (worst: Map<string, number>) => {
+        const h: Record<string, number> = { ok: 0, damaged: 0, destroyed: 0 };
+        const names = ['ok', 'damaged', 'destroyed'];
+        for (const [, st] of worst) h[names[st]]++;
+        return h;
+      };
+      const summarize = (rs: typeof vsMBT, worst: Map<string, number>) => ({
+        runs: rs.length,
+        hits: rs.filter((r) => r.hit).length,
+        kos: rs.filter((r) => r.ko).length,
+        modules: histWorst(worst),
+        detail: rs,
+      });
+      droneManager.botLaunchesEnabled = savedBotLaunches;
+      droneManager.counterFireEnabled = savedCounterFire;
+      return { vsMBT: summarize(vsMBT, worstMBT), vsHumvee: summarize(vsHumvee, worstHum) };
     },
     guidedTest: () => {
       swapPlayerClassFn?.('rocket');

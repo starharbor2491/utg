@@ -26,6 +26,22 @@ export class PlayerController {
   private readonly keysDown = new Set<string>();
   private mouseLeftDown = false;
   private mouseRightDown = false;
+  /** F5b: while a player FPV drone is airborne the mouse drives the drone,
+   *  the vehicle brakes, and the camera sits at the drone. */
+  public droneMode = false;
+  public fpvCamPos: THREE.Vector3 | null = null;
+  public fpvCamQuat: THREE.Quaternion | null = null;
+  private _droneDX = 0;
+  private _droneDY = 0;
+  private _edgeLmb = false;
+  private _edgeRmb = false;
+  /** Per-frame click edges (set by mousedown, cleared each update) — quick
+   *  clicks that down+up inside one frame still register once. */
+  public frameLmb = false;
+  public frameRmb = false;
+  public get pressedKeys(): ReadonlySet<string> {
+    return this.keysDown;
+  }
 
   private _cameraYaw = 0;
   private _cameraPitch = -0.06;
@@ -64,6 +80,8 @@ export class PlayerController {
   private readonly _anchor = new THREE.Vector3();
   private readonly _baseCamPos = new THREE.Vector3();
   private readonly _finalCamPos = new THREE.Vector3();
+  private readonly _holdPos = new THREE.Vector3();
+  private readonly _holdDir = new THREE.Vector3();
   private readonly _rayOrigin = new THREE.Vector3();
   private readonly _camOffsetDir = new THREE.Vector3();
   private readonly _camRight = new THREE.Vector3();
@@ -154,9 +172,13 @@ export class PlayerController {
       this.lastDragY = e.clientY;
       if (e.button === 0 && !clickedInteractiveUI) {
         this.mouseLeftDown = true;
+        this._edgeLmb = true;
       } else if (e.button === 2) {
         e.preventDefault();
         this.mouseRightDown = true;
+        if (this.droneMode) {
+          this._edgeRmb = true;
+        } else {
         this.rmbZoomDownTime = performance.now();
         if (!this._sniperZoom) {
           this._sniperZoom = true;
@@ -164,6 +186,7 @@ export class PlayerController {
         } else {
           this._sniperZoom = false;
           this.rmbTurnedZoomOn = false;
+        }
         }
       } else if (e.button === 1) {
         e.preventDefault();
@@ -199,6 +222,12 @@ export class PlayerController {
         this.lastDragX = e.clientX;
         this.lastDragY = e.clientY;
       } else {
+        return;
+      }
+
+      if (this.droneMode) {
+        this._droneDX += dx;
+        this._droneDY += dy;
         return;
       }
 
@@ -345,6 +374,10 @@ export class PlayerController {
     shakeTrauma: number
   ): TankIntent {
     const safeDt = Math.min(Math.max(dt, 0.0001), 0.08);
+    this.frameLmb = this._edgeLmb;
+    this.frameRmb = this._edgeRmb;
+    this._edgeLmb = false;
+    this._edgeRmb = false;
 
     // First-frame or post-respawn teleport snap
     if (!this.initialized) {
@@ -515,6 +548,15 @@ export class PlayerController {
       shakeRoll = s3 * 0.020 * shakeAmt;
     }
 
+    if (this.fpvCamPos && this.fpvCamQuat) {
+      this.camera.position.copy(this.fpvCamPos);
+      this.camera.quaternion.copy(this.fpvCamQuat);
+      if (Math.abs(this.camera.fov - 95) > 0.01) {
+        this.camera.fov = 95;
+        this.camera.updateProjectionMatrix();
+      }
+      this.camera.updateMatrixWorld();
+    } else {
     this.camera.position.copy(this._finalCamPos);
     this.camera.up.set(0, 1, 0);
 
@@ -531,6 +573,7 @@ export class PlayerController {
       this.camera.rotateZ(shakeRoll);
     }
     this.camera.updateMatrixWorld();
+    }
 
     // Build player TankIntent
     if (!playerTank.alive) {
@@ -540,6 +583,20 @@ export class PlayerController {
       this.intent.aimPoint.copy(this.commanderAimWorld);
       this.intent.fireCannon = false;
       this.intent.fireMG = false;
+      return this.intent;
+    }
+
+    if (this.droneMode) {
+      // Vehicle brakes to a stop and holds its turret while the drone flies.
+      this.intent.throttle = 0;
+      this.intent.steer = 0;
+      this.intent.brake = true;
+      this.intent.fireCannon = false;
+      this.intent.fireMG = false;
+      this.intent.selectShell = null;
+      // hold turret: aim at a point along the current muzzle line
+      playerTank.getMuzzleWorld(this._holdPos, this._holdDir);
+      this.intent.aimPoint.copy(this._holdPos).addScaledVector(this._holdDir, 80);
       return this.intent;
     }
 
@@ -573,6 +630,41 @@ export class PlayerController {
       activeControl && (this.keysDown.has('Space') || this.keysDown.has('KeyC'));
 
     return this.intent;
+  }
+
+  /** Consume accumulated mouse pixel deltas for drone control. */
+  public takeDroneDelta(): { dx: number; dy: number } {
+    const out = { dx: this._droneDX, dy: this._droneDY };
+    this._droneDX = 0;
+    this._droneDY = 0;
+    return out;
+  }
+
+  /** Edge-triggered drone buttons (LMB detonate / RMB abort) — per-frame
+   *  latched edges so instant clicks register. */
+  public takeDroneEdges(): { lmb: boolean; rmb: boolean } {
+    return { lmb: this.frameLmb, rmb: this.frameRmb };
+  }
+
+  // ---- chase-camera state save/restore across FPV ----
+  private _savedCamYaw = 0;
+  private _savedCamPitch = 0;
+  private _savedSniper = false;
+  private _savedTpDist = 0;
+  public saveChaseState(): void {
+    this._savedCamYaw = this._cameraYaw;
+    this._savedCamPitch = this._cameraPitch;
+    this._dbgCamWrite = `save (${this._cameraYaw.toFixed(3)},${this._cameraPitch.toFixed(3)})`;
+    this._savedSniper = this._sniperZoom;
+    this._savedTpDist = this.tpDistance;
+  }
+  public _dbgCamWrite = '';
+  public restoreChaseState(): void {
+    this._cameraYaw = this._savedCamYaw;
+    this._cameraPitch = this._savedCamPitch;
+    this._dbgCamWrite = `restore saved=(${this._savedCamYaw.toFixed(3)},${this._savedCamPitch.toFixed(3)})`;
+    this._sniperZoom = this._savedSniper;
+    this.tpDistance = this._savedTpDist;
   }
 
   public dispose(): void {
