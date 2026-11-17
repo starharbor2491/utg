@@ -353,7 +353,7 @@ export interface HUDTelemetry {
     intensity: number; // 0..1
   };
   /** Recent kill/event feed notifications */
-  feedMessages: readonly { id: number; text: string; age: number; accent: 'kill' | 'death' | 'info' }[];
+  feedMessages: readonly { id: number; text: string; age: number; accent: 'kill' | 'death' | 'info'; actorName?: string; actorTeam?: Team; targetName?: string; targetTeam?: Team }[];
 
   pointerLocked: boolean;
   sniperZoom: boolean;

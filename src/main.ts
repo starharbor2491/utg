@@ -46,43 +46,35 @@ function projectWorldToScreen(
 }
 
 function markerCodeForClass(cls: VehicleClass): string {
-  if (cls === 'heavy') return 'HEAVY';
+  if (cls === 'heavy') return 'Heavy';
   if (cls === 'ifv') return 'IFV';
-  if (cls === 'humvee') return 'HUMVEE';
-  if (cls === 'rocket') return 'MLRS';
+  if (cls === 'humvee') return 'Humvee';
+  if (cls === 'rocket') return 'Rocket';
   return 'MBT';
 }
 
 function buildUnitMarker(isAlly: boolean, callsign: string, cls: VehicleClass): UnitMarkerDOM {
-  const teamColor = isAlly ? '#8fb4d8' : '#d94636';
-  const topRowColor = isAlly ? '#bcd6ee' : '#f0b6ad';
-
   const el = document.createElement('div');
-  el.style.cssText =
-    'position:absolute;left:0;top:0;transform:translate(-50%,-100%);display:none;flex-direction:column;align-items:center;gap:2px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums;text-shadow:0 1px 2px rgba(0,0,0,0.95);';
+  el.className = `fcs-unit-marker${isAlly ? ' is-ally' : ' is-enemy'}`;
 
   const topRow = document.createElement('div');
-  topRow.style.cssText = `display:flex;align-items:center;gap:5px;font-size:${isAlly ? 9 : 10}px;font-weight:700;letter-spacing:0.06em;color:${topRowColor};`;
+  topRow.className = 'fcs-um-top';
 
   const codeEl = document.createElement('span');
+  codeEl.className = 'fcs-um-code';
   codeEl.textContent = isAlly ? callsign : markerCodeForClass(cls);
   const distEl = document.createElement('span');
-  distEl.style.color = '#eae6dc';
-  distEl.style.opacity = '0.85';
+  distEl.className = 'fcs-um-dist';
   topRow.append(codeEl, distEl);
 
   const barTrackEl = document.createElement('div');
-  barTrackEl.style.cssText = isAlly
-    ? 'display:none;'
-    : `width:38px;height:3px;background:rgba(16,19,15,0.85);border:1px solid ${isAlly ? 'rgba(143,180,216,0.55)' : 'rgba(217,70,54,0.55)'};`;
+  barTrackEl.className = 'fcs-um-bar';
   const barFillEl = document.createElement('div');
-  barFillEl.style.cssText = `width:100%;height:100%;background:${teamColor};`;
+  barFillEl.className = 'fcs-um-bar-fill';
   barTrackEl.appendChild(barFillEl);
 
   const diamond = document.createElement('div');
-  diamond.style.cssText = isAlly
-    ? 'width:6px;height:6px;border:1.5px solid #8fb4d8;transform:rotate(45deg);margin-top:2px;background:rgba(143,180,216,0.30);'
-    : 'width:7px;height:7px;border:1.5px solid #d94636;transform:rotate(45deg);margin-top:2px;background:rgba(217,70,54,0.28);';
+  diamond.className = 'fcs-um-diamond';
 
   el.dataset.unitMarker = isAlly ? 'ally' : 'enemy';
   el.append(topRow, barTrackEl, diamond);
@@ -126,13 +118,13 @@ async function bootstrap(): Promise<void> {
       controllerRef.requestLock();
       hud.setBriefingVisible(false);
     },
-    onQualityChange: () => {},
     onSelectVehicleClass: (cls) => {
       swapPlayerClassFn?.(cls);
     },
   });
 
   const markerLayer = document.createElement('div');
+  markerLayer.className = 'fcs-marker-layer';
   markerLayer.style.cssText =
     'position:fixed;inset:0;pointer-events:none;overflow:hidden;z-index:2;';
   hudRoot.appendChild(markerLayer);
@@ -214,17 +206,11 @@ async function bootstrap(): Promise<void> {
       kind: o.kind,
     }));
 
-  // Compact cursor-lock status pill + 3-step micro-tutorial bar (top-center)
-  const topPromptsWrap = document.createElement('div');
-  topPromptsWrap.style.cssText =
-    'position:fixed;top:16px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:6px;z-index:22;pointer-events:none;';
-  hudRoot.appendChild(topPromptsWrap);
-
+  // Cursor-lock prompt (top-center)
   const lockBannerEl = document.createElement('button');
   lockBannerEl.type = 'button';
-  lockBannerEl.style.cssText =
-    'display:none;pointer-events:auto;cursor:pointer;padding:5px 12px;background:rgba(19,23,18,0.88);border:1px solid #e8a938;color:#e8a938;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;font-weight:700;letter-spacing:0.12em;';
-  lockBannerEl.textContent = 'CLICK TO LOCK MOUSE INSIDE WINDOW  //  [ESC] PAUSE';
+  lockBannerEl.className = 'fcs-lock-banner';
+  lockBannerEl.textContent = 'Click to aim · Esc pauses';
   lockBannerEl.addEventListener('mousedown', (e) => {
     e.preventDefault();
     if (controller.pointerLockBlockedByHost) {
@@ -234,35 +220,7 @@ async function bootstrap(): Promise<void> {
       controller.requestLock();
     }
   });
-  topPromptsWrap.appendChild(lockBannerEl);
-
-  const tutBarEl = document.createElement('div');
-  tutBarEl.style.cssText =
-    'display:none;align-items:center;gap:12px;padding:7px 14px;background:rgba(15,19,14,0.90);border:1px solid rgba(232,169,56,0.42);border-left:3px solid #e8a938;box-shadow:0 4px 14px rgba(0,0,0,0.45);';
-  const tutStepBadge = document.createElement('span');
-  tutStepBadge.style.cssText =
-    'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;font-weight:700;letter-spacing:0.12em;color:#e8a938;padding:2px 6px;background:rgba(232,169,56,0.14);border:1px solid rgba(232,169,56,0.35);';
-  const tutTextEl = document.createElement('span');
-  tutTextEl.style.cssText =
-    'font-size:13px;font-weight:700;letter-spacing:0.08em;color:#eae6dc;white-space:nowrap;';
-  const tutSkipHint = document.createElement('span');
-  tutSkipHint.style.cssText =
-    'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;color:rgba(234,230,220,0.52);letter-spacing:0.08em;';
-  tutSkipHint.textContent = '[TAB] SKIP';
-  tutBarEl.append(tutStepBadge, tutTextEl, tutSkipHint);
-  topPromptsWrap.appendChild(tutBarEl);
-
-  let tutStage: 0 | 1 | 2 | 3 | 4 = 0;
-  let tutDoneTimer = 0;
-  let initialCamYawSample: number | null = null;
-  let playerFiredOnce = false;
-
-  window.addEventListener('keydown', (e) => {
-    if (e.code === 'Tab' && tutStage < 4 && controller.pointerLocked) {
-      e.preventDefault();
-      tutStage = 4;
-    }
-  });
+  hudRoot.appendChild(lockBannerEl);
 
   let hitMarkerKind: 'none' | 'hit' | 'kill' = 'none';
   let hitMarkerTimer = 0;
@@ -335,17 +293,13 @@ async function bootstrap(): Promise<void> {
     onFireCannon: (shooter: Tank, pos: THREE.Vector3, dir: THREE.Vector3, shell: ShellSpec) => {
       ballistics.fireCannon(shooter, pos, dir, shell);
       if (shooter === match.human) {
-        playerFiredOnce = true;
         controller.addShake(shooter.stats.vehicleClass === 'heavy' ? 0.52 : 0.34);
       }
     },
     onFireMG: (shooter: Tank, pos: THREE.Vector3, dir: THREE.Vector3, beltSpec?: ShellSpec) => {
       ballistics.fireCoaxMG(shooter, pos, dir, beltSpec);
-      if (shooter === match.human) {
-        playerFiredOnce = true;
-        if (beltSpec) {
-          controller.addShake(0.035);
-        }
+      if (shooter === match.human && beltSpec) {
+        controller.addShake(0.035);
       }
     },
     onTrackDust: (pos: THREE.Vector3, intensity01: number) => {
@@ -392,7 +346,7 @@ async function bootstrap(): Promise<void> {
         const sy = (-_projScratch.y * 0.5 + 0.5) * vh;
         m.el.style.display = 'flex';
         m.el.style.transform = `translate3d(${sx.toFixed(1)}px, ${sy.toFixed(1)}px, 0) translate(-50%, -100%)`;
-        m.distEl.textContent = `${Math.round(dist)}M`;
+        m.distEl.textContent = ` · ${Math.round(dist)} m`;
         continue;
       }
 
@@ -418,7 +372,7 @@ async function bootstrap(): Promise<void> {
       const sy = (-_projScratch.y * 0.5 + 0.5) * vh;
       m.el.style.display = 'flex';
       m.el.style.transform = `translate3d(${sx.toFixed(1)}px, ${sy.toFixed(1)}px, 0) translate(-50%, -100%)`;
-      m.distEl.textContent = `${Math.round(dist)}M`;
+      m.distEl.textContent = ` · ${Math.round(dist)} m`;
       const hpPct = THREE.MathUtils.clamp((e.hp / e.maxHp) * 100, 0, 100);
       m.barFillEl.style.width = `${hpPct.toFixed(0)}%`;
     }
@@ -607,61 +561,16 @@ async function bootstrap(): Promise<void> {
       if (isDeployed && !controller.hasTruePointerLock && !forceHideBriefing) {
         lockBannerEl.style.display = 'block';
         lockBannerEl.textContent = controller.pointerLockBlockedByHost
-          ? 'IDE PREVIEW BLOCKS MOUSE LOCK — CLICK TO OPEN IN BROWSER TAB ↗'
-          : 'CLICK SCREEN TO LOCK MOUSE INSIDE WINDOW  //  [ESC] PAUSE';
+          ? 'Mouse lock is blocked here · click to open in a browser tab'
+          : 'Click to aim · Esc pauses';
       } else {
         lockBannerEl.style.display = 'none';
       }
 
       hitCam.update(dt);
-
-      if (isDeployed && tutStage < 4) {
-        if (initialCamYawSample === null) initialCamYawSample = controller.cameraYaw;
-
-        if (tutStage === 0) {
-          tutStepBadge.textContent = 'STEP 1/3';
-          tutTextEl.textContent = '[W A S D] Drive  ·  [1 / 2] Switch Shell Type';
-          if (Math.hypot(playerTank.position.x, playerTank.position.z + 190) > 3.2) {
-            tutStage = 1;
-            initialCamYawSample = controller.cameraYaw;
-          }
-        } else if (tutStage === 1) {
-          tutStepBadge.textContent = 'STEP 2/3';
-          tutTextEl.textContent = '[MOUSE] Aim turret  ·  [RIGHT CLICK] 2.8x Zoom';
-          const swept = Math.abs(
-            Math.atan2(
-              Math.sin(controller.cameraYaw - initialCamYawSample),
-              Math.cos(controller.cameraYaw - initialCamYawSample)
-            )
-          );
-          if (swept > 0.22 || controller.sniperZoom) {
-            tutStage = 2;
-            playerFiredOnce = false;
-          }
-        } else if (tutStage === 2) {
-          tutStepBadge.textContent = 'STEP 3/3';
-          tutTextEl.textContent = '[LEFT CLICK] Fire  ·  [SPACE] Machine Gun';
-          if (playerFiredOnce) {
-            tutStage = 3;
-            tutDoneTimer = 2.0;
-          }
-        } else if (tutStage === 3) {
-          tutStepBadge.textContent = 'READY';
-          tutTextEl.textContent = 'GOOD HUNTING — ESC TO SWITCH VEHICLE CLASS';
-          tutSkipHint.style.display = 'none';
-          tutDoneTimer -= dt;
-          if (tutDoneTimer <= 0) {
-            tutStage = 4;
-          }
-        }
-        tutBarEl.style.display = tutStage < 4 ? 'flex' : 'none';
-      } else {
-        tutBarEl.style.display = 'none';
-      }
     } else {
       markerLayer.style.display = 'none';
       lockBannerEl.style.display = 'none';
-      tutBarEl.style.display = 'none';
     }
 
     // Refresh directional shadow map every 2nd active frame (30 Hz) — cuts shadow GPU work by 50%!

@@ -1,13 +1,17 @@
 import * as THREE from 'three';
 import { Tank } from './Tank';
 import type { LoadedGameAssets } from './AssetLoader';
-import type { DamageEvent, Team, TerrainQuery, VehicleClass } from './types';
+import type { DamageEvent, Team, TerrainQuery, TankEntity, VehicleClass } from './types';
 
 export interface MatchFeedEntry {
   id: number;
   text: string;
   age: number;
   accent: 'kill' | 'death' | 'info';
+  actorName?: string;
+  actorTeam?: Team;
+  targetName?: string;
+  targetTeam?: Team;
 }
 
 const MAX_FEED = 6;
@@ -107,7 +111,7 @@ export class Match {
     if (!ev.killed || !attacker || attacker.team === victim.team) return;
     this.score[attacker.team]++;
     const accent = attacker.isHuman ? 'kill' : victim.isHuman ? 'death' : 'info';
-    this._pushFeed(`${attacker.callsign} destroyed ${victim.callsign}`, accent);
+    this._pushFeed(`${attacker.callsign} destroyed ${victim.callsign}`, accent, attacker, victim);
   }
 
   update(dt: number): void {
@@ -198,8 +202,17 @@ export class Match {
     this.tanks[0] = next;
   }
 
-  private _pushFeed(text: string, accent: MatchFeedEntry['accent']): void {
-    this.feed.unshift({ id: ++this.feedId, text, age: 0, accent });
+  private _pushFeed(text: string, accent: MatchFeedEntry['accent'], actor?: TankEntity, target?: TankEntity): void {
+    this.feed.unshift({
+      id: ++this.feedId,
+      text,
+      age: 0,
+      accent,
+      actorName: actor?.callsign,
+      actorTeam: actor?.team,
+      targetName: target?.callsign,
+      targetTeam: target?.team,
+    });
     if (this.feed.length > MAX_FEED) {
       this.feed.length = MAX_FEED;
     }

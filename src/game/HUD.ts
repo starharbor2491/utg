@@ -1,4 +1,5 @@
 import './hud.css';
+import { TANK_STATS } from './Tank';
 import type {
   HUDTelemetry,
   MinimapObstacle,
@@ -9,14 +10,18 @@ import type {
 
 export interface HUDCallbacks {
   onEngageClick: () => void;
-  onQualityChange: (quality: 'high' | 'medium') => void;
   onSelectVehicleClass?: (cls: VehicleClass) => void;
 }
 
 interface FeedSlot {
   row: HTMLDivElement;
   tag: HTMLSpanElement;
+  body: HTMLSpanElement;
   text: HTMLSpanElement;
+  parts: HTMLSpanElement;
+  actor: HTMLSpanElement;
+  verb: HTMLSpanElement;
+  target: HTMLSpanElement;
   lastId: number;
   lastAccent: 'kill' | 'death' | 'info' | '';
   active: boolean;
@@ -33,13 +38,27 @@ const BORE_RING_CIRCUMFERENCE = TWO_PI * BORE_RING_RADIUS;
 const HP_SEGMENT_COUNT = 16;
 const FEED_POOL_SIZE = 6;
 
+const BRIEFING_VEHICLES: readonly { id: VehicleClass; name: string; armament: string }[] = [
+  { id: 'normal', name: 'Main battle tank', armament: 'APFSDS, HE' },
+  { id: 'heavy', name: 'Heavy tank', armament: 'APCBC, HE' },
+  { id: 'ifv', name: 'Infantry fighting vehicle', armament: 'APDS-T, HEI-T' },
+  { id: 'humvee', name: 'Humvee', armament: 'M2 .50 cal' },
+  { id: 'rocket', name: 'Rocket artillery', armament: '6-rocket salvo' },
+];
+
+const BRIEFING_CONTROLS: readonly { keys: readonly string[]; action: string }[] = [
+  { keys: ['W', 'A', 'S', 'D'], action: 'Drive' },
+  { keys: ['Mouse'], action: 'Aim' },
+  { keys: ['Left click'], action: 'Fire main gun' },
+  { keys: ['Right click'], action: 'Zoom' },
+  { keys: ['1', '2', 'Q'], action: 'Switch shell' },
+  { keys: ['Space'], action: 'Machine gun' },
+  { keys: ['Esc'], action: 'Pause' },
+];
+
 const RADAR_CSS_SIZE = 196;
 const RADAR_RANGE_METERS = 220;
 const RADAR_SCOPE_RADIUS = 84;
-
-const COMPASS_CSS_WIDTH = 428;
-const COMPASS_CSS_HEIGHT = 38;
-const COMPASS_HALF_SPAN_DEG = 55;
 
 function clamp(v: number, min: number, max: number): number {
   if (!Number.isFinite(v)) return min;
@@ -58,78 +77,30 @@ function wrapPi(rad: number): number {
   return a - Math.PI;
 }
 
-/**
- * Converts Three.js world yaw (`yaw = 0` is `+Z`, `+yaw` turns CCW toward `+X` = screen LEFT)
- * into clockwise compass bearing degrees `[0, 360)`:
- *   000° N = +Z (yaw = 0)
- *   090° E = -X (yaw = -PI/2, screen RIGHT when facing North)
- *   180° S = -Z (yaw = PI)
- *   270° W = +X (yaw = +PI/2, screen LEFT when facing North)
- */
-function yawToCompassDeg(yaw: number): number {
-  if (!Number.isFinite(yaw)) return 0;
-  const deg = (-yaw * RAD_TO_DEG) % 360;
-  return deg < 0 ? deg + 360 : deg;
-}
-
-function compassOctantLabel(deg: number): string {
-  const idx = Math.round(deg / 45) % 8;
-  switch (idx) {
-    case 0: return 'N';
-    case 1: return 'NE';
-    case 2: return 'E';
-    case 3: return 'SE';
-    case 4: return 'S';
-    case 5: return 'SW';
-    case 6: return 'W';
-    default: return 'NW';
-  }
-}
-
-function padInt(val: number, digits: number): string {
-  const n = Math.max(0, Math.round(Number.isFinite(val) ? val : 0));
-  return n.toString().padStart(digits, '0');
-}
-
-function formatSignedCoord(val: number): string {
-  const n = Math.round(Number.isFinite(val) ? val : 0);
-  const sign = n >= 0 ? '+' : '-';
-  return `${sign}${Math.abs(n).toString().padStart(3, '0')}`;
-}
-
 export class HUD {
   private readonly container: HTMLElement;
   private readonly callbacks: HUDCallbacks;
   private readonly root: HTMLDivElement;
 
   // State tracking for zero-churn DOM updates
-  private currentQuality: 'high' | 'medium' = 'high';
   private loadingEverCalled = false;
   private briefingVisible = true;
   private elapsedSec = 0;
-  private fpsDisplayTimer = 0;
   private maxObservedRespawn = 3.0;
 
   // Cached last strings/classes to avoid redundant layout/style writes
   private lastBoreRangeStr = '';
-  private lastBoreSubStr = '';
   private lastBoreState: 'ready' | 'locked' | 'reloading' = 'ready';
   private lastSniperActive = false;
   private lastLrfStr = '';
   private lastLrfSubStr = '';
-  private lastCompassReadout = '';
-  private lastHostilesStr = '';
-  private lastKillsStr = '';
-  private lastFpsStr = '';
   private lastHpStr = '';
   private lastSpeedStr = '';
-  private lastGearStr = '';
   private lastCannonStr = '';
   private lastCannonReady = true;
+  private lastCannonBadge: 'ready' | 'reload' | 'neutral' = 'neutral';
   private lastMgStr = '';
   private lastMgOverheat = false;
-  private lastTrvStr = '';
-  private lastRadarCoordStr = '';
   private lastRespawnVisible = false;
   private lastVehicleDmgState: 'ok' | 'warn' | 'crit' | 'dead' = 'ok';
 
@@ -145,38 +116,25 @@ export class HUD {
   private readonly gunnerBoreEl: HTMLDivElement;
   private readonly boreReloadCircleEl: SVGCircleElement;
   private readonly boreRangeTextEl: HTMLSpanElement;
-  private readonly boreSubTextEl: HTMLSpanElement;
   private readonly hitMarkerEl: HTMLDivElement;
   private readonly killBannerEl: HTMLDivElement;
   private readonly damageArcEl: HTMLDivElement;
-
-  // Top compass & top-right strip refs
-  private readonly compassCanvas: HTMLCanvasElement;
-  private readonly compassCtx: CanvasRenderingContext2D;
-  private compassDpr = 0;
-  private readonly compassReadoutEl: HTMLDivElement;
-  private readonly statHostilesEl: HTMLSpanElement;
-  private readonly statKillsEl: HTMLSpanElement;
-  private readonly statFpsEl: HTMLSpanElement;
-  private readonly statQualityEl: HTMLSpanElement;
 
   // Bottom-left paper-doll & vehicle systems refs
   private readonly vehiclePanelEl: HTMLDivElement;
   private readonly pdHullGroupEl: SVGGElement;
   private readonly pdTurretGroupEl: SVGGElement;
-  private readonly pdTrvTextEl: HTMLDivElement;
   private readonly hpReadoutEl: HTMLSpanElement;
   private readonly hpSegEls: HTMLDivElement[] = [];
   private readonly speedNumEl: HTMLSpanElement;
-  private readonly throttleFillEl: HTMLDivElement;
-  private readonly gearBoxEl: HTMLDivElement;
   private readonly cannonStatusEl: HTMLSpanElement;
   private readonly cannonBarFillEl: HTMLDivElement;
   private readonly mgStatusEl: HTMLSpanElement;
   private readonly mgBarFillEl: HTMLDivElement;
+  private readonly shellPillEls: HTMLSpanElement[];
+  private readonly shellCodeEls: HTMLSpanElement[];
 
   // Bottom-right 2D cartographic radar refs
-  private readonly radarCoordsEl: HTMLSpanElement;
   private readonly radarCanvas: HTMLCanvasElement;
   private readonly radarCtx: CanvasRenderingContext2D;
   private radarDpr = 0;
@@ -194,19 +152,13 @@ export class HUD {
 
   // Briefing / loading screen refs
   private readonly briefingBackdropEl: HTMLDivElement;
-  private readonly loaderStatusEl: HTMLSpanElement;
-  private readonly loaderPctEl: HTMLSpanElement;
-  private readonly loaderFillEl: HTMLDivElement;
-  private readonly qualityBtnEl: HTMLButtonElement;
-  private readonly qualityHighOptEl: HTMLSpanElement;
-  private readonly qualityMedOptEl: HTMLSpanElement;
+  private readonly loaderFillEl: HTMLSpanElement;
   private readonly engageBtnEl: HTMLButtonElement;
   private readonly engageMainTextEl: HTMLSpanElement;
   private readonly engageSubTextEl: HTMLSpanElement;
 
   // Bound event listeners for clean disposal
   private readonly handleEngageClick: () => void;
-  private readonly handleQualityClick: (ev: MouseEvent) => void;
   private readonly handleResize: () => void;
 
   constructor(container: HTMLElement, callbacks: HUDCallbacks) {
@@ -235,7 +187,6 @@ export class HUD {
     this.gunnerBoreEl = reticles.gunnerBore;
     this.boreReloadCircleEl = reticles.boreReloadCircle;
     this.boreRangeTextEl = reticles.boreRangeText;
-    this.boreSubTextEl = reticles.boreSubText;
     this.hitMarkerEl = reticles.hitMarker;
     this.killBannerEl = reticles.killBanner;
     this.damageArcEl = reticles.damageArc;
@@ -246,52 +197,40 @@ export class HUD {
     this.vehiclePanelEl = vehicle.panel;
     this.pdHullGroupEl = vehicle.hullGroup;
     this.pdTurretGroupEl = vehicle.turretGroup;
-    this.pdTrvTextEl = vehicle.trvText;
     this.hpReadoutEl = vehicle.hpReadout;
     this.speedNumEl = vehicle.speedNum;
-    this.throttleFillEl = vehicle.throttleFill;
-    this.gearBoxEl = vehicle.gearBox;
     this.cannonStatusEl = vehicle.cannonStatus;
     this.cannonBarFillEl = vehicle.cannonBarFill;
     this.mgStatusEl = vehicle.mgStatus;
     this.mgBarFillEl = vehicle.mgBarFill;
+    this.shellPillEls = vehicle.pillEls;
+    this.shellCodeEls = vehicle.pillCodes;
     this.root.appendChild(this.vehiclePanelEl);
 
     // 7. Bottom-Right 2D Cartographic Radar
     const radar = this.buildRadarPanel();
-    this.radarCoordsEl = radar.coords;
     this.radarCanvas = radar.canvas;
     this.radarCtx = radar.ctx;
     this.root.appendChild(radar.panel);
 
-    // Keep unused legacy elements detached so DOM stays lean & uncluttered
-    const compass = this.buildCompassTape();
-    this.compassCanvas = compass.canvas;
-    this.compassCtx = compass.ctx;
-    this.compassReadoutEl = compass.readout;
-    const topRight = this.buildTopRightStrip();
-    this.statHostilesEl = topRight.hostiles;
-    this.statKillsEl = topRight.kills;
-    this.statFpsEl = topRight.fps;
-    this.statQualityEl = topRight.quality;
     this.root.appendChild(this.buildEventFeed());
 
-    // Minimal top-center team scoreboard (functional; styling pass comes later)
+    // Top-center team scoreboard
     this.scoreboardEl = document.createElement('div');
     this.scoreboardEl.className = 'fcs-scoreboard';
-    this.scoreboardEl.style.cssText =
-      'position:fixed;top:54px;left:50%;transform:translateX(-50%);z-index:21;pointer-events:none;display:flex;align-items:center;gap:8px;padding:4px 14px;background:rgba(15,19,14,0.88);border:1px solid rgba(232,169,56,0.35);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;font-weight:700;letter-spacing:0.1em;color:#eae6dc;';
     const scoreBlueLbl = document.createElement('span');
-    scoreBlueLbl.textContent = 'BLUE';
-    scoreBlueLbl.style.color = '#8fb4d8';
+    scoreBlueLbl.className = 'fcs-score-label fcs-score-blue';
+    scoreBlueLbl.textContent = 'Blue';
     this.scoreBlueEl = document.createElement('span');
+    this.scoreBlueEl.className = 'fcs-score-num';
     const scoreSep = document.createElement('span');
+    scoreSep.className = 'fcs-score-sep';
     scoreSep.textContent = '–';
-    scoreSep.style.opacity = '0.6';
     this.scoreRedEl = document.createElement('span');
+    this.scoreRedEl.className = 'fcs-score-num';
     const scoreRedLbl = document.createElement('span');
-    scoreRedLbl.textContent = 'RED';
-    scoreRedLbl.style.color = '#e08d7d';
+    scoreRedLbl.className = 'fcs-score-label fcs-score-red';
+    scoreRedLbl.textContent = 'Red';
     this.scoreboardEl.append(scoreBlueLbl, this.scoreBlueEl, scoreSep, this.scoreRedEl, scoreRedLbl);
     this.root.appendChild(this.scoreboardEl);
 
@@ -305,12 +244,7 @@ export class HUD {
     // 10. Briefing / Asset Loading / Pause Overlay
     const briefing = this.buildBriefingOverlay();
     this.briefingBackdropEl = briefing.backdrop;
-    this.loaderStatusEl = briefing.loaderStatus;
-    this.loaderPctEl = briefing.loaderPct;
     this.loaderFillEl = briefing.loaderFill;
-    this.qualityBtnEl = briefing.qualityBtn;
-    this.qualityHighOptEl = briefing.qualityHighOpt;
-    this.qualityMedOptEl = briefing.qualityMedOpt;
     this.engageBtnEl = briefing.engageBtn;
     this.engageMainTextEl = briefing.engageMainText;
     this.engageSubTextEl = briefing.engageSubText;
@@ -321,7 +255,6 @@ export class HUD {
       if (this.engageBtnEl.disabled) return;
       this.callbacks.onEngageClick();
     };
-    this.handleQualityClick = () => {};
     this.handleResize = () => {
       this.syncCanvasHiDPI();
     };
@@ -341,35 +274,24 @@ export class HUD {
     const pct = Math.round(p * 100);
 
     this.loaderFillEl.style.width = `${(p * 100).toFixed(1)}%`;
-    this.loaderPctEl.textContent = `${pct}%`;
-    this.loaderStatusEl.textContent = statusText || (p >= 1 ? 'Ready' : 'Loading assets...');
-
-    const loaderBlock = this.loaderFillEl.closest('.fcs-loader-block') as HTMLElement | null;
+    const loaderBar = this.loaderFillEl.parentElement;
     if (p >= 0.999) {
       this.engageBtnEl.disabled = false;
-      this.engageMainTextEl.textContent = 'PLAY';
+      this.engageMainTextEl.textContent = 'Play';
       this.engageSubTextEl.textContent = '';
-      if (loaderBlock) loaderBlock.style.display = 'none';
+      if (loaderBar) loaderBar.style.display = 'none';
     } else {
       this.engageBtnEl.disabled = true;
-      this.engageMainTextEl.textContent = 'LOADING...';
-      this.engageSubTextEl.textContent = '';
-      if (loaderBlock) loaderBlock.style.display = 'flex';
+      this.engageMainTextEl.textContent = `Loading ${pct}%`;
+      this.engageSubTextEl.textContent = statusText || 'Loading assets...';
+      if (loaderBar) loaderBar.style.display = '';
     }
   }
 
   public setBriefingVisible(visible: boolean): void {
     this.briefingVisible = visible;
     this.briefingBackdropEl.classList.toggle('is-visible', visible);
-  }
-
-  public setQualityBadge(quality: 'high' | 'medium'): void {
-    this.currentQuality = quality;
-    const isHigh = quality === 'high';
-    this.statQualityEl.textContent = isHigh ? 'HIGH' : 'MED';
-    this.qualityHighOptEl.classList.toggle('is-selected', isHigh);
-    this.qualityMedOptEl.classList.toggle('is-selected', !isHigh);
-    this.qualityBtnEl.setAttribute('aria-label', `Graphics Quality: ${quality.toUpperCase()}`);
+    this.container.classList.toggle('is-briefing', visible);
   }
 
   private radarAccum = 0;
@@ -408,7 +330,6 @@ export class HUD {
 
   public dispose(): void {
     this.engageBtnEl.removeEventListener('click', this.handleEngageClick);
-    this.qualityBtnEl.removeEventListener('click', this.handleQualityClick);
     window.removeEventListener('resize', this.handleResize);
     if (this.root.parentNode === this.container) {
       this.container.removeChild(this.root);
@@ -425,18 +346,6 @@ export class HUD {
       this.radarDpr = dpr;
       this.radarCanvas.width = Math.round(RADAR_CSS_SIZE * dpr);
       this.radarCanvas.height = Math.round(RADAR_CSS_SIZE * dpr);
-    }
-    const compassW = this.compassCanvas.clientWidth || COMPASS_CSS_WIDTH;
-    const targetCompassW = Math.round(compassW * dpr);
-    const targetCompassH = Math.round(COMPASS_CSS_HEIGHT * dpr);
-    if (
-      Math.abs(dpr - this.compassDpr) > 0.01 ||
-      this.compassCanvas.width !== targetCompassW ||
-      this.compassCanvas.height !== targetCompassH
-    ) {
-      this.compassDpr = dpr;
-      this.compassCanvas.width = targetCompassW;
-      this.compassCanvas.height = targetCompassH;
     }
   }
 
@@ -483,20 +392,10 @@ export class HUD {
       }
 
       const rangeClamped = clamp(t.gunnerBore.rangeMeters, 0, 9999);
-      const rangeStr = `${padInt(rangeClamped, 4)}m`;
+      const rangeStr = `${Math.round(rangeClamped)} m`;
       if (rangeStr !== this.lastBoreRangeStr) {
         this.lastBoreRangeStr = rangeStr;
         this.boreRangeTextEl.textContent = rangeStr;
-      }
-
-      const subStr = !isReady
-        ? `RLD ${Math.max(0, t.cannonCooldownSec).toFixed(1)}s`
-        : t.gunnerBore.onTarget
-          ? 'LOCK // RDY'
-          : 'FCS // RDY';
-      if (subStr !== this.lastBoreSubStr) {
-        this.lastBoreSubStr = subStr;
-        this.boreSubTextEl.textContent = subStr;
       }
     } else {
       this.gunnerBoreEl.style.opacity = '0';
@@ -511,15 +410,15 @@ export class HUD {
 
     if (sniperActive) {
       const rng = clamp(t.gunnerBore.rangeMeters, 0, 9999);
-      const lrfStr = `LRF ${padInt(rng, 4)} M`;
+      const lrfStr = `${Math.round(rng)} m`;
       if (lrfStr !== this.lastLrfStr) {
         this.lastLrfStr = lrfStr;
         this.sniperLrfValEl.textContent = lrfStr;
       }
 
       const muzzleV = Math.max(50, Math.round(t.shellSpeedMs || 260));
-      const fcsTag = isReady ? '120MM HE-FRAG // READY' : `RELOADING ${Math.max(0, t.cannonCooldownSec).toFixed(1)}S`;
-      const lrfSub = `${fcsTag} // V0 ${muzzleV} M/S`;
+      const activeShellCode = t.activeShellIndex === 0 ? t.shell0Code : t.shell1Code;
+      const lrfSub = `${activeShellCode} · ${isReady ? 'Ready' : `Reloading ${Math.max(0, t.cannonCooldownSec).toFixed(1)} s`}`;
       if (lrfSub !== this.lastLrfSubStr) {
         this.lastLrfSubStr = lrfSub;
         this.sniperLrfSubEl.textContent = lrfSub;
@@ -588,163 +487,6 @@ export class HUD {
     this.damageVignetteEl.style.opacity = vignetteAlpha.toFixed(2);
   }
 
-  private drawCompassTape(t: HUDTelemetry): void {
-    const ctx = this.compassCtx;
-    const dpr = this.compassDpr || 1;
-    const w = this.compassCanvas.width / dpr;
-    const h = this.compassCanvas.height / dpr;
-
-    ctx.save();
-    ctx.scale(dpr, dpr);
-    ctx.clearRect(0, 0, w, h);
-
-    const cx = w * 0.5;
-    const pxPerDeg = (w * 0.5) / COMPASS_HALF_SPAN_DEG;
-    const camBearingDeg = yawToCompassDeg(t.cameraYaw);
-
-    // Subtle horizontal baseline rail
-    ctx.strokeStyle = 'rgba(232, 169, 56, 0.18)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(0, h - 9.5);
-    ctx.lineTo(w, h - 9.5);
-    ctx.stroke();
-
-    // Degree & cardinal ticks every 5 degrees around camera bearing
-    const startStep = Math.floor((camBearingDeg - COMPASS_HALF_SPAN_DEG) / 5) * 5;
-    const endStep = Math.ceil((camBearingDeg + COMPASS_HALF_SPAN_DEG) / 5) * 5;
-
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'alphabetic';
-
-    for (let rawDeg = startStep; rawDeg <= endStep; rawDeg += 5) {
-      const deltaDeg = rawDeg - camBearingDeg;
-      const x = cx + deltaDeg * pxPerDeg;
-      if (x < -16 || x > w + 16) continue;
-
-      const normDeg = ((rawDeg % 360) + 360) % 360;
-      const isCardinal = normDeg % 90 === 0;
-      const isIntercardinal = normDeg % 45 === 0 && !isCardinal;
-      const isMajor15 = normDeg % 15 === 0;
-
-      ctx.beginPath();
-      if (isCardinal) {
-        ctx.strokeStyle = normDeg === 0 ? '#E8A938' : '#EAE6DC';
-        ctx.lineWidth = 1.6;
-        ctx.moveTo(x, h - 9.5);
-        ctx.lineTo(x, h - 18.5);
-      } else if (isMajor15) {
-        ctx.strokeStyle = 'rgba(234, 230, 220, 0.62)';
-        ctx.lineWidth = 1.1;
-        ctx.moveTo(x, h - 9.5);
-        ctx.lineTo(x, h - 15.5);
-      } else {
-        ctx.strokeStyle = 'rgba(234, 230, 220, 0.28)';
-        ctx.lineWidth = 1;
-        ctx.moveTo(x, h - 9.5);
-        ctx.lineTo(x, h - 12.5);
-      }
-      ctx.stroke();
-
-      if (isCardinal) {
-        const label = normDeg === 0 ? 'N' : normDeg === 90 ? 'E' : normDeg === 180 ? 'S' : 'W';
-        ctx.font = '700 12px "Bahnschrift", "DIN Condensed", "Arial Narrow", system-ui, sans-serif';
-        ctx.fillStyle = normDeg === 0 ? '#E8A938' : '#EAE6DC';
-        ctx.fillText(label, x, 15);
-      } else if (isIntercardinal) {
-        const label = compassOctantLabel(normDeg);
-        ctx.font = '600 10px "Bahnschrift", "DIN Condensed", "Arial Narrow", system-ui, sans-serif';
-        ctx.fillStyle = '#8FA876';
-        ctx.fillText(label, x, 14.5);
-      } else if (isMajor15) {
-        ctx.font = '600 9.5px ui-monospace, "SF Mono", Menlo, Consolas, monospace';
-        ctx.fillStyle = 'rgba(234, 230, 220, 0.56)';
-        ctx.fillText(padInt(normDeg, 3), x, 14);
-      }
-    }
-
-    // Subtle Hull Heading Notch on top edge (cartographic sage)
-    const hullDeltaDeg = wrapPi(t.cameraYaw - t.hullYaw) * RAD_TO_DEG;
-    const hullX = clamp(cx + hullDeltaDeg * pxPerDeg, 10, w - 10);
-    ctx.strokeStyle = '#8FA876';
-    ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    ctx.moveTo(hullX - 3, 2);
-    ctx.lineTo(hullX + 3, 2);
-    ctx.moveTo(hullX, 2);
-    ctx.lineTo(hullX, 6);
-    ctx.stroke();
-
-    // Turret World Yaw Caret (phosphor amber triangle along bottom rail)
-    const turretDeltaDeg = wrapPi(t.cameraYaw - t.turretWorldYaw) * RAD_TO_DEG;
-    const rawTurretX = cx + turretDeltaDeg * pxPerDeg;
-    const clampedTurretX = clamp(rawTurretX, 12, w - 12);
-    ctx.fillStyle = '#E8A938';
-    ctx.beginPath();
-    if (Math.abs(rawTurretX - clampedTurretX) > 1) {
-      // Edge directional arrow when turret points outside visible tape span
-      const dir = rawTurretX > clampedTurretX ? 1 : -1;
-      ctx.moveTo(clampedTurretX + dir * 4, h - 4.5);
-      ctx.lineTo(clampedTurretX - dir * 3, h - 8);
-      ctx.lineTo(clampedTurretX - dir * 3, h - 1);
-    } else {
-      ctx.moveTo(clampedTurretX, h - 9);
-      ctx.lineTo(clampedTurretX - 4.2, h - 2);
-      ctx.lineTo(clampedTurretX + 4.2, h - 2);
-    }
-    ctx.closePath();
-    ctx.fill();
-
-    // Fixed Center Camera Lubber Caret (instrument ivory)
-    ctx.fillStyle = '#EAE6DC';
-    ctx.beginPath();
-    ctx.moveTo(cx, 7.5);
-    ctx.lineTo(cx - 4, 1.5);
-    ctx.lineTo(cx + 4, 1.5);
-    ctx.closePath();
-    ctx.fill();
-
-    ctx.strokeStyle = 'rgba(234, 230, 220, 0.45)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(cx, h - 18);
-    ctx.lineTo(cx, h - 9.5);
-    ctx.stroke();
-
-    ctx.restore();
-
-    const dispDeg = Math.round(camBearingDeg) % 360;
-    const readout = `${padInt(dispDeg, 3)}° ${compassOctantLabel(dispDeg)}`;
-    if (readout !== this.lastCompassReadout) {
-      this.lastCompassReadout = readout;
-      this.compassReadoutEl.textContent = readout;
-    }
-  }
-
-  private updateTopRightStrip(t: HUDTelemetry, dt: number): void {
-    const hostilesStr = padInt(t.activeEnemies, 2);
-    if (hostilesStr !== this.lastHostilesStr) {
-      this.lastHostilesStr = hostilesStr;
-      this.statHostilesEl.textContent = hostilesStr;
-    }
-
-    const killsStr = padInt(t.kills, 2);
-    if (killsStr !== this.lastKillsStr) {
-      this.lastKillsStr = killsStr;
-      this.statKillsEl.textContent = killsStr;
-    }
-
-    this.fpsDisplayTimer -= dt;
-    if (this.fpsDisplayTimer <= 0 || this.lastFpsStr === '') {
-      this.fpsDisplayTimer = 0.18;
-      const fpsStr = padInt(t.fps, 2);
-      if (fpsStr !== this.lastFpsStr) {
-        this.lastFpsStr = fpsStr;
-        this.statFpsEl.textContent = fpsStr;
-      }
-    }
-  }
-
   private updateVehiclePanel(t: HUDTelemetry): void {
     // 1. Live SVG Tank Paper-Doll Rotations
     // Screen CW rotation for world yaw relative to cameraYaw is `cameraYaw - worldYaw`
@@ -753,15 +495,6 @@ export class HUD {
 
     this.pdHullGroupEl.setAttribute('transform', `rotate(${hullScreenDeg.toFixed(2)} 48 48)`);
     this.pdTurretGroupEl.setAttribute('transform', `rotate(${turretScreenDeg.toFixed(2)} 48 48)`);
-
-    // Signed turret traverse relative to hull bow (+ = CW right of bow, - = CCW left of bow)
-    const relTraverseDeg = Math.round(wrapPi(t.hullYaw - t.turretWorldYaw) * RAD_TO_DEG);
-    const trvSign = relTraverseDeg >= 0 ? '+' : '-';
-    const trvStr = `TRV ${trvSign}${padInt(Math.abs(relTraverseDeg), 3)}°`;
-    if (trvStr !== this.lastTrvStr) {
-      this.lastTrvStr = trvStr;
-      this.pdTrvTextEl.textContent = trvStr;
-    }
 
     // 2. Segmented Hull Armor HP Bar
     const maxHp = Math.max(1, Math.round(t.maxHp));
@@ -783,31 +516,29 @@ export class HUD {
       this.vehiclePanelEl.classList.toggle('is-dead', dmgState === 'dead');
     }
 
-    const hpStr = `${padInt(curHp, 3)} / ${padInt(maxHp, 3)}`;
+    const hpStr = `${curHp} / ${maxHp}`;
     if (hpStr !== this.lastHpStr) {
       this.lastHpStr = hpStr;
       this.hpReadoutEl.textContent = hpStr;
       this.hpReadoutEl.style.color =
         dmgState === 'crit' || dmgState === 'dead'
-          ? '#D94636'
+          ? 'var(--fcs-danger)'
           : dmgState === 'warn'
-            ? '#E8A938'
-            : '#EAE6DC';
+            ? 'var(--fcs-text-2)'
+            : 'var(--fcs-text)';
     }
 
     const activeColor =
       dmgState === 'crit' || dmgState === 'dead'
-        ? '#D94636'
-        : dmgState === 'warn'
-          ? '#E8A938'
-          : '#8FA876';
+        ? 'var(--fcs-danger)'
+        : 'var(--fcs-text-2)';
 
     const exactFilled = hpRatio * HP_SEGMENT_COUNT;
     for (let i = 0; i < HP_SEGMENT_COUNT; i++) {
       const seg = this.hpSegEls[i];
       const cellFill = clamp01(exactFilled - i);
       if (cellFill <= 0.02) {
-        seg.style.backgroundColor = 'rgba(234, 230, 220, 0.08)';
+        seg.style.backgroundColor = 'var(--fcs-hairline)';
         seg.style.opacity = '1';
       } else {
         seg.style.backgroundColor = activeColor;
@@ -815,47 +546,23 @@ export class HUD {
       }
     }
 
-    // 3. Speedometer, Throttle & Gear
+    // 3. Speedometer
     const absSpeed = Math.abs(Math.round(Number.isFinite(t.speedKmh) ? t.speedKmh : 0));
-    const speedStr = padInt(absSpeed, 2);
+    const speedStr = `${absSpeed}`;
     if (speedStr !== this.lastSpeedStr) {
       this.lastSpeedStr = speedStr;
       this.speedNumEl.textContent = speedStr;
     }
 
-    const gearStr = (t.gearLabel || 'N').toUpperCase();
-    if (gearStr !== this.lastGearStr) {
-      this.lastGearStr = gearStr;
-      this.gearBoxEl.textContent = gearStr;
-    }
-
-    const thr = clamp(t.throttle, -1, 1);
-    this.throttleFillEl.style.width = `${(Math.abs(thr) * 100).toFixed(0)}%`;
-    this.throttleFillEl.classList.toggle('is-reverse', thr < -0.02);
-
     // 4. Primary Weapon / Cannon Reload & Shell Selector
-    const shellPillsEl = this.vehiclePanelEl.querySelector('#fcs-shell-pills') as HTMLElement | null;
-    if (shellPillsEl) {
-      const s0El = shellPillsEl.children[0] as HTMLElement | undefined;
-      const s1El = shellPillsEl.children[1] as HTMLElement | undefined;
-      if (s0El && s1El) {
-        s0El.textContent = `[1] ${t.shell0Code}`;
-        s1El.textContent = `[2] ${t.shell1Code}`;
-        s0El.classList.toggle('is-active-shell', t.activeShellIndex === 0);
-        s1El.classList.toggle('is-active-shell', t.activeShellIndex === 1);
-      }
-    }
+    this.shellCodeEls[0].textContent = t.shell0Code;
+    this.shellCodeEls[1].textContent = t.shell1Code;
+    this.shellPillEls[0].classList.toggle('is-active-shell', t.activeShellIndex === 0);
+    this.shellPillEls[1].classList.toggle('is-active-shell', t.activeShellIndex === 1);
 
     const cannonTitleEl = this.cannonStatusEl.previousElementSibling as HTMLElement | null;
     if (cannonTitleEl) {
-      cannonTitleEl.textContent =
-        t.vehicleClass === 'rocket'
-          ? 'ROCKET POD'
-          : t.hasMainCannon
-            ? 'MAIN CANNON'
-            : t.vehicleClass === 'humvee'
-              ? 'M2 .50CAL'
-              : '30MM CHAIN-GUN';
+      cannonTitleEl.textContent = t.vehicleClass === 'rocket' ? 'Rocket pod' : 'Main gun';
     }
 
     const cannonP = t.hasMainCannon ? clamp01(t.cannonReloadProgress) : 1;
@@ -866,23 +573,36 @@ export class HUD {
       this.lastCannonReady = cannonReady;
       this.cannonBarFillEl.classList.toggle('is-ready', cannonReady);
       this.cannonBarFillEl.classList.toggle('is-reloading', !cannonReady);
-      this.cannonStatusEl.classList.toggle('fcs-badge-ready', cannonReady);
-      this.cannonStatusEl.classList.toggle('fcs-badge-reload', !cannonReady);
       this.vehiclePanelEl.classList.toggle('is-reloading', !cannonReady);
     }
 
-    const cannonStr =
-      t.vehicleClass === 'rocket'
-        ? t.rocketsLeft > 0
-          ? `ROCKETS ${t.rocketsLeft}/${t.salvoSize ?? 6}`
-          : cannonReady
-            ? 'POD EMPTY'
-            : `${Math.max(0, t.cannonCooldownSec).toFixed(1)}s RELOAD`
-        : !t.hasMainCannon
-          ? 'INF AMMO'
-          : cannonReady
-            ? 'READY'
-            : `${Math.max(0, t.cannonCooldownSec).toFixed(1)}s`;
+    let cannonBadge: 'ready' | 'reload' | 'neutral' = 'neutral';
+    let cannonStr: string;
+    if (t.vehicleClass === 'rocket') {
+      if (t.rocketsLeft > 0) {
+        cannonStr = `Rockets ${t.rocketsLeft} / ${t.salvoSize ?? 6}`;
+        cannonBadge = 'ready';
+      } else if (cannonReady) {
+        cannonStr = 'Pod empty';
+      } else {
+        cannonStr = `Reloading ${Math.max(0, t.cannonCooldownSec).toFixed(1)} s`;
+        cannonBadge = 'reload';
+      }
+    } else if (!t.hasMainCannon) {
+      cannonStr = 'Infinite ammo';
+    } else if (cannonReady) {
+      cannonStr = 'Ready';
+      cannonBadge = 'ready';
+    } else {
+      cannonStr = `Reloading ${Math.max(0, t.cannonCooldownSec).toFixed(1)} s`;
+      cannonBadge = 'reload';
+    }
+    if (cannonBadge !== this.lastCannonBadge) {
+      this.lastCannonBadge = cannonBadge;
+      this.cannonStatusEl.classList.toggle('fcs-badge-ready', cannonBadge === 'ready');
+      this.cannonStatusEl.classList.toggle('fcs-badge-reload', cannonBadge === 'reload');
+      this.cannonStatusEl.classList.toggle('fcs-badge-neutral', cannonBadge === 'neutral');
+    }
     if (cannonStr !== this.lastCannonStr) {
       this.lastCannonStr = cannonStr;
       this.cannonStatusEl.textContent = cannonStr;
@@ -903,7 +623,7 @@ export class HUD {
       this.mgStatusEl.classList.toggle('fcs-badge-overheat', t.mgOverheated);
     }
 
-    const mgStr = t.mgOverheated ? 'OVERHEAT' : `${padInt(heat * 100, 2)}%`;
+    const mgStr = t.mgOverheated ? 'Overheat' : `${Math.round(heat * 100)}%`;
     if (mgStr !== this.lastMgStr) {
       this.lastMgStr = mgStr;
       this.mgStatusEl.textContent = mgStr;
@@ -912,12 +632,6 @@ export class HUD {
 
   private drawCartographicRadar(t: HUDTelemetry): void {
     const { playerX, playerZ, worldHalfSize, units, obstacles } = t.minimap;
-
-    const coordStr = `X${formatSignedCoord(playerX)} Z${formatSignedCoord(playerZ)}`;
-    if (coordStr !== this.lastRadarCoordStr) {
-      this.lastRadarCoordStr = coordStr;
-      this.radarCoordsEl.textContent = coordStr;
-    }
 
     const ctx = this.radarCtx;
     const dpr = this.radarDpr || 1;
@@ -1411,15 +1125,27 @@ export class HUD {
 
       if (slot.lastId !== msg.id) {
         slot.lastId = msg.id;
-        slot.text.textContent = msg.text;
+        if (msg.actorName && msg.targetName) {
+          slot.text.style.display = 'none';
+          slot.parts.style.display = 'flex';
+          slot.actor.textContent = msg.actorName;
+          slot.actor.className = `fcs-feed-actor ${msg.actorTeam === 'blue' ? 'is-blue' : 'is-red'}`;
+          slot.verb.textContent = 'destroyed';
+          slot.target.textContent = msg.targetName;
+          slot.target.className = `fcs-feed-target ${msg.targetTeam === 'blue' ? 'is-blue' : 'is-red'}`;
+        } else {
+          slot.parts.style.display = 'none';
+          slot.text.style.display = '';
+          slot.text.textContent = msg.text;
+        }
       }
 
       if (slot.lastAccent !== msg.accent) {
         slot.lastAccent = msg.accent;
         slot.row.classList.remove('fcs-feed-row--kill', 'fcs-feed-row--death', 'fcs-feed-row--info');
         slot.row.classList.add(`fcs-feed-row--${msg.accent}`);
-        slot.tag.textContent =
-          msg.accent === 'kill' ? '[KILL]' : msg.accent === 'death' ? '[KIA]' : '[LOG]';
+        slot.tag.textContent = msg.accent === 'kill' ? 'Kill' : msg.accent === 'death' ? 'Down' : '';
+        slot.tag.style.display = msg.accent === 'info' ? 'none' : '';
       }
 
       // Smooth fade by age (seconds)
@@ -1443,7 +1169,7 @@ export class HUD {
       if (rem > this.maxObservedRespawn) {
         this.maxObservedRespawn = rem;
       }
-      this.respawnSecEl.textContent = `${rem.toFixed(1)}S`;
+      this.respawnSecEl.textContent = `Back in ${rem.toFixed(1)} s`;
       const progress = clamp01(1 - rem / Math.max(0.1, this.maxObservedRespawn));
       this.respawnBarFillEl.style.width = `${(progress * 100).toFixed(1)}%`;
     }
@@ -1527,17 +1253,17 @@ export class HUD {
 
     const topTag = document.createElement('div');
     topTag.className = 'fcs-sniper-top-tag';
-    topTag.textContent = 'OPTIC 2.8X // GPS-DAY';
+    topTag.textContent = '2.8×';
     overlay.appendChild(topTag);
 
     const lrfBox = document.createElement('div');
     lrfBox.className = 'fcs-sniper-lrf-box';
     const lrfVal = document.createElement('span');
     lrfVal.className = 'fcs-sniper-lrf-val';
-    lrfVal.textContent = 'LRF 0000 M';
+    lrfVal.textContent = '0 m';
     const lrfSub = document.createElement('span');
     lrfSub.className = 'fcs-sniper-lrf-sub';
-    lrfSub.textContent = '120MM HE-FRAG // READY';
+    lrfSub.textContent = '—';
     lrfBox.append(lrfVal, lrfSub);
     overlay.appendChild(lrfBox);
 
@@ -1550,7 +1276,6 @@ export class HUD {
     gunnerBore: HTMLDivElement;
     boreReloadCircle: SVGCircleElement;
     boreRangeText: HTMLSpanElement;
-    boreSubText: HTMLSpanElement;
     hitMarker: HTMLDivElement;
     killBanner: HTMLDivElement;
     damageArc: HTMLDivElement;
@@ -1631,15 +1356,13 @@ export class HUD {
         <path class="fcs-bore-lock-bracket" d="M 43 49 L 43 43 L 49 43 M 85 49 L 85 43 L 79 43 M 43 79 L 43 85 L 49 85 M 85 79 L 85 85 L 79 85" fill="none" stroke-width="1.5"/>
       </svg>
       <div class="fcs-bore-readout">
-        <span id="fcs-bore-rng">0000m</span>
-        <span id="fcs-bore-sub" class="fcs-bore-state-sub">FCS // RDY</span>
+        <span id="fcs-bore-rng">0 m</span>
       </div>
     `;
     layer.appendChild(gunnerBore);
 
     const boreReloadCircle = gunnerBore.querySelector('#fcs-bore-reload-ring') as SVGCircleElement;
     const boreRangeText = gunnerBore.querySelector('#fcs-bore-rng') as HTMLSpanElement;
-    const boreSubText = gunnerBore.querySelector('#fcs-bore-sub') as HTMLSpanElement;
 
     // 4. Hit / Kill Diagonal X-Ticks at Bore
     const hitMarker = document.createElement('div');
@@ -1659,8 +1382,8 @@ export class HUD {
     const killBanner = document.createElement('div');
     killBanner.className = 'fcs-kill-banner';
     killBanner.innerHTML = `
-      <span class="fcs-kill-banner-tag">ORDNANCE IMPACT</span>
-      <span class="fcs-kill-banner-title">TARGET DESTROYED</span>
+      <span class="fcs-kill-banner-tag">Ordnance impact</span>
+      <span class="fcs-kill-banner-title">Target destroyed</span>
     `;
     layer.appendChild(killBanner);
 
@@ -1670,86 +1393,24 @@ export class HUD {
       gunnerBore,
       boreReloadCircle,
       boreRangeText,
-      boreSubText,
       hitMarker,
       killBanner,
       damageArc,
     };
   }
 
-  private buildCompassTape(): {
-    wrap: HTMLDivElement;
-    canvas: HTMLCanvasElement;
-    ctx: CanvasRenderingContext2D;
-    readout: HTMLDivElement;
-  } {
-    const wrap = document.createElement('div');
-    wrap.className = 'fcs-compass-wrap';
-
-    const housing = document.createElement('div');
-    housing.className = 'hud-plate fcs-compass-housing';
-
-    const canvas = document.createElement('canvas');
-    canvas.className = 'fcs-compass-canvas';
-    const ctx = canvas.getContext('2d');
-    if (!ctx) {
-      throw new Error('Failed to acquire 2D context for HUD compass tape');
-    }
-    housing.appendChild(canvas);
-
-    const readout = document.createElement('div');
-    readout.className = 'fcs-compass-readout';
-    readout.textContent = '000° N';
-
-    wrap.append(housing, readout);
-    return { wrap, canvas, ctx, readout };
-  }
-
-  private buildTopRightStrip(): {
-    strip: HTMLDivElement;
-    hostiles: HTMLSpanElement;
-    kills: HTMLSpanElement;
-    fps: HTMLSpanElement;
-    quality: HTMLSpanElement;
-  } {
-    const strip = document.createElement('div');
-    strip.className = 'hud-plate fcs-topright-strip';
-
-    const makeCell = (label: string, initial: string, modClass?: string): HTMLSpanElement => {
-      const cell = document.createElement('div');
-      cell.className = 'fcs-stat-cell';
-      const lbl = document.createElement('span');
-      lbl.className = 'fcs-stat-label';
-      lbl.textContent = label;
-      const val = document.createElement('span');
-      val.className = modClass ? `fcs-stat-value ${modClass}` : 'fcs-stat-value';
-      val.textContent = initial;
-      cell.append(lbl, val);
-      strip.appendChild(cell);
-      return val;
-    };
-
-    const hostiles = makeCell('HOSTILES', '00', 'fcs-stat-value--amber');
-    const kills = makeCell('DESTROYED', '00');
-    const fps = makeCell('FPS', '60', 'fcs-stat-value--sage');
-    const quality = makeCell('PRESET', 'HIGH', 'fcs-stat-value--amber');
-
-    return { strip, hostiles, kills, fps, quality };
-  }
-
   private buildVehiclePanel(): {
     panel: HTMLDivElement;
     hullGroup: SVGGElement;
     turretGroup: SVGGElement;
-    trvText: HTMLDivElement;
     hpReadout: HTMLSpanElement;
     speedNum: HTMLSpanElement;
-    throttleFill: HTMLDivElement;
-    gearBox: HTMLDivElement;
     cannonStatus: HTMLSpanElement;
     cannonBarFill: HTMLDivElement;
     mgStatus: HTMLSpanElement;
     mgBarFill: HTMLDivElement;
+    pillEls: HTMLSpanElement[];
+    pillCodes: HTMLSpanElement[];
   } {
     const panel = document.createElement('div');
     panel.className = 'hud-plate fcs-vehicle-panel';
@@ -1776,7 +1437,7 @@ export class HUD {
 
     svg.innerHTML = `
       <!-- Polar Azimuth Ring & Camera Sight UP Caret -->
-      <circle cx="48" cy="48" r="45" fill="rgba(8,11,8,0.55)" stroke="rgba(232,169,56,0.22)" stroke-width="1"/>
+      <circle cx="48" cy="48" r="45" fill="rgba(8,11,8,0.55)" stroke="rgba(236,234,228,0.16)" stroke-width="1"/>
       ${azimuthTicks}
       <polygon points="48,2 45,7 51,7" fill="#E8A938" opacity="0.88"/>
 
@@ -1807,23 +1468,19 @@ export class HUD {
         <line x1="52.2" y1="24" x2="52.2" y2="35" stroke="rgba(234,230,220,0.65)" stroke-width="1.2"/>
         <!-- 120mm Smoothbore Gun + Bore Evacuator + Muzzle -->
         <line class="fcs-pd-gun-stroke" x1="48" y1="7" x2="48" y2="36" stroke-width="2.4"/>
-        <rect x="46.2" y="17" width="3.6" height="6.5" fill="#131712" stroke="#E8A938" stroke-width="1"/>
+        <rect x="46.2" y="17" width="3.6" height="6.5" fill="#131712" stroke="rgba(236,234,228,0.55)" stroke-width="1"/>
         <line class="fcs-pd-gun-stroke" x1="45.8" y1="7.5" x2="50.2" y2="7.5" stroke-width="1.8"/>
         <!-- Welded Composite MBT Turret & Rear Bustle -->
         <polygon class="fcs-pd-turret-fill" points="42,34 54,34 58,41 56.5,58 39.5,58 38,41" stroke-width="1.35"/>
-        <line x1="40.5" y1="53.5" x2="55.5" y2="53.5" stroke="rgba(232,169,56,0.48)" stroke-width="1"/>
-        <circle cx="51.5" cy="46.5" r="3" fill="rgba(19,23,18,0.8)" stroke="rgba(232,169,56,0.75)" stroke-width="1"/>
+        <line x1="40.5" y1="53.5" x2="55.5" y2="53.5" stroke="rgba(236,234,228,0.28)" stroke-width="1"/>
+        <circle cx="51.5" cy="46.5" r="3" fill="rgba(19,23,18,0.8)" stroke="rgba(236,234,228,0.6)" stroke-width="1"/>
       </g>
     `;
 
     const hullGroup = svg.querySelector('#fcs-pd-hull') as SVGGElement;
     const turretGroup = svg.querySelector('#fcs-pd-turret') as SVGGElement;
 
-    const trvText = document.createElement('div');
-    trvText.className = 'fcs-paperdoll-trv';
-    trvText.textContent = 'TRV +000°';
-
-    pdCol.append(svg, trvText);
+    pdCol.append(svg);
 
     // Right Column: Hull Armor, Drive Telemetry & Ordnance
     const sysCol = document.createElement('div');
@@ -1836,10 +1493,10 @@ export class HUD {
     hpHeader.className = 'fcs-bar-header';
     const hpTitle = document.createElement('span');
     hpTitle.className = 'fcs-bar-title';
-    hpTitle.textContent = 'HULL ARMOR';
+    hpTitle.textContent = 'Hull';
     const hpReadout = document.createElement('span');
     hpReadout.className = 'fcs-bar-readout';
-    hpReadout.textContent = '100 / 100';
+    hpReadout.textContent = '0 / 0';
     hpHeader.append(hpTitle, hpReadout);
 
     const hpSegments = document.createElement('div');
@@ -1852,7 +1509,7 @@ export class HUD {
     }
     hpBlock.append(hpHeader, hpSegments);
 
-    // 2. Speedometer + Throttle + Gear Row
+    // 2. Speedometer Row
     const driveRow = document.createElement('div');
     driveRow.className = 'fcs-drive-row';
 
@@ -1860,25 +1517,13 @@ export class HUD {
     speedGroup.className = 'fcs-speed-group';
     const speedNum = document.createElement('span');
     speedNum.className = 'fcs-speed-num';
-    speedNum.textContent = '00';
+    speedNum.textContent = '0';
     const speedUnit = document.createElement('span');
     speedUnit.className = 'fcs-speed-unit';
-    speedUnit.textContent = 'KM/H';
+    speedUnit.textContent = 'km/h';
     speedGroup.append(speedNum, speedUnit);
 
-    const driveRight = document.createElement('div');
-    driveRight.className = 'fcs-drive-right';
-    const throttleMeter = document.createElement('div');
-    throttleMeter.className = 'fcs-throttle-meter';
-    const throttleFill = document.createElement('div');
-    throttleFill.className = 'fcs-throttle-fill';
-    throttleMeter.appendChild(throttleFill);
-    const gearBox = document.createElement('div');
-    gearBox.className = 'fcs-gear-box';
-    gearBox.textContent = 'N';
-    driveRight.append(throttleMeter, gearBox);
-
-    driveRow.append(speedGroup, driveRight);
+    driveRow.append(speedGroup);
 
     // 3. Ordnance Status Bars (120mm HE-FRAG & 7.62mm COAX)
     const ordGrid = document.createElement('div');
@@ -1890,10 +1535,10 @@ export class HUD {
     cannonHeader.className = 'fcs-bar-header';
     const cannonTitle = document.createElement('span');
     cannonTitle.className = 'fcs-bar-title';
-    cannonTitle.textContent = '120MM HE-FRAG';
+    cannonTitle.textContent = 'Main gun';
     const cannonStatus = document.createElement('span');
     cannonStatus.className = 'fcs-bar-readout fcs-badge-ready';
-    cannonStatus.textContent = 'READY';
+    cannonStatus.textContent = 'Ready';
     cannonHeader.append(cannonTitle, cannonStatus);
     const cannonTrack = document.createElement('div');
     cannonTrack.className = 'fcs-linear-track';
@@ -1908,10 +1553,10 @@ export class HUD {
     mgHeader.className = 'fcs-bar-header';
     const mgTitle = document.createElement('span');
     mgTitle.className = 'fcs-bar-title';
-    mgTitle.textContent = '7.62MM COAX';
+    mgTitle.textContent = 'Coax';
     const mgStatus = document.createElement('span');
     mgStatus.className = 'fcs-bar-readout';
-    mgStatus.textContent = '00%';
+    mgStatus.textContent = '0%';
     mgHeader.append(mgTitle, mgStatus);
     const mgTrack = document.createElement('div');
     mgTrack.className = 'fcs-linear-track';
@@ -1925,13 +1570,23 @@ export class HUD {
     const shellPills = document.createElement('div');
     shellPills.id = 'fcs-shell-pills';
     shellPills.className = 'fcs-shell-pills';
-    const pill0 = document.createElement('span');
-    pill0.className = 'fcs-shell-pill is-active-shell';
-    pill0.textContent = '[1] APFSDS';
-    const pill1 = document.createElement('span');
-    pill1.className = 'fcs-shell-pill';
-    pill1.textContent = '[2] HE-FRAG';
-    shellPills.append(pill0, pill1);
+    const pillEls: HTMLSpanElement[] = [];
+    const pillCodes: HTMLSpanElement[] = [];
+    const mkPill = (key: string, code: string, active: boolean): HTMLSpanElement => {
+      const pill = document.createElement('span');
+      pill.className = `fcs-shell-pill${active ? ' is-active-shell' : ''}`;
+      const cap = document.createElement('span');
+      cap.className = 'fcs-key-cap';
+      cap.textContent = key;
+      const codeEl = document.createElement('span');
+      codeEl.className = 'fcs-shell-code';
+      codeEl.textContent = code;
+      pill.append(cap, codeEl);
+      pillEls.push(pill);
+      pillCodes.push(codeEl);
+      return pill;
+    };
+    shellPills.append(mkPill('1', 'APFSDS', true), mkPill('2', 'HE-FRAG', false));
 
     ordGrid.append(shellPills, cannonBlock, mgBlock);
     sysCol.append(hpBlock, driveRow, ordGrid);
@@ -1941,21 +1596,19 @@ export class HUD {
       panel,
       hullGroup,
       turretGroup,
-      trvText,
       hpReadout,
       speedNum,
-      throttleFill,
-      gearBox,
       cannonStatus,
       cannonBarFill,
       mgStatus,
       mgBarFill,
+      pillEls,
+      pillCodes,
     };
   }
 
   private buildRadarPanel(): {
     panel: HTMLDivElement;
-    coords: HTMLSpanElement;
     canvas: HTMLCanvasElement;
     ctx: CanvasRenderingContext2D;
   } {
@@ -1966,11 +1619,8 @@ export class HUD {
     header.className = 'fcs-radar-header';
     const title = document.createElement('span');
     title.className = 'fcs-radar-title';
-    title.textContent = 'TAC-RADAR // 220M';
-    const coords = document.createElement('span');
-    coords.className = 'fcs-radar-coords';
-    coords.textContent = 'X+000 Z+000';
-    header.append(title, coords);
+    title.textContent = `Radar · ${RADAR_RANGE_METERS} m`;
+    header.append(title);
 
     const frame = document.createElement('div');
     frame.className = 'fcs-radar-canvas-frame';
@@ -1983,7 +1633,7 @@ export class HUD {
     frame.appendChild(canvas);
 
     panel.append(header, frame);
-    return { panel, coords, canvas, ctx };
+    return { panel, canvas, ctx };
   }
 
   private buildEventFeed(): HTMLDivElement {
@@ -1995,14 +1645,32 @@ export class HUD {
       row.className = 'fcs-feed-row';
       const tag = document.createElement('span');
       tag.className = 'fcs-feed-tag';
+      const body = document.createElement('span');
+      body.className = 'fcs-feed-body';
       const text = document.createElement('span');
       text.className = 'fcs-feed-text';
-      row.append(tag, text);
+      const parts = document.createElement('span');
+      parts.className = 'fcs-feed-parts';
+      parts.style.display = 'none';
+      const actor = document.createElement('span');
+      actor.className = 'fcs-feed-actor';
+      const verb = document.createElement('span');
+      verb.className = 'fcs-feed-verb';
+      const target = document.createElement('span');
+      target.className = 'fcs-feed-target';
+      parts.append(actor, verb, target);
+      body.append(text, parts);
+      row.append(tag, body);
       wrap.appendChild(row);
       this.feedSlots.push({
         row,
         tag,
+        body,
         text,
+        parts,
+        actor,
+        verb,
+        target,
         lastId: -1,
         lastAccent: '',
         active: false,
@@ -2018,25 +1686,15 @@ export class HUD {
     barFill: HTMLDivElement;
   } {
     const banner = document.createElement('div');
-    banner.className = 'hud-plate hud-plate--crimson fcs-respawn-banner';
-
-    const kicker = document.createElement('div');
-    kicker.className = 'fcs-respawn-kicker';
-    kicker.textContent = 'CRITICAL HULL BREACH // CREW LOST';
+    banner.className = 'hud-plate fcs-respawn-banner';
 
     const title = document.createElement('div');
     title.className = 'fcs-respawn-title';
-    title.textContent = 'VEHICLE DESTROYED';
+    title.textContent = 'Vehicle destroyed';
 
-    const timerRow = document.createElement('div');
-    timerRow.className = 'fcs-respawn-timer-row';
-    const sub = document.createElement('span');
-    sub.className = 'fcs-respawn-sub';
-    sub.textContent = 'RESERVE UNIT DEPLOYING IN';
     const sec = document.createElement('span');
     sec.className = 'fcs-respawn-sec';
-    sec.textContent = '3.0S';
-    timerRow.append(sub, sec);
+    sec.textContent = 'Back in 3.0 s';
 
     const bar = document.createElement('div');
     bar.className = 'fcs-respawn-bar';
@@ -2044,18 +1702,13 @@ export class HUD {
     barFill.className = 'fcs-respawn-bar-fill';
     bar.appendChild(barFill);
 
-    banner.append(kicker, title, timerRow, bar);
+    banner.append(title, sec, bar);
     return { banner, sec, barFill };
   }
 
   private buildBriefingOverlay(): {
     backdrop: HTMLDivElement;
-    loaderStatus: HTMLSpanElement;
-    loaderPct: HTMLSpanElement;
-    loaderFill: HTMLDivElement;
-    qualityBtn: HTMLButtonElement;
-    qualityHighOpt: HTMLSpanElement;
-    qualityMedOpt: HTMLSpanElement;
+    loaderFill: HTMLSpanElement;
     engageBtn: HTMLButtonElement;
     engageMainText: HTMLSpanElement;
     engageSubText: HTMLSpanElement;
@@ -2066,108 +1719,84 @@ export class HUD {
     const modal = document.createElement('div');
     modal.className = 'hud-plate fcs-briefing-modal';
 
-    // Header
-    const top = document.createElement('div');
-    top.className = 'fcs-briefing-top';
-
-    const titleGroup = document.createElement('div');
+    const head = document.createElement('div');
+    head.className = 'fcs-briefing-head';
     const title = document.createElement('h1');
     title.className = 'fcs-briefing-title';
-    title.textContent = 'UNTITLED TANK GAME';
-    titleGroup.append(title);
-    top.append(titleGroup);
+    title.textContent = 'untitled tank game';
+    const sub = document.createElement('p');
+    sub.className = 'fcs-briefing-sub';
+    sub.textContent = 'Team deathmatch · 6 v 6 · no score limit';
+    head.append(title, sub);
 
-    // Vehicle Class Selector (Normal MBT, Heavy Tank, IFV)
+    // Vehicle Class Selector
     const classSection = document.createElement('div');
-    const classHeading = document.createElement('div');
-    classHeading.className = 'fcs-section-heading';
-    classHeading.innerHTML = '<span>SELECT VEHICLE</span><span>5 CLASSES · 2 SHELLS EACH</span>';
+    classSection.className = 'fcs-bsec';
+    const classLabel = document.createElement('div');
+    classLabel.className = 'fcs-bsec-label';
+    classLabel.textContent = 'Vehicle';
 
-    const classGrid = document.createElement('div');
-    classGrid.className = 'fcs-class-grid';
-
-    const classSpecs: readonly { id: VehicleClass; title: string; sub: string }[] = [
-      { id: 'normal', title: 'NORMAL MBT', sub: '65 KM/H · APFSDS + HE' },
-      { id: 'heavy', title: 'HEAVY TANK', sub: '152MM · ERA ARMOR' },
-      { id: 'ifv', title: 'IFV (AUTO-MG)', sub: '87 KM/H · INF AMMO' },
-      { id: 'humvee', title: 'HUMVEE', sub: '108 KM/H · M2 .50CAL' },
-      { id: 'rocket', title: 'MLRS ARTY', sub: '79 KM/H · 6-RD SALVO' },
-    ];
+    const classList = document.createElement('div');
+    classList.className = 'fcs-vlist';
 
     const classBtns: HTMLButtonElement[] = [];
-    classSpecs.forEach((spec, idx) => {
+    BRIEFING_VEHICLES.forEach((spec, idx) => {
+      const stats = TANK_STATS[spec.id];
+      const kmh = Math.floor(stats.maxForwardSpeed * 3.6);
+      const armament = spec.id === 'rocket' && stats.salvoSize
+        ? `${stats.salvoSize}-rocket salvo`
+        : spec.armament;
+
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = `fcs-class-card${idx === 0 ? ' is-selected' : ''}`;
-      btn.innerHTML = `<span class="fcs-class-card-title">${spec.title}</span><span class="fcs-class-card-sub">${spec.sub}</span>`;
+      btn.className = `fcs-vrow${idx === 0 ? ' is-selected' : ''}`;
+      const name = document.createElement('span');
+      name.className = 'fcs-vname';
+      name.textContent = spec.name;
+      const specEl = document.createElement('span');
+      specEl.className = 'fcs-vspec';
+      specEl.textContent = `${kmh} km/h · ${armament}`;
+      btn.append(name, specEl);
       btn.addEventListener('click', () => {
         classBtns.forEach((b) => b.classList.remove('is-selected'));
         btn.classList.add('is-selected');
         this.callbacks.onSelectVehicleClass?.(spec.id);
       });
       classBtns.push(btn);
-      classGrid.appendChild(btn);
+      classList.appendChild(btn);
     });
-    classSection.append(classHeading, classGrid);
+    classSection.append(classLabel, classList);
 
-    // Keybind Matrix
+    // Controls matrix
     const kbSection = document.createElement('div');
-    const kbHeading = document.createElement('div');
-    kbHeading.className = 'fcs-section-heading';
-    kbHeading.innerHTML = '<span>CONTROLS</span><span>ESC // PAUSE</span>';
+    kbSection.className = 'fcs-bsec';
+    const kbLabel = document.createElement('div');
+    kbLabel.className = 'fcs-bsec-label';
+    kbLabel.textContent = 'Controls';
 
     const kbGrid = document.createElement('div');
-    kbGrid.className = 'fcs-keybind-grid';
+    kbGrid.className = 'fcs-kbgrid';
 
-    const keybinds: readonly [string, string][] = [
-      ['W / A / S / D', 'Drive & Steer'],
-      ['MOUSE', 'Aim Turret'],
-      ['LEFT CLICK', 'Fire Main Gun'],
-      ['RIGHT CLICK', 'Zoom Sight'],
-      ['1 / 2 or Q', 'Switch Shell Type'],
-      ['SPACE', 'Machine Gun'],
-    ];
-
-    for (let i = 0; i < keybinds.length; i++) {
-      const [key, desc] = keybinds[i];
+    for (const { keys, action } of BRIEFING_CONTROLS) {
       const row = document.createElement('div');
-      row.className = 'fcs-keybind-row';
-      const cap = document.createElement('span');
-      cap.className = 'fcs-key-cap';
-      cap.textContent = key;
-      const d = document.createElement('span');
-      d.className = 'fcs-key-desc';
-      d.textContent = desc;
-      row.append(cap, d);
+      row.className = 'fcs-kbrow';
+      const caps = document.createElement('span');
+      caps.className = 'fcs-kbcaps';
+      for (const key of keys) {
+        const cap = document.createElement('span');
+        cap.className = 'fcs-key-cap';
+        cap.textContent = key;
+        caps.appendChild(cap);
+      }
+      const desc = document.createElement('span');
+      desc.className = 'fcs-key-desc';
+      desc.textContent = action;
+      row.append(caps, desc);
       kbGrid.appendChild(row);
     }
-    kbSection.append(kbHeading, kbGrid);
+    kbSection.append(kbLabel, kbGrid);
 
-    const qualityBtn = document.createElement('button');
-    const qualityHighOpt = document.createElement('span');
-    const qualityMedOpt = document.createElement('span');
-
-    // Asset Loading Bar (auto-hides once loaded)
-    const loaderBlock = document.createElement('div');
-    loaderBlock.className = 'fcs-loader-block';
-    const loaderHeader = document.createElement('div');
-    loaderHeader.className = 'fcs-loader-header';
-    const loaderStatus = document.createElement('span');
-    loaderStatus.className = 'fcs-loader-status';
-    loaderStatus.textContent = 'Loading...';
-    const loaderPct = document.createElement('span');
-    loaderPct.className = 'fcs-loader-pct';
-    loaderPct.textContent = '0%';
-    loaderHeader.append(loaderStatus, loaderPct);
-
-    const loaderTrack = document.createElement('div');
-    loaderTrack.className = 'fcs-loader-track';
-    const loaderFill = document.createElement('div');
-    loaderFill.className = 'fcs-loader-fill';
-    loaderTrack.appendChild(loaderFill);
-    loaderBlock.append(loaderHeader, loaderTrack);
-
-    // Primary Play Button
+    // Primary Play Button with bottom-edge loading bar
     const engageBtn = document.createElement('button');
     engageBtn.type = 'button';
     engageBtn.className = 'fcs-engage-btn';
@@ -2175,25 +1804,26 @@ export class HUD {
 
     const engageMainText = document.createElement('span');
     engageMainText.className = 'fcs-engage-main';
-    engageMainText.textContent = 'PLAY';
+    engageMainText.textContent = 'Loading';
 
     const engageSubText = document.createElement('span');
     engageSubText.className = 'fcs-engage-sub';
     engageSubText.textContent = '';
 
-    engageBtn.append(engageMainText, engageSubText);
+    const engageLoader = document.createElement('span');
+    engageLoader.className = 'fcs-engage-loader';
+    const loaderFill = document.createElement('span');
+    loaderFill.className = 'fcs-engage-fill';
+    engageLoader.appendChild(loaderFill);
 
-    modal.append(top, classSection, kbSection, loaderBlock, engageBtn);
+    engageBtn.append(engageMainText, engageSubText, engageLoader);
+
+    modal.append(head, classSection, kbSection, engageBtn);
     backdrop.appendChild(modal);
 
     return {
       backdrop,
-      loaderStatus,
-      loaderPct,
       loaderFill,
-      qualityBtn,
-      qualityHighOpt,
-      qualityMedOpt,
       engageBtn,
       engageMainText,
       engageSubText,
