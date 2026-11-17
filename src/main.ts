@@ -111,7 +111,7 @@ async function bootstrap(): Promise<void> {
   renderer.shadowMap.autoUpdate = false;
   renderer.shadowMap.needsUpdate = true;
 
-  const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.3, 900);
+  const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.3, 1400);
   const scene = new THREE.Scene();
 
   let controllerRef: PlayerController | null = null;
@@ -218,6 +218,15 @@ async function bootstrap(): Promise<void> {
       radius: o.radius,
       kind: o.kind,
     }));
+
+  // Static terrain layers for the tactical radar (rivers + mounds)
+  const radarRivers = world.getRiverRadarSamples();
+  const radarMounds = world.getMoundRadarSamples();
+
+  // River ford telemetry: per-bot side flips across each centreline
+  const riverSidesNow = [0, 0];
+  const riverSidePrev: number[][] = bots.map(() => [0, 0]);
+  const riverCrossings: number[][] = bots.map(() => [0, 0]);
 
   // Cursor-lock prompt (top-center)
   const lockBannerEl = document.createElement('button');
@@ -346,6 +355,9 @@ async function bootstrap(): Promise<void> {
     onTrackDust: (pos: THREE.Vector3, intensity01: number) => {
       effects.spawnTrackDust(pos, intensity01);
     },
+    onWaterWake: (pos: THREE.Vector3, intensity01: number) => {
+      effects.spawnWaterWake(pos, intensity01);
+    },
     onWreckSmoke: (pos: THREE.Vector3) => {
       effects.spawnWreckSmoke(pos);
     },
@@ -470,7 +482,7 @@ async function bootstrap(): Promise<void> {
 
     ballistics.update(dt, world, allTanks, handleDamage);
     match.update(dt);
-    world.update(dt, human.position);
+    world.update(dt, human.position, camera.position);
     effects.update(dt, camera);
     destruction.update(dt, camera.position);
 
@@ -500,6 +512,17 @@ async function bootstrap(): Promise<void> {
         } else {
           u.spotted = false;
         }
+      }
+
+      // Ford tracking: a crossing = side flip between two non-zero readings
+      world.getRiverSides(e.position.x, e.position.z, riverSidesNow);
+      const prevSides = riverSidePrev[i];
+      const cross = riverCrossings[i];
+      for (let ri = 0; ri < riverSidesNow.length; ri++) {
+        const s = riverSidesNow[ri];
+        const p = prevSides[ri];
+        if (s !== 0 && p !== 0 && s !== p) cross[ri]++;
+        if (s !== 0) prevSides[ri] = s;
       }
     }
   };
@@ -629,6 +652,8 @@ async function bootstrap(): Promise<void> {
         worldHalfSize: world.worldHalfSize,
         units: minimapUnits,
         obstacles: minimapObstacles,
+        rivers: radarRivers,
+        mounds: radarMounds,
       },
     };
 
@@ -746,6 +771,18 @@ async function bootstrap(): Promise<void> {
     },
     clearCameraForTest: () => {
       cameraOverrideActive = false;
+    },
+    /** Free-roam stress: teleports the player along a serpentine path every
+     *  call to force grass-chunk/terrain work; returns current position. */
+    teleportRoamForTest: (leg: number) => {
+      const t = match.human;
+      // Serpentine across the map: x sweeps -400..400, z oscillates 0..±300
+      const phase = (leg % 8) / 8;
+      const x = -400 + phase * 800;
+      const z = Math.sin(leg * 0.9) * 300;
+      const y = world.getHeightAt(x, z);
+      t.respawnAt(_markerWorldPos.set(x, y, z), Math.atan2(-x, -z));
+      return { x, y, z };
     },
     setWreckFxVisible: (v: boolean) => effects.setWreckFxVisible(v),
     killForTest: (tankId: string, catastrophic: boolean) => {
@@ -939,6 +976,81 @@ async function bootstrap(): Promise<void> {
         stepSimulation(1 / 30);
       }
     },
+    /** Precise teleport for verification shots (x, z, yaw radians). */
+    teleportForTest: (x: number, z: number, yaw = 0) => {
+      const t = match.human;
+      const y = world.getHeightAt(x, z);
+      t.respawnAt(_markerWorldPos.set(x, y, z), yaw);
+      return { x, y, z };
+    },
+    /** Fire a shell straight down into the river at (x,z) for splash shots. */
+    splashAtForTest: (x: number, z: number) => {
+      const lvl = world.getWaterLevelAt(x, z);
+      const depth = world.getWaterDepthAt(x, z);
+      if (depth <= 0.05) return { ok: false, reason: 'no water', depth };
+      const dir = new THREE.Vector3(0, -1, 0);
+      const pos = new THREE.Vector3(x, lvl + 60, z);
+      ballistics.fireCannon(match.human, pos, dir, match.human.activeShell);
+      return { ok: true, depth, level: lvl };
+    },
+    /** Single-point water query for ford scouting. */
+    waterAtForTest: (x: number, z: number) => ({
+      depth: world.getWaterDepthAt(x, z),
+      level: world.getWaterLevelAt(x, z),
+      height: world.getHeightAt(x, z),
+    }),
+    /** World/terrain probe for F2 verification. */
+    probeWorld: () => ({
+      worldHalfSize: world.worldHalfSize,
+      mounds: world.moundCount,
+      moundSamples: world.getMoundRadarSamples(),
+      rivers: world.riverCount,
+      obstacles: world.obstacleCount,
+      grass: world.grassStats,
+      waterSamples: [
+        { x: 0, z: -170, depth: world.getWaterDepthAt(0, -170), level: world.getWaterLevelAt(0, -170) },
+        { x: 100, z: -170, depth: world.getWaterDepthAt(100, -170), level: world.getWaterLevelAt(100, -170) },
+        { x: -200, z: -170, depth: world.getWaterDepthAt(-200, -170), level: world.getWaterLevelAt(-200, -170) },
+        { x: 0, z: 170, depth: world.getWaterDepthAt(0, 170), level: world.getWaterLevelAt(0, 170) },
+        { x: 100, z: 170, depth: world.getWaterDepthAt(100, 170), level: world.getWaterLevelAt(100, 170) },
+        { x: 0, z: 0, depth: world.getWaterDepthAt(0, 0), level: world.getWaterLevelAt(0, 0) },
+        { x: 0, z: -420, depth: world.getWaterDepthAt(0, -420) },
+        { x: 0, z: 420, depth: world.getWaterDepthAt(0, 420) },
+      ],
+      spawnChecks: (() => {
+        const out: { x: number; z: number; ok: boolean; depth: number }[] = [];
+        let seed = 1234567;
+        const rng = () => {
+          seed = (seed * 1664525 + 1013904223) >>> 0;
+          return seed / 4294967296;
+        };
+        for (let i = 0; i < 30; i++) {
+          const ang = rng() * Math.PI * 2;
+          const rad = 10 + rng() * 30;
+          const bz = i % 2 === 0 ? -420 : 420;
+          const x = Math.cos(ang) * rad;
+          const z = bz + Math.sin(ang) * rad;
+          const depth = world.getWaterDepthAt(x, z);
+          out.push({ x: Math.round(x), z: Math.round(z), ok: depth <= 0.02, depth: Math.round(depth * 100) / 100 });
+        }
+        return out;
+      })(),
+    }),
+    getRiverCrossings: () => ({
+      // [botIndex][riverIndex] crossing counts; river 0 = south (~z=-170), 1 = north (~z=+170)
+      perBot: riverCrossings.map((r) => [r[0], r[1]]),
+      bots: bots.map((b, i) => ({
+        id: b.id,
+        team: b.team,
+        cls: b.stats.vehicleClass,
+        south: riverCrossings[i]?.[0] ?? 0,
+        north: riverCrossings[i]?.[1] ?? 0,
+      })),
+      totals: [
+        riverCrossings.reduce((s, r) => s + r[0], 0),
+        riverCrossings.reduce((s, r) => s + r[1], 0),
+      ],
+    }),
     getMatchState: () => ({
       score: { blue: match.score.blue, red: match.score.red },
       friendlyFireEvents,

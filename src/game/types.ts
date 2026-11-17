@@ -60,6 +60,10 @@ export interface TerrainQuery {
     avoidPoints: readonly THREE.Vector3[],
     center?: { x: number; z: number }
   ): THREE.Vector3;
+  /** Water depth in meters at (x,z); 0 outside river corridors. Optional: dry worlds omit it. */
+  getWaterDepthAt?(x: number, z: number): number;
+  /** River surface level at (x,z); 0 outside river corridors. */
+  getWaterLevelAt?(x: number, z: number): number;
 }
 
 export interface NormalizedTankTemplate {
@@ -296,6 +300,21 @@ export interface MinimapObstacle {
   kind: ObstacleKind;
 }
 
+/** River centreline sample for the tactical radar (world space). */
+export interface RadarRiverSample {
+  x: number;
+  z: number;
+  halfWidth: number;
+}
+
+/** Terrain mound footprint for the tactical radar. */
+export interface RadarMound {
+  x: number;
+  z: number;
+  radius: number;
+  height: number;
+}
+
 export interface HUDTelemetry {
   vehicleClass: VehicleClass;
   activeShellIndex: 0 | 1;
@@ -364,5 +383,7 @@ export interface HUDTelemetry {
     worldHalfSize: number;
     units: readonly MinimapUnit[];
     obstacles: readonly MinimapObstacle[];
+    rivers?: readonly (readonly RadarRiverSample[])[];
+    mounds?: readonly RadarMound[];
   };
 }

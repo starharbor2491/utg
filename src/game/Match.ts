@@ -16,8 +16,8 @@ export interface MatchFeedEntry {
 
 const MAX_FEED = 6;
 const FEED_TTL = 8.0;
-const BASE_BLUE = { x: 0, z: -205 };
-const BASE_RED = { x: 0, z: 205 };
+const BASE_BLUE = { x: 0, z: -420 };
+const BASE_RED = { x: 0, z: 420 };
 const SPAWN_RADIUS_MIN = 0;
 const SPAWN_RADIUS_MAX = 35;
 

@@ -737,6 +737,66 @@ export class HUD {
     // Draw terrain obstacle footprints by kind
     this.drawRadarObstacles(ctx, obstacles, playerX, playerZ, sinCam, cosCam, cx, cy, scale, rScope);
 
+    // Rivers: filled blue-grey bands along each centreline polyline
+    const rivers = t.minimap.rivers;
+    if (rivers && rivers.length > 0) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(cx, cy, rScope, 0, TWO_PI);
+      ctx.clip();
+      ctx.fillStyle = 'rgba(74, 108, 122, 0.42)';
+      ctx.strokeStyle = 'rgba(120, 158, 170, 0.55)';
+      ctx.lineWidth = 0.8;
+      for (const river of rivers) {
+        for (let i = 0; i < river.length; i++) {
+          const s = river[i];
+          const p = projectXZ(s.x, s.z);
+          const r = Math.max(1.2, s.halfWidth * scale);
+          ctx.beginPath();
+          ctx.arc(p[0], p[1], r, 0, TWO_PI);
+          ctx.fill();
+          if (i > 0) {
+            const prev = river[i - 1];
+            const pp = projectXZ(prev.x, prev.z);
+            const pr = Math.max(1.2, prev.halfWidth * scale);
+            ctx.beginPath();
+            ctx.moveTo(pp[0], pp[1] - pr);
+            ctx.lineTo(p[0], p[1] - r);
+            ctx.lineTo(p[0], p[1] + r);
+            ctx.lineTo(pp[0], pp[1] + pr);
+            ctx.closePath();
+            ctx.stroke();
+          }
+        }
+      }
+      ctx.restore();
+    }
+
+    // Mounds: faint contour circles (two rings = crest + shoulder)
+    const mounds = t.minimap.mounds;
+    if (mounds && mounds.length > 0) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(cx, cy, rScope, 0, TWO_PI);
+      ctx.clip();
+      ctx.strokeStyle = 'rgba(168, 148, 96, 0.35)';
+      ctx.lineWidth = 0.7;
+      ctx.setLineDash([2.5, 2.5]);
+      for (const m of mounds) {
+        const p = projectXZ(m.x, m.z);
+        const rr = m.radius * scale;
+        if (rr < 1.5) continue;
+        ctx.beginPath();
+        ctx.arc(p[0], p[1], rr, 0, TWO_PI);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(p[0], p[1], rr * 0.45, 0, TWO_PI);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+
     // Concentric 100m & 200m cartographic range rings + scope crosshairs
     ctx.strokeStyle = 'rgba(143, 168, 118, 0.16)';
     ctx.lineWidth = 0.75;

@@ -1776,6 +1776,139 @@ export class EffectsManager {
   }
 
   /**
+   * Track/wheel spray trailing behind a fording vehicle: a few pale,
+   * short-lived droplets arcing off the water surface.
+   */
+  public spawnWaterWake(pos: THREE.Vector3, intensity01: number): void {
+    const k = Math.max(0, Math.min(1, intensity01));
+    if (k < 0.05) return;
+
+    for (let i = 0; i < 2; i++) {
+      const p = this._allocSmoke();
+      p.active = true;
+      p.age = 0;
+      p.maxAge = randRange(0.4, 0.75);
+      p.px = pos.x + randRange(-0.5, 0.5);
+      p.py = pos.y + randRange(0.0, 0.25);
+      p.pz = pos.z + randRange(-0.5, 0.5);
+      p.vx = randRange(-1.6, 1.6);
+      p.vy = randRange(1.6, 3.8) * (0.5 + 0.6 * k);
+      p.vz = randRange(-1.6, 1.6);
+      p.drag = 2.6;
+      p.buoyancy = 1.4;
+      p.startScale = randRange(0.3, 0.55) * (0.6 + 0.6 * k);
+      p.endScale = randRange(1.0, 1.8) * (0.6 + 0.6 * k);
+      p.rot = Math.random() * Math.PI * 2;
+      p.rotSpeed = randRange(-1.6, 1.6);
+      p.r0 = 0.72;
+      p.g0 = 0.82;
+      p.b0 = 0.86;
+      p.rMid = 0.55;
+      p.gMid = 0.68;
+      p.bMid = 0.72;
+      p.midFrac = 0.4;
+      p.r1 = 0.40;
+      p.g1 = 0.52;
+      p.b1 = 0.58;
+      p.peakAlpha = 0.4 * k;
+      p.fadeInFrac = 0.1;
+    }
+  }
+
+  /**
+   * Projectile/ordnance water impact: pale column of spray + droplets + a
+   * small foam flash at the surface point.
+   */
+  public spawnWaterSplash(pos: THREE.Vector3, scale = 1): void {
+    const s = Math.max(0.4, scale);
+
+    const sprayCount = Math.round(9 * s) + 4;
+    for (let i = 0; i < sprayCount; i++) {
+      const p = this._allocSmoke();
+      p.active = true;
+      p.age = 0;
+      p.maxAge = randRange(0.5, 0.95);
+      p.px = pos.x + randRange(-0.5, 0.5) * s;
+      p.py = pos.y + randRange(0.0, 0.4);
+      p.pz = pos.z + randRange(-0.5, 0.5) * s;
+      const theta = Math.random() * Math.PI * 2;
+      const outSpd = randRange(0.8, 4.2) * s;
+      p.vx = Math.cos(theta) * outSpd;
+      p.vy = randRange(3.5, 8.5) * s;
+      p.vz = Math.sin(theta) * outSpd;
+      p.drag = 1.9;
+      p.buoyancy = 2.2;
+      p.startScale = randRange(0.45, 0.85) * s;
+      p.endScale = randRange(1.5, 2.7) * s;
+      p.rot = Math.random() * Math.PI * 2;
+      p.rotSpeed = randRange(-1.4, 1.4);
+      p.r0 = 0.80;
+      p.g0 = 0.88;
+      p.b0 = 0.92;
+      p.rMid = 0.60;
+      p.gMid = 0.72;
+      p.bMid = 0.77;
+      p.midFrac = 0.4;
+      p.r1 = 0.42;
+      p.g1 = 0.55;
+      p.b1 = 0.62;
+      p.peakAlpha = 0.62;
+      p.fadeInFrac = 0.05;
+    }
+
+    // Droplets: short ballistic sparks
+    const dropCount = Math.round(6 * s) + 2;
+    for (let i = 0; i < dropCount; i++) {
+      const sp = this._allocSpark();
+      sp.active = true;
+      sp.age = 0;
+      sp.maxAge = randRange(0.3, 0.6);
+      sp.px = pos.x + randRange(-0.3, 0.3) * s;
+      sp.py = pos.y + 0.15;
+      sp.pz = pos.z + randRange(-0.3, 0.3) * s;
+      const theta = Math.random() * Math.PI * 2;
+      const outSpd = randRange(2.5, 7.5) * s;
+      sp.vx = Math.cos(theta) * outSpd;
+      sp.vy = randRange(4.0, 9.0) * s;
+      sp.vz = Math.sin(theta) * outSpd;
+      sp.drag = 0.6;
+      sp.gravity = 12.5;
+      sp.width = 0.05;
+      sp.baseLen = 0.14;
+      sp.stretch = 0.035;
+      sp.floorY = -999;
+      sp.r0 = 1.5;
+      sp.g0 = 1.8;
+      sp.b0 = 1.9;
+      sp.r1 = 0.5;
+      sp.g1 = 0.65;
+      sp.b1 = 0.72;
+    }
+
+    // Foam crown flash
+    const flash = this._allocFlash();
+    flash.active = true;
+    flash.age = 0;
+    flash.maxAge = 0.14;
+    flash.px = pos.x;
+    flash.py = pos.y + 0.3;
+    flash.pz = pos.z;
+    flash.vx = 0;
+    flash.vy = 0.8;
+    flash.vz = 0;
+    flash.startScaleX = 1.6 * s;
+    flash.startScaleY = 1.6 * s;
+    flash.endScaleX = 3.4 * s;
+    flash.endScaleY = 3.4 * s;
+    flash.rot = Math.random() * Math.PI * 2;
+    flash.rotSpeed = 0;
+    flash.billboard = true;
+    flash.r = 1.6;
+    flash.g = 1.9;
+    flash.b = 2.0;
+  }
+
+  /**
    * Dense grey exhaust smoke + flickering motor flare emitted at a burning
    * rocket's tail while `rocket.burnTime` is active.
    */

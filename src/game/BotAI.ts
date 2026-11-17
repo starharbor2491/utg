@@ -42,15 +42,15 @@ function aimWanderRadians(_cls: VehicleClass): number {
 function idealOrbitDistForClass(cls: VehicleClass): number {
   if (cls === 'heavy') return 112;
   if (cls === 'ifv') return 78;
-  if (cls === 'rocket') return 185; // standoff artillery band 140-230m
+  if (cls === 'rocket') return 420; // standoff artillery band ~180-380m
   if (cls === 'humvee') return 92;
   return 96;
 }
 
-const ADVANCE_LANES = [-120, -40, 40, 120];
-const MAX_ACQUIRE_RANGE = 300;
+const ADVANCE_LANES = [-220, -80, 80, 220];
+const MAX_ACQUIRE_RANGE = 460;
 const MAX_ACQUIRE_RANGE_SQ = MAX_ACQUIRE_RANGE * MAX_ACQUIRE_RANGE;
-const TARGET_DROP_RANGE = 320;
+const TARGET_DROP_RANGE = 480;
 
 interface BotBrain {
   id: string;
@@ -224,6 +224,14 @@ export class BotAIManager {
         if (dx * dx + dz * dz < pad * pad) {
           clear = false;
           break;
+        }
+      }
+      // Waypoints must be fordable: no deep water, no mound faces too steep to climb
+      if (clear) {
+        if ((world.getWaterDepthAt?.(wx, wz) ?? 0) > 0.4) clear = false;
+        else {
+          const n = world.getNormalAt(wx, wz, this._losDir);
+          if (n.y < 0.62) clear = false;
         }
       }
       if (clear || attempt === 7) {
@@ -877,16 +885,16 @@ export class BotAIManager {
         intent.fireCannon =
           losClear &&
           brain.losLockTimer >= 2.2 &&
-          distToTarget > 90 &&
-          distToTarget < 260 &&
+          distToTarget > 140 &&
+          distToTarget < 420 &&
           boreAngle <= 0.05;
       } else {
-        // Forgiving bot fire: requires 2.2s continuous LOS lock, range < 190m
+        // Forgiving bot fire: requires 2.2s continuous LOS lock, range < 340m
         intent.fireCannon =
           bot.stats.hasMainCannon &&
           losClear &&
           brain.losLockTimer >= 2.2 &&
-          distToTarget < 190 &&
+          distToTarget < 340 &&
           boreAngle <= 0.16;
       }
 

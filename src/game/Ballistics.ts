@@ -276,6 +276,24 @@ export function predictBarrelImpact(
       return muzzlePos.distanceTo(outPoint);
     }
 
+    // 2b. River surface crossing
+    const pmx = (_predPrev.x + _predNext.x) * 0.5;
+    const pmz = (_predPrev.z + _predNext.z) * 0.5;
+    if ((world.getWaterDepthAt?.(pmx, pmz) ?? 0) > 0.03) {
+      const lvl = world.getWaterLevelAt?.(pmx, pmz) ?? 0;
+      const py = _predPrev.y;
+      const ny = _predNext.y;
+      if (py > lvl && ny <= lvl) {
+        const f = (py - lvl) / Math.max(1e-4, py - ny);
+        const wDist = f * segLen;
+        if (wDist < closestDist) {
+          outPoint.copy(_predPrev).addScaledVector(_segDir, wDist);
+          outPoint.y = lvl;
+          return muzzlePos.distanceTo(outPoint);
+        }
+      }
+    }
+
     if (hitFound) {
       outPoint.copy(_predPrev).addScaledVector(_segDir, closestDist);
       return muzzlePos.distanceTo(outPoint);
@@ -759,6 +777,28 @@ export class BallisticsManager {
       // Check terrain + obstacle raycast
       let worldHit = world.raycastWorld(this._prevPos, this._segDir, segLen);
 
+      // River surface crossing: segment dips through the water plane inside a corridor
+      let waterDist = Infinity;
+      let waterLevelY = 0;
+      {
+        const mx = (this._prevPos.x + this._nextPos.x) * 0.5;
+        const mz = (this._prevPos.z + this._nextPos.z) * 0.5;
+        const wDepth = world.getWaterDepthAt?.(mx, mz) ?? 0;
+        if (wDepth > 0.03) {
+          const lvl = world.getWaterLevelAt?.(mx, mz) ?? 0;
+          const py = this._prevPos.y;
+          const ny = this._nextPos.y;
+          if (py > lvl && ny <= lvl) {
+            const f = (py - lvl) / Math.max(1e-4, py - ny);
+            waterDist = f * segLen;
+            waterLevelY = lvl;
+          } else if (py <= lvl && ny <= lvl) {
+            waterDist = 0;
+            waterLevelY = lvl;
+          }
+        }
+      }
+
       // Safety fallback against terrain floor tunneling
       if (!worldHit) {
         const floorY = world.getHeightAt(this._nextPos.x, this._nextPos.z);
@@ -779,8 +819,9 @@ export class BallisticsManager {
       }
 
       const worldDist = worldHit ? worldHit.distance : Infinity;
+      const impactIsWater = waterDist <= worldDist;
 
-      if (hitTank !== null || worldHit !== null) {
+      if (hitTank !== null || worldHit !== null || waterDist < Infinity) {
         s.active = false;
         if (s.shooter) {
           this._attackerPos.copy(s.shooter.position);
@@ -827,6 +868,14 @@ export class BallisticsManager {
             killed ? 1.38 : s.explosionScale,
             killed ? 'tank_kill' : 'he_armor'
           );
+        } else if (impactIsWater && (!worldHit || waterDist <= worldHit.distance)) {
+          // Shell stops at the surface: splash + reduced HE detonation in the water
+          const wHitX = this._prevPos.x + this._segDir.x * waterDist;
+          const wHitZ = this._prevPos.z + this._segDir.z * waterDist;
+          this._hitPoint.set(wHitX, waterLevelY + 0.15, wHitZ);
+          this._hitNormal.set(0, 1, 0);
+          this.effects.spawnWaterSplash(this._hitPoint, s.explosionScale * 1.6);
+          this.effects.spawnExplosion(this._hitPoint, this._hitNormal, s.explosionScale * 0.45, 'he_ground');
         } else if (worldHit !== null) {
           this._hitPoint.copy(worldHit.point);
           this._hitNormal.copy(worldHit.normal);
@@ -846,7 +895,8 @@ export class BallisticsManager {
         }
 
         // HE-FRAG Splash Radius: knock down destructible obstacles & deal radial falloff damage
-        const R = s.splashRadius;
+        // Water impacts burst half as far and flatter.
+        const R = impactIsWater ? s.splashRadius * 0.5 : s.splashRadius;
         if (R > 0) {
           const obstacles = world.getObstacles();
           for (let oIdx = 0; oIdx < obstacles.length; oIdx++) {
@@ -976,7 +1026,30 @@ export class BallisticsManager {
       const worldHit = world.raycastWorld(this._prevPos, this._segDir, segLen);
       const worldDist = worldHit ? worldHit.distance : Infinity;
 
-      if (hitTank !== null || worldHit !== null) {
+      // River surface crossing
+      let mgWaterDist = Infinity;
+      let mgWaterY = 0;
+      {
+        const mx = (this._prevPos.x + this._nextPos.x) * 0.5;
+        const mz = (this._prevPos.z + this._nextPos.z) * 0.5;
+        const wDepth = world.getWaterDepthAt?.(mx, mz) ?? 0;
+        if (wDepth > 0.03) {
+          const lvl = world.getWaterLevelAt?.(mx, mz) ?? 0;
+          const py = this._prevPos.y;
+          const ny = this._nextPos.y;
+          if (py > lvl && ny <= lvl) {
+            const f = (py - lvl) / Math.max(1e-4, py - ny);
+            mgWaterDist = f * segLen;
+            mgWaterY = lvl;
+          } else if (py <= lvl && ny <= lvl) {
+            mgWaterDist = 0;
+            mgWaterY = lvl;
+          }
+        }
+      }
+      const mgWaterHit = mgWaterDist <= worldDist && mgWaterDist < Infinity;
+
+      if (hitTank !== null || worldHit !== null || mgWaterHit) {
         m.active = false;
         if (m.shooter) {
           this._attackerPos.copy(m.shooter.position);
@@ -1020,6 +1093,41 @@ export class BallisticsManager {
           }
           if (killed) {
             this.effects.spawnExplosion(this._victimCenter, this._up, 1.3, 'tank_kill');
+          }
+        } else if (mgWaterHit && (!worldHit || mgWaterDist <= worldHit.distance)) {
+          const wHitX = this._prevPos.x + this._segDir.x * mgWaterDist;
+          const wHitZ = this._prevPos.z + this._segDir.z * mgWaterDist;
+          this._hitPoint.set(wHitX, mgWaterY + 0.1, wHitZ);
+          this._hitNormal.set(0, 1, 0);
+          if (m.splashRadius > 0) {
+            this.effects.spawnWaterSplash(this._hitPoint, 0.9);
+            this.effects.spawnExplosion(this._hitPoint, this._hitNormal, 0.3, 'he_ground');
+            for (let tIdx = 0; tIdx < tanks.length; tIdx++) {
+              const tank = tanks[tIdx];
+              if (!tank.alive || tank.team === m.shooter?.team) continue;
+              tank.getCenterMassWorld(this._splashCenter);
+              const d = Math.max(0, this._hitPoint.distanceTo(this._splashCenter) - tank.stats.hitRadius * 0.4);
+              if (d < m.splashRadius * 0.5) {
+                const sDmg = m.splashDamage * (1 - d / (m.splashRadius * 0.5));
+                if (sDmg >= 0.2) {
+                  const sKilled = tank.takeDamage(sDmg, this._hitPoint.clone(), this._attackerPos, this._segDir, 'mg', m.beltSpec ?? undefined);
+                  onDamage({
+                    victim: tank,
+                    attacker: m.shooter,
+                    amount: sDmg,
+                    killed: sKilled,
+                    hitPoint: this._hitPoint.clone(),
+                    weapon: 'mg',
+                    xrayReport: tank.lastXRayReport,
+                  });
+                  if (sKilled) {
+                    this.effects.spawnExplosion(this._splashCenter, this._up, 1.3, 'tank_kill');
+                  }
+                }
+              }
+            }
+          } else {
+            this.effects.spawnWaterSplash(this._hitPoint, 0.5);
           }
         } else if (worldHit !== null) {
           const obs = worldHit.obstacle;

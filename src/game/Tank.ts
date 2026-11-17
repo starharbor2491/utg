@@ -588,6 +588,7 @@ export class Tank implements TankEntity {
       onFireCannon?: (tank: Tank, pos: THREE.Vector3, dir: THREE.Vector3, shell: ShellSpec) => void;
       onFireMG?: (tank: Tank, pos: THREE.Vector3, dir: THREE.Vector3, beltSpec?: ShellSpec) => void;
       onTrackDust?: (pos: THREE.Vector3, intensity01: number) => void;
+      onWaterWake?: (pos: THREE.Vector3, intensity01: number) => void;
       onWreckSmoke?: (pos: THREE.Vector3) => void;
     }
   ): void {
@@ -707,6 +708,18 @@ export class Tank implements TankEntity {
       }
     }
 
+    // Fording: depth > 0.25 m scrubs top speed (tracked -> x0.5, wheeled -> x0.35
+    // at 1.1 m) and bleeds acceleration; wakes replace track dust in water.
+    const waterDepth = world.getWaterDepthAt?.(this.position.x, this.position.z) ?? 0;
+    const fordT = waterDepth > 0.25 ? Math.min(1.1, waterDepth) / 1.1 : 0;
+    const fordMul =
+      fordT > 0
+        ? this.stats.drive === 'wheeled'
+          ? 1 - 0.65 * fordT
+          : 1 - 0.5 * fordT
+        : 1;
+    const accelMul = fordT > 0 ? 0.72 : 1;
+
     const rawThrottle = intent ? THREE.MathUtils.clamp(intent.throttle, -1, 1) : 0;
     const rawSteer = intent ? THREE.MathUtils.clamp(intent.steer, -1, 1) : 0;
     const throttle = rawThrottle * mobilityMult;
@@ -719,13 +732,13 @@ export class Tank implements TankEntity {
       if (Math.abs(this.speed) <= decel) this.speed = 0;
       else this.speed -= Math.sign(this.speed) * decel;
     } else if (Math.abs(throttle) > 0.02) {
-      const maxFwd = this.stats.maxForwardSpeed * mobilityMult;
-      const maxRev = this.stats.maxReverseSpeed * mobilityMult;
+      const maxFwd = this.stats.maxForwardSpeed * mobilityMult * fordMul;
+      const maxRev = this.stats.maxReverseSpeed * mobilityMult * fordMul;
       if (throttle > 0) {
-        const accel = this.speed < 0 ? this.stats.brakeDecel : this.stats.forwardAccel * mobilityMult;
+        const accel = this.speed < 0 ? this.stats.brakeDecel : this.stats.forwardAccel * mobilityMult * accelMul;
         this.speed = Math.min(maxFwd, this.speed + accel * rawThrottle * safeDt);
       } else {
-        const accel = this.speed > 0 ? this.stats.brakeDecel : this.stats.reverseAccel * mobilityMult;
+        const accel = this.speed > 0 ? this.stats.brakeDecel : this.stats.reverseAccel * mobilityMult * accelMul;
         this.speed = Math.max(-maxRev, this.speed + accel * rawThrottle * safeDt);
       }
     } else {
@@ -804,7 +817,8 @@ export class Tank implements TankEntity {
     }
 
     const absSpd = Math.abs(effectiveSpeed);
-    if (absSpd > 3.0 && callbacks?.onTrackDust) {
+    const wantDust = absSpd > 3.0 && (callbacks?.onTrackDust || (fordT > 0 && callbacks?.onWaterWake));
+    if (wantDust) {
       this.dustAccum += safeDt * (0.4 + absSpd * 0.45);
       if (this.dustAccum >= 0.16) {
         this.dustAccum = 0;
@@ -823,7 +837,13 @@ export class Tank implements TankEntity {
             this.position.y + 0.25,
             this.position.z + cosH * rearDist + rightZ * sideOff * sideSign
           );
-          callbacks.onTrackDust(_tmpVecA, intensity);
+          if (fordT > 0 && callbacks?.onWaterWake) {
+            const wY = world.getWaterLevelAt?.(_tmpVecA.x, _tmpVecA.z) ?? this.position.y;
+            _tmpVecA.y = wY + 0.12;
+            callbacks.onWaterWake(_tmpVecA, intensity);
+          } else {
+            callbacks?.onTrackDust?.(_tmpVecA, intensity);
+          }
         }
       }
     }
