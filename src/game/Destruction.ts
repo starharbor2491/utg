@@ -117,8 +117,11 @@ function applyTerrainContact(
   const vn2 = _vC.dot(n);
   _t1.copy(_vC).addScaledVector(n, -vn2);
   const vtLen = _t1.length();
-  if (vtLen > 1e-4 && acc.jnSum > 0) {
-    const maxF = MU * acc.jnSum;
+  if (vtLen > 1e-4 && jn > 0) {
+    // Per-contact Coulomb clamp: this contact's own normal impulse only.
+    // (Clamping by the substep-wide jnSum let later contacts grab absurd
+    // friction and froze wrecks mid-tumble.)
+    const maxF = MU * jn;
     _rn.crossVectors(_r, _t1).normalize();
     applyInvInertiaWorld(body, _rn, _t2);
     const denomT = body.invMass + Math.abs(_rn.dot(_t2));
@@ -208,6 +211,23 @@ function stepBody(body: RigidBody, world: World, h: number): void {
   }
 }
 
+// Smallest angle (deg) between any of the body's local axes and the terrain
+// normal under it: 0 = resting flat on a face, 45 = balanced on an edge.
+function bodyTiltDeg(body: RigidBody, world: World): number {
+  world.getNormalAt(body.pos.x, body.pos.z, _n);
+  if (_n.lengthSq() < 1e-6) _n.set(0, 1, 0);
+  _n.normalize();
+  _t1.set(1, 0, 0).applyQuaternion(body.quat);
+  _t2.set(0, 1, 0).applyQuaternion(body.quat);
+  _t3.set(0, 0, 1).applyQuaternion(body.quat);
+  const d = Math.max(
+    Math.abs(_t1.dot(_n)),
+    Math.abs(_t2.dot(_n)),
+    Math.abs(_t3.dot(_n))
+  );
+  return Math.acos(Math.min(1, d)) * (180 / Math.PI);
+}
+
 // ---------------------------------------------------------------------------
 // Geometry baking: clone source meshes, bake world matrices into part-local
 // space, group by material, merge. Cached per vehicle class+team so repeat
@@ -252,7 +272,6 @@ interface ClassGeo {
 
 const _m1 = new THREE.Matrix4();
 const _m2 = new THREE.Matrix4();
-const _box = new THREE.Box3();
 
 // GLB assets use KHR_mesh_quantization: position/normal arrive as normalized
 // integer attributes. BufferGeometry.applyMatrix4 writes plain floats back via
@@ -324,7 +343,6 @@ function bakePart(
   }
 
   const entries: BakedEntry[] = [];
-  _box.makeEmpty();
   for (const g of groups.values()) {
     let geos = g.geos;
     // mergeGeometries requires uniform index-ness
@@ -336,65 +354,257 @@ function bakePart(
     if (Array.isArray(g.mat)) {
       // Multi-material source meshes stay unmerged (groups preserved by applyMatrix4)
       for (const geo of geos) entries.push({ geo, material: g.mat });
-      for (const geo of geos) geo.computeBoundingBox();
       continue;
     }
     const merged = mergeGeometries(geos, false);
     if (merged) {
       entries.push({ geo: merged, material: g.mat });
-      merged.computeBoundingBox();
-      if (merged.boundingBox) _box.union(merged.boundingBox);
     } else {
-      for (const geo of geos) {
-        geo.computeBoundingBox();
-        if (geo.boundingBox) _box.union(geo.boundingBox);
-        entries.push({ geo, material: g.mat });
-      }
+      for (const geo of geos) entries.push({ geo, material: g.mat });
     }
   }
 
-  const box = _box.clone();
+  // Whip/outlier filter, then bounds from surviving vertices only
+  const filter = computeWhipFilter(entries);
+  if (filter.isolated.size > 0) {
+    for (const e of entries) dropIsolatedTriangles(e.geo, filter.isolated);
+  }
+  const box = filter.box;
   const center = box.getCenter(new THREE.Vector3());
   const half = box.getSize(new THREE.Vector3()).multiplyScalar(0.5);
   // Re-centre geometry on the box centre so bodies rotate about their middle
   for (const e of entries) e.geo.translate(-center.x, -center.y, -center.z);
-  return { entries, box, center, half, contacts: computeContactPoints(entries, half) };
+  return { entries, box, center, half, contacts: supportContactPoints(filter.reps, center) };
 }
 
-// Contact sampling: keep vertices lying on the bbox "skin" (within eps of any
-// face), deduped on a coarse grid, capped. These become the body's terrain
-// contact points — wrecks then rest on real armor contours instead of floating
-// on empty OBB corners (the classic long-barrel turret float).
-const CONTACT_EPS = 0.06;
-const CONTACT_CELL = 0.3;
-const MAX_CONTACTS = 100;
+// ---------------------------------------------------------------------------
+// Whip/outlier filter. Thin radio whips and snapped trim survive as sparse
+// vertex chains: their 0.25 m voxel cells have < 2 occupied neighbours, while
+// every real panel cell is surrounded. Isolated cells are excluded from the
+// part bounds (they were inflating hull half.y to ~2 m and propping flipped
+// wrecks on antenna tips) and their triangles are dropped so the whips snap
+// off in the fire. Runs once per class+team — geometry is cached.
+// ---------------------------------------------------------------------------
 
-function computeContactPoints(entries: BakedEntry[], half: THREE.Vector3): Float32Array {
-  const hx = Math.max(half.x - CONTACT_EPS, 0.01);
-  const hy = Math.max(half.y - CONTACT_EPS, 0.01);
-  const hz = Math.max(half.z - CONTACT_EPS, 0.01);
-  const seen = new Set<number>();
-  const pts: number[] = [];
+const WHIP_CELL = 0.25;
+const WHIP_OFF = 4096;
+const WHIP_SPAN = 8192;
+const WHIP_VOL = WHIP_SPAN * WHIP_SPAN;
+
+function whipKeyIdx(ix: number, iy: number, iz: number): number {
+  return (ix + WHIP_OFF) * WHIP_VOL + (iy + WHIP_OFF) * WHIP_SPAN + (iz + WHIP_OFF);
+}
+
+function whipKeyPos(x: number, y: number, z: number): number {
+  return whipKeyIdx(
+    Math.floor(x / WHIP_CELL),
+    Math.floor(y / WHIP_CELL),
+    Math.floor(z / WHIP_CELL)
+  );
+}
+
+function whipDecode(key: number, out: THREE.Vector3): void {
+  const ix = Math.floor(key / WHIP_VOL);
+  const rem = key - ix * WHIP_VOL;
+  const iy = Math.floor(rem / WHIP_SPAN);
+  const iz = rem - iy * WHIP_SPAN;
+  out.set(ix - WHIP_OFF, iy - WHIP_OFF, iz - WHIP_OFF);
+}
+
+interface WhipFilter {
+  /** Cell keys flagged as isolated (whip/trim outliers) */
+  isolated: Set<number>;
+  /** One representative vertex per non-isolated cell, part-local xyz */
+  reps: Float32Array;
+  /** Bounds over all vertices in non-isolated cells, part-local */
+  box: THREE.Box3;
+}
+
+function computeWhipFilter(entries: BakedEntry[]): WhipFilter {
+  // Pass 1: voxelize — first vertex seen per cell becomes its representative
+  const occupied = new Map<number, number>();
+  const rx: number[] = [];
+  const ry: number[] = [];
+  const rz: number[] = [];
   for (const e of entries) {
-    const pos = e.geo.attributes.position as THREE.BufferAttribute | undefined;
-    if (!pos) continue;
-    for (let i = 0; i < pos.count; i++) {
-      const x = pos.getX(i);
-      const y = pos.getY(i);
-      const z = pos.getZ(i);
-      // Interior vertex — skip unless it hugs a bbox face
-      if (Math.abs(x) < hx && Math.abs(y) < hy && Math.abs(z) < hz) continue;
-      const key =
-        (Math.floor(x / CONTACT_CELL) * 73856093) ^
-        (Math.floor(y / CONTACT_CELL) * 19349663) ^
-        (Math.floor(z / CONTACT_CELL) * 83492791);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      pts.push(x, y, z);
-      if (pts.length >= MAX_CONTACTS * 3) return new Float32Array(pts);
+    const p = e.geo.attributes.position as THREE.BufferAttribute | undefined;
+    if (!p) continue;
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i);
+      const y = p.getY(i);
+      const z = p.getZ(i);
+      const key = whipKeyPos(x, y, z);
+      if (!occupied.has(key)) {
+        occupied.set(key, rx.length);
+        rx.push(x);
+        ry.push(y);
+        rz.push(z);
+      }
     }
   }
-  return pts.length ? new Float32Array(pts) : new Float32Array(0);
+
+  // Pass 2: a cell is isolated when fewer than 2 of its 26 neighbours exist
+  const isolated = new Set<number>();
+  const dc = new THREE.Vector3();
+  for (const key of occupied.keys()) {
+    whipDecode(key, dc);
+    let n = 0;
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          if (dx === 0 && dy === 0 && dz === 0) continue;
+          if (occupied.has(whipKeyIdx(dc.x + dx, dc.y + dy, dc.z + dz))) n++;
+        }
+      }
+    }
+    if (n < 2) isolated.add(key);
+  }
+  // Degenerate guard: never filter away an entire part
+  if (isolated.size === occupied.size) isolated.clear();
+
+  // Pass 3: bounds over every vertex that sits in a non-isolated cell
+  const min = new THREE.Vector3(Infinity, Infinity, Infinity);
+  const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+  for (const e of entries) {
+    const p = e.geo.attributes.position as THREE.BufferAttribute | undefined;
+    if (!p) continue;
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i);
+      const y = p.getY(i);
+      const z = p.getZ(i);
+      if (isolated.has(whipKeyPos(x, y, z))) continue;
+      if (x < min.x) min.x = x;
+      if (y < min.y) min.y = y;
+      if (z < min.z) min.z = z;
+      if (x > max.x) max.x = x;
+      if (y > max.y) max.y = y;
+      if (z > max.z) max.z = z;
+    }
+  }
+  const box = new THREE.Box3(min, max);
+  if (box.isEmpty()) {
+    box.min.set(-0.5, -0.5, -0.5);
+    box.max.set(0.5, 0.5, 0.5);
+  }
+
+  // Representatives of surviving cells for support sampling
+  const repsArr: number[] = [];
+  for (const [key, ri] of occupied) {
+    if (isolated.has(key)) continue;
+    repsArr.push(rx[ri], ry[ri], rz[ri]);
+  }
+  return { isolated, reps: new Float32Array(repsArr), box };
+}
+
+// Drop every triangle that touches an isolated cell. Indexed geos keep their
+// index buffer (compacted); non-indexed geos are compacted per-attribute.
+// Unused vertices are removed too so probes/queries never see dead whip tips.
+function dropIsolatedTriangles(geo: THREE.BufferGeometry, isolated: Set<number>): void {
+  const pos = geo.attributes.position as THREE.BufferAttribute | undefined;
+  if (!pos) return;
+  const flag = new Uint8Array(pos.count);
+  let any = false;
+  for (let i = 0; i < pos.count; i++) {
+    if (isolated.has(whipKeyPos(pos.getX(i), pos.getY(i), pos.getZ(i)))) {
+      flag[i] = 1;
+      any = true;
+    }
+  }
+  if (!any) return;
+
+  const remap = new Int32Array(pos.count).fill(-1);
+  let newCount = 0;
+  let newIndex: number[] | null = null;
+
+  if (geo.index) {
+    const idx = geo.index.array;
+    newIndex = [];
+    for (let t = 0; t + 2 < idx.length; t += 3) {
+      const a = idx[t];
+      const b = idx[t + 1];
+      const c = idx[t + 2];
+      if (flag[a] || flag[b] || flag[c]) continue;
+      if (remap[a] < 0) remap[a] = newCount++;
+      if (remap[b] < 0) remap[b] = newCount++;
+      if (remap[c] < 0) remap[c] = newCount++;
+      newIndex.push(remap[a], remap[b], remap[c]);
+    }
+  } else {
+    for (let v = 0; v < pos.count; v += 3) {
+      if (flag[v] || flag[v + 1] || flag[v + 2]) continue;
+      remap[v] = newCount++;
+      remap[v + 1] = newCount++;
+      remap[v + 2] = newCount++;
+    }
+  }
+
+  // Rebuild every attribute keeping only remapped vertices
+  for (const name of Object.keys(geo.attributes)) {
+    const attr = geo.attributes[name] as THREE.BufferAttribute;
+    const is = attr.itemSize;
+    const src = attr.array as unknown as { [k: number]: number; constructor: new (n: number) => typeof attr.array };
+    const outArr = new src.constructor(newCount * is);
+    for (let v = 0; v < pos.count; v++) {
+      const nv = remap[v];
+      if (nv < 0) continue;
+      const s = v * is;
+      const d = nv * is;
+      for (let c = 0; c < is; c++) outArr[d + c] = src[s + c];
+    }
+    geo.setAttribute(name, new THREE.BufferAttribute(outArr, is, attr.normalized));
+  }
+  if (newIndex) geo.setIndex(newIndex);
+  else geo.index = null;
+}
+
+// ---------------------------------------------------------------------------
+// Contact sampling: 98 Fibonacci-sphere directions; per direction the surviving
+// cell representative with max dot product becomes a contact point (deduped).
+// These are the body's true support extremes — wrecks rest on real armor
+// contours instead of empty OBB corners (the classic long-barrel turret float).
+// ---------------------------------------------------------------------------
+
+const SUPPORT_DIR_COUNT = 98;
+const SUPPORT_DIRS = new Float32Array(SUPPORT_DIR_COUNT * 3);
+(function initSupportDirs(): void {
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < SUPPORT_DIR_COUNT; i++) {
+    const y = 1 - (2 * i + 1) / SUPPORT_DIR_COUNT;
+    const r = Math.sqrt(Math.max(0, 1 - y * y));
+    const th = i * golden;
+    SUPPORT_DIRS[i * 3] = Math.cos(th) * r;
+    SUPPORT_DIRS[i * 3 + 1] = y;
+    SUPPORT_DIRS[i * 3 + 2] = Math.sin(th) * r;
+  }
+})();
+
+function supportContactPoints(reps: Float32Array, center: THREE.Vector3): Float32Array {
+  const out: number[] = [];
+  const seen = new Set<number>();
+  const n = reps.length / 3;
+  for (let d = 0; d < SUPPORT_DIR_COUNT; d++) {
+    const dx = SUPPORT_DIRS[d * 3];
+    const dy = SUPPORT_DIRS[d * 3 + 1];
+    const dz = SUPPORT_DIRS[d * 3 + 2];
+    let best = -Infinity;
+    let bestI = -1;
+    for (let i = 0; i < n; i++) {
+      const dot = dx * reps[i * 3] + dy * reps[i * 3 + 1] + dz * reps[i * 3 + 2];
+      if (dot > best) {
+        best = dot;
+        bestI = i;
+      }
+    }
+    if (bestI >= 0 && !seen.has(bestI)) {
+      seen.add(bestI);
+      out.push(
+        reps[bestI * 3] - center.x,
+        reps[bestI * 3 + 1] - center.y,
+        reps[bestI * 3 + 2] - center.z
+      );
+    }
+  }
+  return new Float32Array(out);
 }
 
 // Bounding box of a mesh list in a target space, without cloning geometry.
@@ -466,7 +676,7 @@ function makeWreckMaterial(src: THREE.Material, hitLocal: THREE.Vector3, halfY: 
     uHit: { value: hitLocal.clone() },
     uHalfY: { value: Math.max(halfY, 0.05) },
   };
-  clone.customProgramCacheKey = () => 'wreck-burn-v2';
+  clone.customProgramCacheKey = () => 'wreck-burn-v3';
   clone.onBeforeCompile = (shader) => {
     shader.uniforms.uBurn = burn.uBurn;
     shader.uniforms.uHeat = burn.uHeat;
@@ -550,15 +760,21 @@ function makeWreckMaterial(src: THREE.Material, hitLocal: THREE.Vector3, halfY: 
           // patches low on the hull.
           float lowZone = smoothstep(0.5, 0.15, h01);
           float paintPatch = smoothstep(0.55, 0.8, bn * 0.6 + fine * 0.4);
-          float coverage = 0.84 + bn * 0.16 + hitBias * 0.3 + (scorchN - 0.5) * 0.15;
-          gBurnMask = clamp(coverage - lowZone * paintPatch * 0.85, 0.0, 1.0) * uBurn;
-          vec3 charcoal = vec3(0.030, 0.029, 0.027);
-          vec3 rust = vec3(0.23, 0.095, 0.042);
-          float rustM = smoothstep(0.42, 0.78, streak);
-          vec3 burnCol = mix(charcoal, rust, rustM * 0.6);
-          vec3 ash = vec3(0.26, 0.255, 0.24);
-          float upFace = smoothstep(0.35, 0.85, vBurnNorm.y);
-          burnCol = mix(burnCol, ash, upFace * (0.18 + bn * 0.3));
+          float coverage = 0.97 + bn * 0.08 + hitBias * 0.3 + (scorchN - 0.5) * 0.06;
+          float burnRaw = clamp(coverage - lowZone * paintPatch * 0.4, 0.0, 1.0);
+          gBurnMask = burnRaw * uBurn;
+          // Palette is linear: soot-black steel with faint value variation,
+          // blistered brown-black paint at the burn front, dark oxide runs
+          // down the flanks, thin grey ash only on up-facing plates.
+          vec3 burnCol = vec3(0.016, 0.015, 0.014) * (0.75 + fine * 0.6 + bn * 0.35);
+          float front = 1.0 - smoothstep(0.55, 0.95, burnRaw);
+          burnCol = mix(burnCol, vec3(0.045, 0.030, 0.019), front * 0.85);
+          float flank = 1.0 - abs(vBurnNorm.y);
+          float rustM = smoothstep(0.6, 0.85, streak) * flank * (1.0 - h01 * 0.6);
+          burnCol = mix(burnCol, vec3(0.062, 0.026, 0.011), rustM * 0.7);
+          float upFace = smoothstep(0.55, 0.9, vBurnNorm.y);
+          float ashM = upFace * smoothstep(0.45, 0.75, bn + (fine - 0.5) * 0.3);
+          burnCol = mix(burnCol, vec3(0.085, 0.082, 0.078), ashM * 0.75);
           diffuseColor.rgb = mix(diffuseColor.rgb, burnCol, gBurnMask);
           // Ember seams: narrow high-frequency cracks only
           gEmberMask = smoothstep(0.78, 0.95, fine) * gBurnMask;
@@ -567,12 +783,12 @@ function makeWreckMaterial(src: THREE.Material, hitLocal: THREE.Vector3, halfY: 
       .replace(
         '#include <roughnessmap_fragment>',
         `#include <roughnessmap_fragment>
-        roughnessFactor = mix(roughnessFactor, 0.92, gBurnMask);`
+        roughnessFactor = mix(roughnessFactor, 0.96, gBurnMask);`
       )
       .replace(
         '#include <metalnessmap_fragment>',
         `#include <metalnessmap_fragment>
-        metalnessFactor = mix(metalnessFactor, 0.3, gBurnMask);`
+        metalnessFactor = mix(metalnessFactor, 0.12, gBurnMask);`
       )
       .replace(
         '#include <emissivemap_fragment>',
@@ -1010,8 +1226,8 @@ export class DestructionManager {
    * sampled mesh vertices. ~0 means the part rests on the ground; a large
    * positive value means it floats (or rests on the other wreck part).
    */
-  public probeClearance(): { cls: string; part: string; minGap: number; belowFrac: number; asleep: boolean }[] {
-    const out: { cls: string; part: string; minGap: number; belowFrac: number; asleep: boolean }[] = [];
+  public probeClearance(): { cls: string; part: string; minGap: number; belowFrac: number; asleep: boolean; tiltDeg: number }[] {
+    const out: { cls: string; part: string; minGap: number; belowFrac: number; asleep: boolean; tiltDeg: number }[] = [];
     for (const w of this.wrecks) {
       if (!w.active) continue;
       w.group.updateMatrixWorld(true);
@@ -1047,15 +1263,38 @@ export class DestructionManager {
           minGap: Math.round(minGap * 100) / 100,
           belowFrac: total ? Math.round((below / total) * 100) / 100 : 0,
           asleep: body.asleep,
+          tiltDeg: Math.round(bodyTiltDeg(body, this.world) * 10) / 10,
         });
       }
     }
     return out;
   }
 
-  /** Physics self-check: box dropped from 3m with spin settles on flat ground. */
-  public selfTest(): { ok: boolean; restGap: number; nan: boolean; ms: number } {
+  /** Physics self-check: drop + edge-balance cases must settle flat and asleep. */
+  public selfTest(): {
+    ok: boolean;
+    ms: number;
+    drop: { ok: boolean; restGap: number; tiltDeg: number; asleep: boolean; nan: boolean };
+    edge: { ok: boolean; restGap: number; tiltDeg: number; asleep: boolean; nan: boolean };
+  } {
     const t0 = performance.now();
+    const drop = this._selfTestCase(false);
+    const edge = this._selfTestCase(true);
+    return {
+      ok: drop.ok && edge.ok,
+      ms: Math.round(performance.now() - t0),
+      drop,
+      edge,
+    };
+  }
+
+  private _selfTestCase(edgeDrop: boolean): {
+    ok: boolean;
+    restGap: number;
+    tiltDeg: number;
+    asleep: boolean;
+    nan: boolean;
+  } {
     const body = new RigidBody();
     body.active = true;
     const cx = 30;
@@ -1069,13 +1308,33 @@ export class DestructionManager {
       12 / (m * (1.2 * 1.2 + 0.9 * 0.9)),
       12 / (m * (1.2 * 1.2 + 0.6 * 0.6))
     );
-    body.pos.set(cx, ground + 3 + 0.3, cz);
-    body.quat.setFromEuler(new THREE.Euler(0.4, 0.7, 0.2));
-    body.vel.set(0.5, 0, -0.3);
-    body.angVel.set(2.5, 1.2, -1.8);
 
+    if (!edgeDrop) {
+      // Case 1: dropped from 3 m with spin — must settle on flat ground
+      body.pos.set(cx, ground + 3 + 0.3, cz);
+      body.quat.setFromEuler(new THREE.Euler(0.4, 0.7, 0.2));
+      body.vel.set(0.5, 0, -0.3);
+      body.angVel.set(2.5, 1.2, -1.8);
+    } else {
+      // Case 2: released 1 m up, rotated 50° about local Z — lands on an edge
+      // with the COM just past it; must rock flat, not balance on the edge.
+      body.quat.setFromEuler(new THREE.Euler(0, 0, THREE.MathUtils.degToRad(50)));
+      let lo = Infinity;
+      for (let sx = -1; sx <= 1; sx += 2) {
+        for (let sy = -1; sy <= 1; sy += 2) {
+          for (let sz = -1; sz <= 1; sz += 2) {
+            _local.set(sx * 0.6, sy * 0.3, sz * 0.45).applyQuaternion(body.quat);
+            if (_local.y < lo) lo = _local.y;
+          }
+        }
+      }
+      body.pos.set(cx, ground + 1.0 - lo, cz);
+      // zero velocity / zero spin
+    }
+
+    const seconds = edgeDrop ? 8 : 6;
     const h = 1 / 60 / PHYS_SUBSTEPS;
-    for (let i = 0; i < 6 * 60 * PHYS_SUBSTEPS; i++) {
+    for (let i = 0; i < seconds * 60 * PHYS_SUBSTEPS; i++) {
       stepBody(body, this.world, h);
       if (!isFinite(body.pos.x + body.pos.y + body.pos.z)) break;
     }
@@ -1094,12 +1353,11 @@ export class DestructionManager {
     }
     const nan = !isFinite(body.pos.x + body.pos.y + body.pos.z + body.quat.w);
     const restGap = Math.abs(minY);
-    return {
-      ok: !nan && restGap <= 0.02 && body.asleep,
-      restGap: Math.round(restGap * 1000) / 1000,
-      nan,
-      ms: Math.round(performance.now() - t0),
-    };
+    const tiltDeg = Math.round(bodyTiltDeg(body, this.world) * 10) / 10;
+    const ok = edgeDrop
+      ? !nan && body.asleep && tiltDeg < 5 && restGap <= 0.02
+      : !nan && restGap <= 0.02 && body.asleep;
+    return { ok, restGap: Math.round(restGap * 1000) / 1000, tiltDeg, asleep: body.asleep, nan };
   }
 
   // -------------------------------------------------------------------------
