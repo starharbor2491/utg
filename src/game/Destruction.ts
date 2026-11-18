@@ -294,7 +294,7 @@ function normalizeGeo(geo: THREE.BufferGeometry): void {
 function collectMeshes(root: THREE.Object3D, skip: THREE.Object3D | null, out: THREE.Mesh[]): void {
   if (skip && root === skip) return;
   const mesh = root as THREE.Mesh;
-  if (mesh.isMesh && mesh.geometry) out.push(mesh);
+  if (mesh.isMesh && mesh.geometry && !(mesh as THREE.InstancedMesh).isInstancedMesh) out.push(mesh);
   for (const child of root.children) collectMeshes(child, skip, out);
 }
 
@@ -1014,6 +1014,7 @@ const HULL_MASS: Record<VehicleClass, number> = {
   humvee: 11,
   rocket: 15,
   support: 15,
+  littlebird: 5,
 };
 
 export class DestructionManager {
@@ -1544,13 +1545,14 @@ export class DestructionManager {
     camera: THREE.PerspectiveCamera,
     assets: LoadedGameAssets
   ): Promise<void> {
-    const vcls: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket', 'support'];
+    const vcls: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket', 'support', 'littlebird'];
     const teams: Team[] = ['blue', 'red'];
     const warm = new THREE.Group();
     warm.name = 'shader_prewarm';
     let slot = 0;
     for (const cls of vcls) {
       for (const team of teams) {
+        if (cls === 'littlebird' && team === 'red') continue;
         const rig = instantiateTankRig(assets, cls, team);
         const fakeTank = {
           root: rig.root,

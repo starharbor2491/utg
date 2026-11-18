@@ -23,9 +23,9 @@ const BED = {
   gunZ: 0.15,
   canW: 0.62,
   canH: 0.52,
-  canD: 1.5,
-  canX: 0.58,
-  canZ: 0.75,
+  canD: 1.72,
+  canX: 0.65,
+  canZ: 0.68,
   headW: 0.5,
   headH: 0.42,
   headD: 0.6,
@@ -45,30 +45,47 @@ function bedMat(color: string, rough: number, metal: number, hRef = 1.9) {
   return m;
 }
 
-/** Reusable FPV quadcopter airframe: X-frame arms, 4 rotor discs, payload
- *  tube underneath. F5b flies this; F5a displays it on the drone bay. */
+/** FPV quadcopter, nose and camera facing +Z. */
 export function buildFpvDrone(): THREE.Group {
   const g = new THREE.Group();
   g.name = 'fpv_drone';
-  // ~7-inch FPV: 0.35 m motor-to-motor (built at ~0.59 then scaled 0.6)
+  g.userData.keepMeshChildren = true;
   const frameMat = new THREE.MeshStandardMaterial({ color: '#2b2e33', roughness: 0.88, metalness: 0.25 });
-  const accentMat = new THREE.MeshStandardMaterial({ color: '#4a5238', roughness: 0.7, metalness: 0.2 }); // olive payload tube
-  const rotorMat = new THREE.MeshStandardMaterial({ color: '#141518', roughness: 0.9, metalness: 0.1, transparent: true, opacity: 0.5 });
+  const accentMat = new THREE.MeshStandardMaterial({ color: '#585e40', roughness: 0.7, metalness: 0.2 });
+  const lensMat = new THREE.MeshStandardMaterial({ color: '#152630', roughness: 0.23, metalness: 0.6 });
   const navMat = (c: string) => new THREE.MeshStandardMaterial({ color: '#111', emissive: new THREE.Color(c), emissiveIntensity: 2.2 });
-  const armGeo = new THREE.BoxGeometry(0.62, 0.03, 0.05);
-  for (const s of [-1, 1]) {
-    const arm = new THREE.Mesh(armGeo, frameMat);
-    arm.rotation.y = s * Math.PI / 4;
-    arm.position.y = 0.02;
-    g.add(arm);
+  const mesh = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number) => {
+    const part = new THREE.Mesh(geo, mat);
+    part.position.set(x, y, z);
+    g.add(part);
+    return part;
+  };
+  const armGeo = new RoundedBoxGeometry(0.245, 0.018, 0.05, 2, 0.007);
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      mesh(armGeo, frameMat, sx * 0.126, 0.026, sz * 0.125).rotation.y = -sx * sz * Math.PI / 4;
+      mesh(new THREE.CylinderGeometry(0.037, 0.037, 0.018, 10), frameMat, sx * 0.21, 0.026, sz * 0.21);
+    }
   }
-  const body = new THREE.Mesh(new RoundedBoxGeometry(0.16, 0.07, 0.22, 2, 0.02), accentMat);
-  body.position.y = 0.06;
-  g.add(body);
-  const payload = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.22, 10), frameMat);
-  payload.rotation.x = Math.PI / 2;
-  payload.position.set(0, -0.06, 0.05);
-  g.add(payload);
+  mesh(new RoundedBoxGeometry(0.144, 0.016, 0.268, 2, 0.006), frameMat, 0, 0.025, 0);
+  mesh(new RoundedBoxGeometry(0.127, 0.014, 0.235, 2, 0.006), frameMat, 0, 0.075, -0.004);
+  mesh(new RoundedBoxGeometry(0.101, 0.04, 0.137, 2, 0.007), accentMat, 0, 0.102, -0.034);
+  for (const sz of [-1, 1]) mesh(new THREE.BoxGeometry(0.114, 0.047, 0.013), frameMat, 0, 0.104, -0.035 + 0.041 * sz);
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) mesh(new THREE.CylinderGeometry(0.007, 0.007, 0.058, 6), accentMat, sx * 0.053, 0.052, sz * 0.089);
+    mesh(new RoundedBoxGeometry(0.017, 0.068, 0.085, 2, 0.007), frameMat, sx * 0.056, 0.066, 0.13);
+  }
+  mesh(new THREE.CylinderGeometry(0.039, 0.039, 0.27, 12), accentMat, 0, -0.056, 0.005).rotation.x = Math.PI / 2;
+  mesh(new RoundedBoxGeometry(0.092, 0.075, 0.07, 2, 0.008), frameMat, 0, 0.068, 0.134);
+  mesh(new THREE.CylinderGeometry(0.026, 0.03, 0.023, 16), lensMat, 0, 0.068, 0.18).rotation.x = Math.PI / 2;
+  const camera = new THREE.Object3D();
+  camera.name = 'fpv_camera';
+  camera.position.set(0, 0.068, 0.198);
+  camera.rotation.y = Math.PI;
+  g.add(camera);
+  for (const sx of [-1, 1]) {
+    mesh(new THREE.CylinderGeometry(0.005, 0.006, 0.132, 6), frameMat, sx * 0.054, 0.12, -0.137).rotation.z = -sx * 0.33;
+  }
   // red/green nav light pair on the front corners
   for (const [sx, c] of [[-1, '#ff2a1a'], [1, '#2aff5a']] as const) {
     const nav = new THREE.Mesh(new THREE.SphereGeometry(0.012, 6, 6), navMat(c));
@@ -76,28 +93,29 @@ export function buildFpvDrone(): THREE.Group {
     g.add(nav);
   }
   const motorGeo = new THREE.CylinderGeometry(0.028, 0.034, 0.05, 8);
+  const bladeGeo = new THREE.BoxGeometry(0.092, 0.006, 0.027);
+  const hubGeo = new THREE.CylinderGeometry(0.017, 0.017, 0.012, 8);
   for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as const) {
     const px = sx * 0.21;
     const pz = sz * 0.21;
     const motor = new THREE.Mesh(motorGeo, frameMat);
     motor.position.set(px, 0.05, pz);
     g.add(motor);
-    // rotor blur: 2-blade cross + translucent disc, spins around Y
+    // Alternating rotor directions, with solid three-blade props on the ground.
     const rotor = new THREE.Group();
     rotor.position.set(px, 0.085, pz);
-    const bladeGeo = new THREE.BoxGeometry(0.22, 0.004, 0.02);
-    for (const a of [0, Math.PI / 2]) {
-      const blade = new THREE.Mesh(bladeGeo, rotorMat);
-      blade.rotation.y = a;
+    for (let i = 0; i < 3; i++) {
+      const a = i * 2 * Math.PI / 3;
+      const blade = new THREE.Mesh(bladeGeo, frameMat);
+      blade.position.set(Math.cos(a) * 0.062, 0, -Math.sin(a) * 0.062);
+      blade.rotation.set(0, a + sx * sz * 0.13, 0);
       rotor.add(blade);
     }
-    const disc = new THREE.Mesh(new THREE.CircleGeometry(0.11, 20), rotorMat);
-    disc.rotation.x = -Math.PI / 2;
-    rotor.add(disc);
-    rotor.userData.isRotor = true;
+    rotor.add(new THREE.Mesh(hubGeo, frameMat));
+    rotor.userData.spin = sx * sz;
     g.add(rotor);
   }
-  g.scale.setScalar(0.6); // -> 0.35 m motor-to-motor
+  g.scale.setScalar(0.76);
   return g;
 }
 
@@ -164,7 +182,7 @@ export function buildSupportVehicleRig(team: Team): InstantiatedTankRig {
   const ch = buildRocketChassis(team);
   const { root, hullTiltGroup, visualRoot, wheels, steerNodes, hullMeshes } = ch;
 
-  const paint = bedMat(isBlue ? '#4a5238' : '#6b5d43', 0.6, 0.28);
+  const paint = bedMat(isBlue ? '#48554b' : '#6b5e4b', 0.6, 0.28);
   const dark = bedMat(isBlue ? '#333a26' : '#4c3f2a', 0.66, 0.24);
   const steel = bedMat('#2c2f2c', 0.45, 0.72);
   const black = bedMat('#141517', 0.7, 0.4);
@@ -209,14 +227,17 @@ export function buildSupportVehicleRig(team: Team): InstantiatedTankRig {
   tb.cyl(steel, 0.035, 0.045, 0.5, 8, 0, BED.ringH + BED.drumH + 0.22, BED.mastZ);
   tb.box(steel, 0.1, 0.08, 0.1, 0, BED.ringH + BED.drumH + 0.47, BED.mastZ);
 
-  // drone bay crate at the very rear of the bed + quadcopter on top
-  tb.rbox(paint, 1.15, 0.34, 0.95, 0.04, 0, 0.19, BED.bayZ);
-  tb.box(dark, 1.0, 0.03, 0.8, 0, 0.37, BED.bayZ); // lid
-  for (const sx of [-1, 1]) tb.box(black, 0.06, 0.1, 0.7, sx * 0.5, 0.42, BED.bayZ);
+  // A low landing cradle leaves the frame and battery visible.
+  tb.rbox(paint, 1.02, 0.23, 0.93, 0.045, 0, 0.15, BED.bayZ);
+  tb.box(dark, 0.91, 0.023, 0.82, 0, 0.278, BED.bayZ);
+  for (const sx of [-1, 1]) {
+    tb.rbox(steel, 0.12, 0.085, 0.84, 0.025, sx * 0.41, 0.314, BED.bayZ);
+    tb.box(black, 0.16, 0.025, 0.58, sx * 0.29, 0.296, BED.bayZ);
+  }
   tb.flush(turretPivot);
   const drone = buildFpvDrone();
-  drone.position.set(0, 0.55, BED.bayZ);
-  drone.rotation.y = 0.5;
+  drone.position.set(0, 0.377, BED.bayZ);
+  drone.rotation.y = 0;
   turretPivot.add(drone);
 
   // radar panel: dark olive flat-array with raised frame + recessed matte
@@ -225,12 +246,13 @@ export function buildSupportVehicleRig(team: Team): InstantiatedTankRig {
   radarPanel.position.set(0, BED.ringH + BED.drumH + 0.62, BED.mastZ);
   turretPivot.add(radarPanel);
   const rb = makeBucket();
-  rb.box(steel, 0.78, 0.46, 0.04, 0, 0, -0.015);           // raised frame
-  rb.box(dark, 0.68, 0.36, 0.05, 0, 0, 0.005);            // recessed face plate
+  rb.rbox(steel, 0.91, 0.43, 0.1, 0.045, 0, 0, -0.015);
+  rb.rbox(dark, 0.83, 0.345, 0.07, 0.035, 0, 0, 0.045);
+  const antenna = bedMat('#829286', 0.54, 0.37);
   // radiating element grid on the face
-  for (let ix = -2; ix <= 2; ix++) {
+  for (let ix = -3; ix <= 3; ix++) {
     for (let iy = -1; iy <= 1; iy++) {
-      rb.box(black, 0.09, 0.05, 0.012, ix * 0.13, iy * 0.1, 0.034);
+      rb.box(antenna, 0.049, 0.031, 0.012, ix * 0.105, iy * 0.096, 0.087);
     }
   }
   rb.flush(radarPanel, true);
@@ -246,19 +268,22 @@ export function buildSupportVehicleRig(team: Team): InstantiatedTankRig {
 
   const bb = makeBucket(); // beam geometry (elevates with gunPivot)
   bb.rbox(dark, BED.headW, BED.headH, BED.headD, 0.05, 0, 0.18, BED.headZ);
-  bb.box(black, BED.headW * 0.7, 0.1, 0.1, 0, BED.headH * 0.32, BED.headZ + BED.headD * 0.42);
+  const sensor = bedMat('#273e49', 0.16, 0.63, 2);
+  bb.cyl(black, .114, .13, .13, 14, 0, .22, .475, Math.PI / 2);
+  bb.cyl(sensor, .081, .092, .016, 14, 0, .22, .548, Math.PI / 2);
   bb.cyl(steel, 0.05, 0.05, 0.16, 8, 0, BED.headH * 0.5 + 0.05, BED.headZ);
   const tubeLocal: THREE.Vector3[] = [];
   for (const sx of [-1, 1]) {
     const cx = sx * BED.canX;
-    bb.rbox(paint, BED.canW, BED.canH, BED.canD, 0.04, cx, 0.02, BED.canZ);
-    bb.box(dark, BED.canW * 0.96, 0.02, BED.canD * 0.9, cx, BED.canH / 2 + 0.005, BED.canZ);
-    for (const lz of [-0.4, 0.4]) bb.box(black, 0.05, 0.08, 0.1, cx + sx * (BED.canW / 2 - 0.02), 0.02, BED.canZ + lz * BED.canD);
+    bb.rbox(steel, BED.canW, BED.canH, 0.22, 0.035, cx, 0.02, BED.canZ - 0.42);
+    bb.rbox(steel, BED.canW, BED.canH, 0.19, 0.035, cx, 0.02, BED.canZ + 0.49);
     for (const [ty, tz] of [[-1, -1], [-1, 1], [1, -1], [1, 1]] as const) {
       const mx = cx + (ty * BED.canW) / 5;
       const my = 0.02 + (tz * BED.canH) / 5;
       const mz = BED.canZ + BED.canD / 2 + 0.005;
-      bb.cyl(black, 0.075, 0.075, 0.03, 12, mx, my, mz, Math.PI / 2, 0, 0);
+      bb.cyl(paint, 0.102, 0.102, BED.canD, 12, mx, my, BED.canZ, Math.PI / 2);
+      bb.cyl(black, 0.082, 0.082, 0.036, 12, mx, my, mz, Math.PI / 2);
+      bb.put(steel, new THREE.TorusGeometry(0.091, 0.01, 6, 12), mx, my, mz + 0.017);
       tubeLocal.push(new THREE.Vector3(mx, my, mz));
     }
   }

@@ -109,7 +109,7 @@ export function buildRocketChassis(team: Team): RocketChassisParts {
   applyRealisticArmorShader(darkSteelMat, 'rocket-dark-steel', { grain: 0.5 });
   const rubberMat = mat('#17181a', 0.94, 0.02);
   applyRealisticArmorShader(rubberMat, 'rocket-rubber', { grain: 0.5 });
-  const glassMat = mat('#1a2836', 0.08, 0.9, { envMapIntensity: 1.5 });
+  const glassMat = mat('#1a292c', 0.22, 0.64, { envMapIntensity: 1.2 });
   const lensMat = mat('#d8cf9a', 0.3, 0.4, { emissive: new THREE.Color('#8a7a3a'), emissiveIntensity: 0.55 });
 
   // Articulated-node materials: local y is node space, so heightRef shifts the
@@ -314,14 +314,15 @@ export function buildRocketChassis(team: Team): RocketChassisParts {
   put(glassMat, rearGlass, 0, 1.95, DIMS.cabZRear - 0.02, 0, Math.PI, 0);
   box(paintDarkMat, 1.3, 0.55, 0.06, 0, 1.95, DIMS.cabZRear - 0.03);
 
-  // Grille + recessed headlights + marker lights
-  box(darkSteelMat, 1.3, 0.42, 0.1, 0, 1.5, DIMS.cabZFront + 0.01);
-  for (let i = 0; i < 5; i++) box(steelMat, 1.2, 0.05, 0.03, 0, 1.36 + i * 0.075, DIMS.cabZFront + 0.07);
+  // Stamped nose panel, vertical grille and two headlamp clusters.
+  rbox(paintDarkMat, 1.9, 0.48, 0.16, 0.035, 0, 1.49, DIMS.cabZFront);
+  rbox(darkSteelMat, 1.24, 0.34, 0.06, 0.02, 0, 1.51, DIMS.cabZFront + 0.08);
+  for (let i = -7; i <= 7; i++) box(steelMat, 0.024, 0.274, 0.03, i * 0.072, 1.51, DIMS.cabZFront + 0.12);
   for (const hx of [-0.72, 0.72]) {
-    cyl(darkSteelMat, 0.1, 0.1, 0.12, 12, hx, 1.72, DIMS.cabZFront + 0.05, Math.PI / 2, 0, 0);
-    cyl(lensMat, 0.065, 0.065, 0.02, 12, hx, 1.72, DIMS.cabZFront + 0.12, Math.PI / 2, 0, 0);
-    // Marker lights
-    box(lensMat, 0.1, 0.05, 0.04, hx * 0.55, 1.95, DIMS.cabZFront + 0.1);
+    rbox(darkSteelMat, 0.24, 0.19, 0.09, 0.03, hx, 1.47, DIMS.cabZFront + 0.10);
+    rbox(lensMat, 0.176, 0.12, 0.035, 0.025, hx, 1.47, DIMS.cabZFront + 0.154);
+    box(lensMat, 0.09, 0.032, 0.025, hx * 1.16, 1.65, DIMS.cabZFront + 0.11);
+    box(paintDarkMat, 0.042, 0.20, 0.74, Math.sign(hx) * 1.048, 1.38, 2.52);
   }
   // Bumper on frame horns flush under the cab nose + tow shackles
   for (const hx of [-0.55, 0.55]) {
@@ -597,15 +598,17 @@ export function buildRocketLauncherRig(team: Team): InstantiatedTankRig {
   podShape.holes = borePaths;
 
   const podGeo = new THREE.ExtrudeGeometry(podShape, {
-    depth: DIMS.podLength,
+    depth: 0.11,
     bevelEnabled: true,
     bevelThickness: 0.025,
     bevelSize: 0.025,
     bevelSegments: 1,
     steps: 1,
   });
-  // Extrude runs +Z from 0 -> span z in [-0.05, podLength-0.05]; pod bottom ~0.04
+  // Exposed individual tubes sit between the structural end plates.
   podGeo.translate(0, 0.40, -0.05);
+  pput(modPaintP, podGeo.clone());
+  podGeo.translate(0, 0, DIMS.podLength - 0.17);
   pput(modPaintP, podGeo);
 
   // Tube liners (inner sleeves)
@@ -614,6 +617,11 @@ export function buildRocketLauncherRig(team: Team): InstantiatedTankRig {
   for (const ty of tubeYs) {
     for (const tx of tubeXs) {
       pput(modDarkP, linerGeo.clone(), tx, ty + 0.40, DIMS.podFrontZ - DIMS.podLength * 0.55);
+      pput(modPaintP, new THREE.CylinderGeometry(DIMS.tubeR + 0.016, DIMS.tubeR + 0.016, DIMS.podLength - 0.1, 16, 1, true),
+        tx, ty + 0.40, DIMS.podLength * 0.5 - 0.04, Math.PI / 2);
+      // Open mouth with a metal lip; a spent tube is visibly hollow.
+      const lip = new THREE.TorusGeometry(DIMS.tubeR - 0.008, 0.014, 6, 14);
+      pput(modSteelP, lip, tx, ty + 0.40, DIMS.podFrontZ + 0.038);
     }
   }
 

@@ -7,6 +7,8 @@ import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.j
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { buildRocketLauncherRig } from './models/RocketLauncher';
 import { buildSupportVehicleRig } from './models/SupportVehicle';
+import { buildLittleBirdRig } from './models/LittleBird';
+import { addMovingTracks, removeBakedTracks } from './models/Tracks';
 import type { Team, VehicleClass } from './types';
 
 export type ModelKey =
@@ -46,6 +48,8 @@ export interface InstantiatedTankRig {
   rocketMeshes: THREE.Object3D[];
   /** Optional per-frame pose hook (e.g. rocket launcher elevation rams) */
   articulate?: (gunPitch: number) => void;
+  tracks?: { side: 'L' | 'R'; advance: (meters: number) => void }[];
+  spinRotors?: (dt: number) => void;
   hullMeshes: THREE.Mesh[];
 }
 
@@ -449,7 +453,10 @@ export function instantiateTankRig(
   team: Team
 ): InstantiatedTankRig {
   const rig = buildVehicleRig(assets, vehicleClass, team);
+  const tracked = vehicleClass === 'normal' || vehicleClass === 'heavy' || vehicleClass === 'ifv';
+  const replaceTracks = tracked && removeBakedTracks(rig, vehicleClass === 'ifv');
   mergeStaticVehicleMeshes(rig, `${vehicleClass}:${team}`);
+  if (replaceTracks) addMovingTracks(rig);
   return rig;
 }
 
@@ -465,6 +472,7 @@ function buildVehicleRig(
   if (vehicleClass === 'support') {
     return buildSupportVehicleRig(team);
   }
+  if (vehicleClass === 'littlebird') return buildLittleBirdRig(team);
 
   const root = new THREE.Group();
   root.name = `tank_${team}_${vehicleClass}`;
@@ -1081,6 +1089,7 @@ function mergeStaticVehicleMeshes(rig: InstantiatedTankRig, cacheKey: string): v
     rig.gunRecoilGroup,
   ]);
   if (rig.rwsNode) dynamic.add(rig.rwsNode);
+  visualRoot.traverse((o) => { if (o.userData.noStaticMerge) dynamic.add(o); });
   for (const w of rig.wheels) dynamic.add(w.node);
   for (const st of rig.steerNodes) dynamic.add(st);
   const podMeshes = new Set<THREE.Object3D>(rig.rocketMeshes);
@@ -1097,6 +1106,9 @@ function mergeStaticVehicleMeshes(rig: InstantiatedTankRig, cacheKey: string): v
     const mesh = obj as THREE.Mesh;
     if (!mesh.isMesh || Array.isArray(mesh.material)) return;
     if (podMeshes.has(mesh) || dynamic.has(mesh)) return;
+    for (let p = mesh.parent; p && p !== visualRoot; p = p.parent) {
+      if (podMeshes.has(p) || p.userData.keepMeshChildren) return;
+    }
     const morphKeys = Object.keys(mesh.geometry.morphAttributes ?? {});
     if (morphKeys.length > 0) return;
 

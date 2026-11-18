@@ -284,6 +284,10 @@ const ROCKET_SHELLS: readonly [ShellSpec, ShellSpec] = [
   },
 ];
 
+export function playerDriveScale(cls: VehicleClass): number {
+  return cls === 'humvee' || cls === 'littlebird' ? 1 : 1.25;
+}
+
 export const TANK_STATS: Record<VehicleClass, TankStats> = {
   normal: {
     vehicleClass: 'normal',
@@ -472,6 +476,27 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
     hullHalfLength: 3.4,
     wheelbase: 4.4,
   },
+  littlebird: {
+    vehicleClass: 'littlebird',
+    displayName: 'LITTLE BIRD',
+    maxForwardSpeed: 45, maxReverseSpeed: 22,
+    forwardAccel: 12, reverseAccel: 9, brakeDecel: 12,
+    hullTurnRate: 3.5, turretTurnRate: 5, gunElevateRate: 4.8,
+    gunMinPitch: -0.85, gunMaxPitch: 0.68,
+    hasMainCannon: true, hasCoaxMG: true, infiniteMG: false,
+    cannonReloadTime: 7, mgFireInterval: 0.085, recoilImpulse: 0.02,
+    salvoSize: 2, salvoInterval: 0.65,
+    shellMuzzleSpeed: SAM_SHELLS[0].muzzleSpeed,
+    shellDirectDamage: SAM_SHELLS[0].directDamage,
+    shellSplashDamage: SAM_SHELLS[0].splashDamage,
+    shellSplashRadius: SAM_SHELLS[0].splashRadius,
+    shells: [
+      { ...SAM_SHELLS[0], id: 'littlebird_missile', shortCode: 'GUIDED', displayName: 'GUIDED MISSILE' },
+      { ...ROCKET_SHELLS[0], id: 'littlebird_rocket', shortCode: 'ROCKET', displayName: 'UNGUIDED ROCKET', guidance: undefined },
+    ],
+    hitRadius: 1.31, collisionRadius: 1.18,
+    drive: 'air', hullHalfWidth: 0.94, hullHalfLength: 1.5,
+  },
 };
 
 function wrapAnglePi(a: number): number {
@@ -562,7 +587,6 @@ function createModuleStates(cls: VehicleClass): Map<ModuleId, import('./DamageMo
 const _tmpVecA = new THREE.Vector3();
 const _tmpVecB = new THREE.Vector3();
 const _tmpQuat = new THREE.Quaternion();
-const _crushDir = new THREE.Vector2();
 const _seekOrigin = new THREE.Vector3();
 const _seekDir = new THREE.Vector3();
 const _seekTo = new THREE.Vector3();
@@ -617,6 +641,9 @@ export class Tank implements TankEntity {
 
   public cannonCooldown = 0;
   public mgCooldown = 0;
+  public get cannonReloadDuration(): number {
+    return this.stats.cannonReloadTime * (this.isHuman ? 0.5 : 1);
+  }
   public dispersionMult = 1;
   public mgHeat = 0;
   public mgOverheated = false;
@@ -824,7 +851,7 @@ export class Tank implements TankEntity {
         this.selectedShellIndex = intent.selectShell;
         // Brief chamber switch delay only on heavy breech-loaded cannons, instant on IFV dual-feed
         if (this.stats.hasMainCannon) {
-          this.cannonCooldown = Math.max(this.cannonCooldown, 0.45);
+          this.cannonCooldown = Math.max(this.cannonCooldown, this.isHuman ? 0.225 : 0.45);
         }
       }
     }
@@ -953,7 +980,8 @@ export class Tank implements TankEntity {
     const rawMGTrigger = isIFV ? Boolean(intent?.fireCannon || intent?.fireMG) : Boolean(intent?.fireMG);
     // Classes without a separate main cannon lose their only weapon when 'gun' dies;
     // MBTs/heavy keep the coax MG when the main gun is knocked out.
-    const mgWeaponOut = !this.stats.hasMainCannon && gunSt === 'destroyed';
+    const airborne = this.stats.drive === 'air';
+    const mgWeaponOut = (!this.stats.hasMainCannon || airborne) && gunSt === 'destroyed';
     const wantsMG = Boolean(
       rawMGTrigger && this.stats.hasCoaxMG && !this.mgOverheated && !gunnerDisabled && !mgWeaponOut
     );
@@ -972,13 +1000,16 @@ export class Tank implements TankEntity {
       this.mgHeat = 0;
       this.mgOverheated = false;
     } else if (!wantsMG) {
-      const coolRate = this.mgOverheated ? 0.32 : 0.44;
+      const coolRate = (this.mgOverheated ? 0.32 : 0.44) * (this.isHuman ? 2 : 1);
       this.mgHeat = Math.max(0, this.mgHeat - coolRate * safeDt);
       if (this.mgOverheated && this.mgHeat <= 0.15) {
         this.mgOverheated = false;
       }
     }
 
+    if (airborne) {
+      this.stepFlight(safeDt, intent, world, mobilityMult, driverOut, mst('engine') === 'destroyed');
+    } else {
     // Fording: depth > 0.25 m scrubs top speed (tracked -> x0.5, wheeled -> x0.35
     // at 1.1 m) and bleeds acceleration; wakes replace track dust in water.
     const waterDepth = world.getWaterDepthAt?.(this.position.x, this.position.z) ?? 0;
@@ -989,7 +1020,8 @@ export class Tank implements TankEntity {
           ? 1 - 0.65 * fordT
           : 1 - 0.5 * fordT
         : 1;
-    const accelMul = fordT > 0 ? 0.72 : 1;
+    const driveScale = this.isHuman ? playerDriveScale(this.stats.vehicleClass) : 0.6;
+    const accelMul = (fordT > 0 ? 0.72 : 1) * driveScale;
 
     const rawThrottle = intent ? THREE.MathUtils.clamp(intent.throttle, -1, 1) : 0;
     const rawSteer = intent ? THREE.MathUtils.clamp(intent.steer, -1, 1) : 0;
@@ -1003,8 +1035,8 @@ export class Tank implements TankEntity {
       if (Math.abs(this.speed) <= decel) this.speed = 0;
       else this.speed -= Math.sign(this.speed) * decel;
     } else if (Math.abs(throttle) > 0.02) {
-      const maxFwd = this.stats.maxForwardSpeed * mobilityMult * fordMul;
-      const maxRev = this.stats.maxReverseSpeed * mobilityMult * fordMul;
+      const maxFwd = this.stats.maxForwardSpeed * driveScale * mobilityMult * fordMul;
+      const maxRev = this.stats.maxReverseSpeed * driveScale * mobilityMult * fordMul;
       if (throttle > 0) {
         const accel = this.speed < 0 ? this.stats.brakeDecel : this.stats.forwardAccel * mobilityMult * accelMul;
         this.speed = Math.min(maxFwd, this.speed + accel * rawThrottle * safeDt);
@@ -1027,7 +1059,7 @@ export class Tank implements TankEntity {
 
     if (isWheeled) {
       // Bicycle model: smoothed steer angle, speed-dependent max steer, no turn-on-spot
-      const speedFrac = Math.min(1, Math.abs(this.speed) / Math.max(1, this.stats.maxForwardSpeed));
+      const speedFrac = Math.min(1, Math.abs(this.speed) / Math.max(1, this.stats.maxForwardSpeed * driveScale));
       const maxSteer = THREE.MathUtils.lerp(0.6, 0.25, speedFrac);
       const steerTarget = steer * maxSteer;
       this.steerAngle += (steerTarget - this.steerAngle) * (1 - Math.exp(-10 * safeDt));
@@ -1046,7 +1078,15 @@ export class Tank implements TankEntity {
 
     const sinH = Math.sin(this.hullYaw);
     const cosH = Math.cos(this.hullYaw);
-    this.velocity.set(sinH * effectiveSpeed, 0, cosH * effectiveSpeed);
+    let slip = 0;
+    if (this.isHuman && Math.abs(effectiveSpeed) > 0.12) {
+      // Keep some sideways momentum as the hull rotates, then recover grip.
+      const oldSlip = -cosH * this.velocity.x + sinH * this.velocity.z;
+      const grip = brake ? 2.8 : isWheeled ? 4 : 6;
+      const maxSlip = Math.abs(effectiveSpeed) * (brake ? 0.46 : 0.35);
+      slip = THREE.MathUtils.clamp(oldSlip * Math.exp(-grip * safeDt), -maxSlip, maxSlip);
+    }
+    this.velocity.set(sinH * effectiveSpeed - cosH * slip, 0, cosH * effectiveSpeed + sinH * slip);
 
     this.position.x += this.velocity.x * safeDt;
     this.position.z += this.velocity.z * safeDt;
@@ -1062,6 +1102,9 @@ export class Tank implements TankEntity {
     }
 
     this.resolveCollisions(world, allTanks);
+    if (Math.abs(this.speed * roadBoost) < Math.abs(effectiveSpeed)) {
+      this.velocity.multiplyScalar(Math.abs(this.speed * roadBoost / effectiveSpeed));
+    }
 
     const longitudinalAccel = (this.speed - this.prevSpeed) / Math.max(safeDt, 0.001);
     this.alignHullToTerrain(world, safeDt, longitudinalAccel);
@@ -1080,6 +1123,11 @@ export class Tank implements TankEntity {
         const halfTrack = 1.45;
         const vLeft = effectiveSpeed - angularVel * halfTrack;
         const vRight = effectiveSpeed + angularVel * halfTrack;
+        for (const track of this.rig.tracks ?? []) {
+          if (mst(track.side === 'L' ? 'track_left' : 'track_right') !== 'destroyed') {
+            track.advance((track.side === 'L' ? vLeft : vRight) * safeDt);
+          }
+        }
         for (const w of this.rig.wheels) {
           const trackV = w.side === 'L' ? vLeft : vRight;
           w.node.rotation.x += (trackV * safeDt) / w.radius;
@@ -1117,6 +1165,7 @@ export class Tank implements TankEntity {
           }
         }
       }
+    }
     }
 
     if (intent) {
@@ -1163,12 +1212,12 @@ export class Tank implements TankEntity {
           this.salvoTimer -= safeDt;
           if (this.salvoTimer <= 0 && this._rocketsLeft > 0 && canFireCannon) {
             this._fireNextRocket(callbacks);
-            this.salvoTimer = this.stats.salvoInterval ?? 0.28;
+            this.salvoTimer = (this.stats.salvoInterval ?? 0.28) * (this.isHuman ? 0.5 : 1);
           }
           if (this._rocketsLeft <= 0 || !canFireCannon) {
             this.salvoActive = false;
             if (this._rocketsLeft <= 0) {
-              this.cannonCooldown = this.stats.cannonReloadTime;
+              this.cannonCooldown = this.cannonReloadDuration;
             }
           }
         } else if (
@@ -1185,7 +1234,7 @@ export class Tank implements TankEntity {
           this.salvoGuideTarget = this.seekerLocked ? this.seekerTarget : null;
         }
       } else if (intent?.fireCannon && this.cannonCooldown <= 0 && canFireCannon) {
-        this.cannonCooldown = this.stats.cannonReloadTime * reloadMult;
+        this.cannonCooldown = this.cannonReloadDuration * reloadMult;
         this.getMuzzleWorld(_tmpVecA, _tmpVecB);
         callbacks?.onFireCannon?.(this, _tmpVecA, _tmpVecB, this.activeShell);
       }
@@ -1193,7 +1242,7 @@ export class Tank implements TankEntity {
 
     // Fire Coax MG (Normal/Heavy) OR Primary Infinite-Ammo 30mm Chain-Gun (IFV)
     if (wantsMG && this.mgCooldown <= 0) {
-      this.mgCooldown = this.stats.mgFireInterval;
+      this.mgCooldown = this.stats.mgFireInterval * (this.isHuman ? 0.5 : 1);
       if (!this.stats.infiniteMG) {
         this.mgHeat = Math.min(1, this.mgHeat + 0.032);
         if (this.mgHeat >= 1) {
@@ -1212,6 +1261,74 @@ export class Tank implements TankEntity {
         isIFV ? this.activeShell : undefined
       );
     }
+  }
+
+  private stepFlight(dt: number, intent: TankIntent | null, world: TerrainQuery, mobility: number, pilotOut: boolean, engineOut: boolean): void {
+    const lift = pilotOut ? 0 : intent?.lift ?? 0;
+    this.rig.spinRotors?.(dt * (engineOut ? 0.32 : 1 + lift * 0.065));
+    const yaw = intent?.flightYaw;
+    if (yaw !== undefined && !pilotOut) {
+      const maxStep = this.stats.hullTurnRate * dt;
+      const movement = wrapAnglePi(yaw - this.hullYaw) * (1 - Math.exp(-3.7 * dt));
+      this.hullYaw = wrapAnglePi(this.hullYaw + THREE.MathUtils.clamp(movement, -maxStep, maxStep));
+    }
+    const p = this.position;
+    const ground = world.getHeightAt(p.x, p.z) + (world.getWaterDepthAt?.(p.x, p.z) ?? 0);
+    const grounded = p.y <= ground + 0.025;
+    const sin = Math.sin(this.hullYaw), cos = Math.cos(this.hullYaw);
+    const v = this.velocity;
+    const forwardSpeed = v.x * sin + v.z * cos;
+    const sideSpeed = v.x * cos - v.z * sin;
+    const pose = this.rig.hullTiltGroup.rotation;
+    const pitchCmd = intent?.brake ? -0.045 * forwardSpeed
+      : (intent?.flightPitch ?? 0) * 0.86 + (intent?.throttle ?? 0) * 0.52;
+    const rollCmd = intent?.brake ? 0.055 * sideSpeed : -(intent?.steer ?? 0) * 0.47;
+    const control = pilotOut || engineOut || (grounded && lift <= 0) ? 0 : Math.sqrt(mobility);
+    pose.x = THREE.MathUtils.damp(pose.x, THREE.MathUtils.clamp(pitchCmd, -0.52, 0.61) * control, 4.6, dt);
+    pose.z = THREE.MathUtils.damp(pose.z, THREE.MathUtils.clamp(rollCmd, -0.5, 0.5) * control, 5.2, dt);
+
+    // The rotor pushes along the aircraft's tilted up vector. Drag and thrust,
+    // not key state, determine velocity. Collective includes a light hover assist.
+    const rotor = _tmpVecA.set(0, 1, 0).applyEuler(pose);
+    const gravity = 9.81;
+    const trim = gravity * (0.45 + 0.55 / rotor.y);
+    const collective = engineOut ? 0 : THREE.MathUtils.clamp(trim + lift * (lift > 0 ? 8.9 * mobility : 4.6) - v.y * 1.1, 1, 22);
+    const dragF = forwardSpeed * (0.09 + Math.abs(forwardSpeed) * (forwardSpeed < 0 ? 0.006 : 0.0018));
+    const dragS = sideSpeed * (0.16 + Math.abs(sideSpeed) * 0.004);
+    const f = rotor.z * collective - dragF;
+    const s = rotor.x * collective - dragS;
+    v.x += (f * sin + s * cos) * dt;
+    v.z += (f * cos - s * sin) * dt;
+    v.y += (rotor.y * collective - gravity - v.y * (engineOut ? 0.57 : 0.17)) * dt;
+    if (grounded && v.y <= 0) {
+      const skidFriction = Math.exp(-7 * dt);
+      v.x *= skidFriction;
+      v.z *= skidFriction;
+    }
+    const distance = v.length() * dt;
+    if (distance > 0.001) {
+      const center = _tmpVecA.copy(p);
+      center.y += 1.2;
+      const hit = world.raycastWorld(center, _tmpVecB.copy(v).normalize(), distance + 0.75);
+      if (hit?.hitKind === 'obstacle') {
+        const inward = v.dot(hit.normal);
+        if (inward < 0) v.addScaledVector(hit.normal, -inward).multiplyScalar(0.72);
+      }
+    }
+    p.addScaledVector(v, dt);
+    const limit = world.worldHalfSize - 8;
+    if (Math.abs(p.x) > limit) { p.x = Math.sign(p.x) * limit; v.x = 0; }
+    if (Math.abs(p.z) > limit) { p.z = Math.sign(p.z) * limit; v.z = 0; }
+    const floor = world.getHeightAt(p.x, p.z) + (world.getWaterDepthAt?.(p.x, p.z) ?? 0);
+    if (p.y <= floor) {
+      p.y = floor;
+      if (v.y < -5.5) this._damageModule('engine', Math.min(1, (-v.y - 5.5) * 0.067));
+      v.y = Math.max(0, v.y);
+    }
+    else if (p.y >= floor + 150) { p.y = floor + 150; v.y = Math.min(0, v.y); }
+    this.speed = Math.hypot(v.x, v.z);
+    this.root.position.copy(p);
+    this.root.rotation.y = this.hullYaw;
   }
 
   private updateTurretAndGunAim(worldAimPoint: THREE.Vector3, dt: number): void {
@@ -1338,16 +1455,20 @@ export class Tank implements TankEntity {
       const distSq = dx * dx + dz * dz;
       if (distSq >= minDist * minDist) continue;
 
-      if (obs.destructible && Math.abs(this.speed) > 2.6) {
-        _crushDir.set(Math.sin(this.hullYaw) * Math.sign(this.speed), Math.cos(this.hullYaw) * Math.sign(this.speed));
-        world.crushObstacle(obs, _crushDir);
-        this.speed *= 0.84;
-        continue;
-      }
-
       const dist = Math.max(0.001, Math.sqrt(distSq));
       const nx = dx / dist;
       const nz = dz / dist;
+      if (obs.destructible) {
+        const approach = -(this.velocity.x * nx + this.velocity.z * nz);
+        if (approach > (obs.lightCover ? 2.6 : 4.5)) {
+          const mass = this.stats.vehicleClass === 'heavy' ? 2.1 : this.stats.drive === 'tracked' ? 1.45 : 0.8;
+          const impact = approach * approach * mass;
+          if (world.damageObstacle(obs, impact, this.velocity.x, this.velocity.z)) {
+            this.speed *= obs.lightCover ? 0.84 : 0.55;
+            continue;
+          }
+        }
+      }
       const overlap = minDist - dist;
       this.position.x += nx * overlap;
       this.position.z += nz * overlap;
@@ -1361,6 +1482,7 @@ export class Tank implements TankEntity {
     for (let i = 0; i < allTanks.length; i++) {
       const other = allTanks[i];
       if (other === this) continue;
+      if (other.stats.drive === 'air' && other.position.y - this.position.y > 3) continue;
       const dx = this.position.x - other.position.x;
       const dz = this.position.z - other.position.z;
       const minDist = myR + other.stats.collisionRadius;
@@ -1540,7 +1662,7 @@ export class Tank implements TankEntity {
       if (!hit) return cand;
       // Destructible brush < 12 m doesn't block the seeker
       const brushOk =
-        hit.hitKind === 'obstacle' && Boolean(hit.obstacle?.destructible) && hit.distance < 12;
+        hit.hitKind === 'obstacle' && Boolean(hit.obstacle?.lightCover) && hit.distance < 12;
       if (brushOk) return cand;
     }
     return null;
@@ -1551,14 +1673,14 @@ export class Tank implements TankEntity {
     onFireCannon?: (tank: Tank, pos: THREE.Vector3, dir: THREE.Vector3, shell: ShellSpec, guideTarget?: TankEntity | null) => void;
   }): void {
     const meshes = this.rig.rocketMeshes;
-    if (meshes.length === 0) return;
     const mesh = meshes[this.salvoFired % meshes.length];
     this.salvoFired++;
-    mesh.updateWorldMatrix(true, false);
-    mesh.getWorldPosition(_tmpVecA);
-    this.rig.gunPivot.getWorldQuaternion(_tmpQuat);
-    _tmpVecB.set(0, 0, 1).applyQuaternion(_tmpQuat).normalize();
-    mesh.visible = false;
+    if (mesh) {
+      mesh.getWorldPosition(_tmpVecA);
+      this.rig.gunPivot.getWorldQuaternion(_tmpQuat);
+      _tmpVecB.set(0, 0, 1).applyQuaternion(_tmpQuat).normalize();
+      mesh.visible = false;
+    } else this.getMuzzleWorld(_tmpVecA, _tmpVecB);
     this._rocketsLeft = Math.max(0, this._rocketsLeft - 1);
     // SAM ripple: each missile snapshots the CURRENT lock at launch so the
     // player can walk the ripple onto a new target mid-salvo.
@@ -1653,17 +1775,11 @@ export class Tank implements TankEntity {
     const tmpV = new THREE.Vector3();
     const cb = new THREE.Box3();
     space.traverse((o) => {
-      if (skip) {
-        let p: THREE.Object3D | null = o;
-        let inside = false;
-        while (p) {
-          if (p === skip) { inside = true; break; }
-          p = p.parent;
-        }
-        if (inside) return;
+      for (let p: THREE.Object3D | null = o; p && p !== space; p = p.parent) {
+        if (p === skip || p.userData.noDamageBounds) return;
       }
       const mesh = o as THREE.Mesh;
-      if (!mesh.isMesh || !mesh.geometry) return;
+      if (!mesh.isMesh || !mesh.geometry || (mesh as THREE.InstancedMesh).isInstancedMesh) return;
       if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
       const gb = mesh.geometry.boundingBox;
       if (!gb || gb.isEmpty()) return;
@@ -1993,14 +2109,14 @@ export class Tank implements TankEntity {
       const lx = _tmpVecA.x, ly = _tmpVecA.y, lz = _tmpVecA.z;
 
       // ---------- external modules: direct box hits regardless of armour ----------
-      const slugScale = Math.min(1, penMm / 40);
-      const extSlug = md ? md.slug * slugScale : amount * 0.004 * slugScale;
+      const smallArms = weapon === 'mg' && (!spec || spec.id.startsWith('humvee_'));
+      const chip = smallArms ? Math.min(0.035, amount * 0.005) : 0;
+      const extSlug = smallArms ? chip : (md?.slug ?? amount * 0.004) * Math.min(1, penMm / 40);
       if (extSlug > 0) {
         for (const rt of this.modules.values()) {
           if (rt.integrity <= 0) continue;
           for (const bx of rt.boxes) {
             if (!bx.external) continue;
-            const part = bx.part === 'hull' ? this.rig.hullTiltGroup : (this.rig.turretPivot as THREE.Object3D);
             const o = bx.part === 'hull' ? _hO : _tO;
             const d = bx.part === 'hull' ? _hD : _tD;
             const t = rayBox(o.x, o.y, o.z, d.x, d.y, d.z, bx.min[0], bx.min[1], bx.min[2], bx.max[0], bx.max[1], bx.max[2], 40);
@@ -2088,13 +2204,27 @@ export class Tank implements TankEntity {
           penEnd[0] = lx + _hD.x * pathLen; // approx in entry part local
           penEnd[1] = ly + _hD.y * pathLen;
           penEnd[2] = lz + _hD.z * pathLen;
-        } else if (ricochet) {
-          // spark only — no internal damage; externals already collected
-        } else if (!md && amount > 0) {
-          // generic small-arms / unknown spec: trickle damage along a short path
-          const fakeSlug = amount * 0.004;
-          const slugOriginWorld = _slugO.copy(entryWorld).addScaledVector(dir, 0.15);
-          this._rayDamageModules(hitModules, slugOriginWorld, dir, 1.2, fakeSlug, null);
+        } else if (chip > 0 && hitModules.size === 0) {
+          // A non-penetrating burst wears exposed hardware, not crew behind the plate.
+          let closestId: ModuleId | null = null;
+          let closestSq = Infinity;
+          for (const rt of this.modules.values()) {
+            if (rt.integrity <= 0) continue;
+            for (const bx of rt.boxes) {
+              if (!bx.external) continue;
+              const o = bx.part === 'hull' ? _hO : _tO;
+              const d = bx.part === 'hull' ? _hD : _tD;
+              const x = o.x + d.x * entryT;
+              const y = o.y + d.y * entryT;
+              const z = o.z + d.z * entryT;
+              const dx = Math.max(bx.min[0] - x, x - bx.max[0], 0);
+              const dy = Math.max(bx.min[1] - y, y - bx.max[1], 0);
+              const dz = Math.max(bx.min[2] - z, z - bx.max[2], 0);
+              const distSq = dx * dx + dy * dy + dz * dz;
+              if (distSq < closestSq) { closestSq = distSq; closestId = rt.id; }
+            }
+          }
+          if (closestId) hitModules.set(closestId, { dmg: chip * 0.65, dist: entryT });
         }
       }
 
@@ -2361,6 +2491,7 @@ export class Tank implements TankEntity {
     this._setRocketMeshesVisible(true);
 
     this.root.visible = true;
+    this.rig.hullTiltGroup.rotation.set(0, 0, 0);
     this.rig.turretPivot.rotation.set(0, 0, 0);
     this.rig.turretPivot.position.copy(this.rig.turretRestPos);
     this.rig.gunPivot.rotation.set(0, 0, 0);

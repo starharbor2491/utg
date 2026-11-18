@@ -121,7 +121,7 @@ const _tankCenter = new THREE.Vector3();
  * Swept ray-segment `[0, segLen]` intersection against a living tank's
  * center-of-mass bounding sphere AND low-profile hull cylinder.
  */
-function intersectSegmentTank(
+export function intersectSegmentTank(
   p0: THREE.Vector3,
   dir: THREE.Vector3,
   segLen: number,
@@ -450,7 +450,6 @@ export class BallisticsManager {
   private readonly mgRounds: MgSlot[] = [];
   private mgCursor = 0;
 
-  private readonly crateMgHits = new Map<string, number>();
 
   // Scratch math objects
   private readonly _hiddenMat4 = new THREE.Matrix4().makeScale(0, 0, 0);
@@ -479,41 +478,15 @@ export class BallisticsManager {
   private readonly _gLosRate = new THREE.Vector3();
   private readonly _gAccel = new THREE.Vector3();
   private readonly _gPerp = new THREE.Vector3();
-  private readonly _tmpD = new THREE.Vector3();
 
   // QA metrics for guidedTest()
   public guidedHits = 0;
   public guidedDecoys = 0;
   public samLaunched = 0;
-  /** F5b: live drone list for counter-drone swept-segment checks. */
-  public droneTargets: readonly {
-    pos: THREE.Vector3;
-    hitRadius: number;
-    alive: boolean;
-    onShotDown: (() => void) | null;
-  }[] = [];
   public guidedMinMiss = Infinity;
   /** When set, every rocket shell tracks closest approach to this entity (miss metric). */
   public missProbeTarget: TankEntity | null = null;
   public missProbeMin = Infinity;
-
-  /** Swept segment vs drone positions; true when a drone was shot down. */
-  private _checkDroneHits(segLen: number): boolean {
-    if (!this.droneTargets.length) return false;
-    for (const dr of this.droneTargets) {
-      if (!dr.alive || !dr.onShotDown) continue;
-      this._tmpD.subVectors(dr.pos, this._prevPos);
-      const tt = THREE.MathUtils.clamp(this._tmpD.dot(this._segDir), 0, segLen);
-      this._tmpD.copy(this._prevPos).addScaledVector(this._segDir, tt);
-      const dx = this._tmpD.x - dr.pos.x, dy = this._tmpD.y - dr.pos.y, dz = this._tmpD.z - dr.pos.z;
-      const rr = dr.hitRadius;
-      if (dx * dx + dy * dy + dz * dz < rr * rr) {
-        dr.onShotDown();
-        return true;
-      }
-    }
-    return false;
-  }
 
   public resetGuidedStats(): void {
     this.guidedHits = 0;
@@ -1005,11 +978,6 @@ export class BallisticsManager {
       if (segLen < 1e-6) continue;
       this._segDir.multiplyScalar(1 / segLen);
 
-      if (this._checkDroneHits(segLen)) {
-        s.active = false;
-        continue;
-      }
-
       // Check living tank intersections
       let hitTank: TankEntity | null = null;
       let bestTankDist = Infinity;
@@ -1080,7 +1048,7 @@ export class BallisticsManager {
 
         let directVictim: TankEntity | null = null;
 
-        if (hitTank !== null && bestTankDist <= worldDist) {
+        if (hitTank !== null && bestTankDist <= Math.min(worldDist, waterDist)) {
           // Direct hit on enemy/player armor!
           directVictim = hitTank;
           this._hitPoint.copy(this._prevPos).addScaledVector(this._segDir, bestTankDist);
@@ -1131,15 +1099,8 @@ export class BallisticsManager {
           this._hitPoint.copy(worldHit.point);
           this._hitNormal.copy(worldHit.normal);
 
-          if (
-            worldHit.hitKind === 'obstacle' &&
-            worldHit.obstacle &&
-            worldHit.obstacle.destructible &&
-            !worldHit.obstacle.destroyed
-          ) {
-            const dirXZ = new THREE.Vector2(this._segDir.x, this._segDir.z);
-            if (dirXZ.lengthSq() > 1e-5) dirXZ.normalize();
-            world.crushObstacle(worldHit.obstacle, dirXZ);
+          if (worldHit.obstacle) {
+            world.damageObstacle(worldHit.obstacle, s.directDamage, this._segDir.x, this._segDir.z);
           }
 
           this.effects.spawnExplosion(this._hitPoint, this._hitNormal, s.explosionScale, 'he_ground');
@@ -1147,24 +1108,9 @@ export class BallisticsManager {
 
         // HE-FRAG Splash Radius: knock down destructible obstacles & deal radial falloff damage
         // Water impacts burst half as far and flatter.
-        const R = impactIsWater ? s.splashRadius * 0.5 : s.splashRadius;
+        const R = impactIsWater && !directVictim ? s.splashRadius * 0.5 : s.splashRadius;
         if (R > 0) {
-          const obstacles = world.getObstacles();
-          for (let oIdx = 0; oIdx < obstacles.length; oIdx++) {
-            const obs = obstacles[oIdx];
-            if (!obs.destructible || obs.destroyed) continue;
-            const dx = obs.x - this._hitPoint.x;
-            const dz = obs.z - this._hitPoint.z;
-            const distXZ = Math.sqrt(dx * dx + dz * dz);
-            if (distXZ <= R + obs.radius * 0.5) {
-              const push = new THREE.Vector2(dx, dz);
-              if (push.lengthSq() < 1e-4) {
-                push.set(this._segDir.x, this._segDir.z);
-              }
-              if (push.lengthSq() > 1e-5) push.normalize();
-              world.crushObstacle(obs, push);
-            }
-          }
+          world.blastObstacles(this._hitPoint.x, this._hitPoint.y, this._hitPoint.z, R, s.splashDamage);
 
           for (let tIdx = 0; tIdx < tanks.length; tIdx++) {
             const tank = tanks[tIdx];
@@ -1262,11 +1208,6 @@ export class BallisticsManager {
       if (segLen < 1e-6) continue;
       this._segDir.multiplyScalar(1 / segLen);
 
-      if (this._checkDroneHits(segLen)) {
-        m.active = false;
-        continue;
-      }
-
       let hitTank: TankEntity | null = null;
       let bestTankDist = Infinity;
       for (let tIdx = 0; tIdx < tanks.length; tIdx++) {
@@ -1313,7 +1254,7 @@ export class BallisticsManager {
           this._attackerPos.set(m.originX, m.originY, m.originZ);
         }
 
-        if (hitTank !== null && bestTankDist <= worldDist) {
+        if (hitTank !== null && bestTankDist <= Math.min(worldDist, mgWaterDist)) {
           this._hitPoint.copy(this._prevPos).addScaledVector(this._segDir, bestTankDist);
           hitTank.getCenterMassWorld(this._victimCenter);
           this._hitNormal.subVectors(this._hitPoint, this._victimCenter);
@@ -1359,6 +1300,7 @@ export class BallisticsManager {
           if (m.splashRadius > 0) {
             this.effects.spawnWaterSplash(this._hitPoint, 0.9);
             this.effects.spawnExplosion(this._hitPoint, this._hitNormal, 0.3, 'he_ground');
+            world.blastObstacles(wHitX, mgWaterY, wHitZ, m.splashRadius * 0.5, m.splashDamage);
             for (let tIdx = 0; tIdx < tanks.length; tIdx++) {
               const tank = tanks[tIdx];
               if (!tank.alive || tank.team === m.shooter?.team) continue;
@@ -1396,6 +1338,7 @@ export class BallisticsManager {
 
           if (m.splashRadius > 0) {
             this.effects.spawnExplosion(worldHit.point, worldHit.normal, 0.34, 'he_ground');
+            world.blastObstacles(worldHit.point.x, worldHit.point.y, worldHit.point.z, m.splashRadius, m.splashDamage);
             // 30mm HEI-T splash damage to nearby living tanks
             for (let tIdx = 0; tIdx < tanks.length; tIdx++) {
               const tank = tanks[tIdx];
@@ -1425,22 +1368,7 @@ export class BallisticsManager {
             this.effects.spawnSparkImpact(worldHit.point, worldHit.normal, isHardSurface);
           }
 
-          if (
-            obs &&
-            obs.destructible &&
-            !obs.destroyed &&
-            (obs.kind === 'crates' || obs.kind === 'barrier')
-          ) {
-            const hits = (this.crateMgHits.get(obs.id) ?? 0) + 1;
-            if (hits >= 5) {
-              this.crateMgHits.delete(obs.id);
-              const dirXZ = new THREE.Vector2(this._segDir.x, this._segDir.z);
-              if (dirXZ.lengthSq() > 1e-5) dirXZ.normalize();
-              world.crushObstacle(obs, dirXZ);
-            } else {
-              this.crateMgHits.set(obs.id, hits);
-            }
-          }
+          if (obs) world.damageObstacle(obs, m.directDamage, this._segDir.x, this._segDir.z);
         }
 
         continue;

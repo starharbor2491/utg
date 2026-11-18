@@ -88,9 +88,12 @@ export function auditThreeObject(root: THREE.Object3D, opts: AuditOptions = {}):
         }
       }
 
-      geo.computeBoundingBox();
-      if (geo.boundingBox) {
-        const box = new THREE.Box3().copy(geo.boundingBox).applyMatrix4(mesh.matrixWorld);
+      const bounds = (mesh as THREE.InstancedMesh).isInstancedMesh
+        ? mesh as THREE.InstancedMesh
+        : geo;
+      bounds.computeBoundingBox();
+      if (bounds.boundingBox) {
+        const box = new THREE.Box3().copy(bounds.boundingBox).applyMatrix4(mesh.matrixWorld);
         meshes.push({ mesh, box });
       }
     }

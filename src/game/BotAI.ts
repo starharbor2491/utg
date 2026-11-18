@@ -42,7 +42,8 @@ function aimWanderRadians(_cls: VehicleClass): number {
 function idealOrbitDistForClass(cls: VehicleClass): number {
   if (cls === 'heavy') return 112;
   if (cls === 'ifv') return 78;
-  if (cls === 'rocket') return 420; // standoff artillery band ~180-380m
+  if (cls === 'rocket') return 420;
+  if (cls === 'support') return 280;
   if (cls === 'humvee') return 92;
   return 96;
 }
@@ -218,7 +219,7 @@ export class BotAIManager {
       let clear = true;
       for (let i = 0; i < obstacles.length; i++) {
         const obs = obstacles[i];
-        if (obs.destroyed || obs.destructible) continue;
+        if (obs.destroyed || obs.lightCover) continue;
         const dx = wx - obs.x;
         const dz = wz - obs.z;
         const pad = obs.radius + 6;
@@ -259,7 +260,7 @@ export class BotAIManager {
     if (hit === null) return true;
     return (
       hit.hitKind === 'obstacle' &&
-      Boolean(hit.obstacle?.destructible) &&
+      Boolean(hit.obstacle?.lightCover) &&
       hit.distance < 12
     );
   }
@@ -411,9 +412,9 @@ export class BotAIManager {
       const obs = obstacles[i];
       if (obs.destroyed) continue;
 
-      const weight = obs.destructible ? 0.16 : 1.0;
-      const look = obs.destructible ? 7.0 : obsLookahead;
-      const clearance = obs.radius + myR + (obs.destructible ? 1.2 : 2.8);
+      const weight = obs.lightCover ? 0.16 : 1.0;
+      const look = obs.lightCover ? 7.0 : obsLookahead;
+      const clearance = obs.radius + myR + (obs.lightCover ? 1.2 : 2.8);
 
       const ox = obs.x - ex;
       const oz = obs.z - ez;
@@ -859,7 +860,7 @@ export class BotAIManager {
             // Only allow shooting through a nearby destructible crate/sapling (< 12m), never solid cover/ridges
             const shootableBrush =
               losHit.hitKind === 'obstacle' &&
-              Boolean(losHit.obstacle?.destructible) &&
+              Boolean(losHit.obstacle?.lightCover) &&
               losHit.distance < 12;
             if (!shootableBrush) {
               scanned = false;
@@ -882,7 +883,7 @@ export class BotAIManager {
       const boreAngle = Math.acos(boreDot);
 
       // Periodic AI shell type variation (switches between AP & HE occasionally)
-      intent.selectShell = Math.sin(this.clock * 0.08 + brain.seed * 10) > 0.45 ? 1 : 0;
+      intent.selectShell = bot.stats.vehicleClass !== 'support' && Math.sin(this.clock * 0.08 + brain.seed * 10) > 0.45 ? 1 : 0;
 
       if (bot.stats.salvoSize) {
         // Rocket launcher: tight bore alignment (0.05 rad). Locked salvos may

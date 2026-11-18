@@ -42,7 +42,7 @@ export class Match {
     this.scene = scene;
     this.world = world;
 
-    // Pre-build all 5 human vehicles once so class switching swaps tanks[0] with zero runtime allocations
+    // Pre-build player vehicles so switching only swaps tanks[0].
     const blueYaw = this._yawTowardEnemyBase('blue');
     const spawn = this._spawnPoint('blue', null);
     this.humanVehicles = {
@@ -52,6 +52,7 @@ export class Match {
       humvee: new Tank('you_humvee', 'blue', 'humvee', assets, spawn, blueYaw, true, 'You'),
       rocket: new Tank('you_rocket', 'blue', 'rocket', assets, spawn, blueYaw, true, 'You'),
       support: new Tank('you_support', 'blue', 'support', assets, spawn, blueYaw, true, 'You'),
+      littlebird: new Tank('you_littlebird', 'blue', 'littlebird', assets, spawn, blueYaw, true, 'You'),
     };
 
     this.tanks.push(this.humanVehicles.normal);
@@ -91,6 +92,7 @@ export class Match {
     const base = BASE_BLUE;
     const nearBase =
       human.alive &&
+      (human.stats.drive !== 'air' || human.position.y <= this.world.getHeightAt(human.position.x, human.position.z) + 0.8) &&
       Math.hypot(human.position.x - base.x, human.position.z - base.z) <= 35;
     if (nearBase) {
       if (cls !== this.humanClass) {

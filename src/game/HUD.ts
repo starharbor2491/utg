@@ -1,5 +1,5 @@
 import './hud.css';
-import { TANK_STATS } from './Tank';
+import { playerDriveScale, TANK_STATS } from './Tank';
 import type {
   HUDTelemetry,
   MinimapObstacle,
@@ -38,14 +38,25 @@ const BORE_RING_CIRCUMFERENCE = TWO_PI * BORE_RING_RADIUS;
 const HP_SEGMENT_COUNT = 16;
 const FEED_POOL_SIZE = 6;
 
-const BRIEFING_VEHICLES: readonly { id: VehicleClass; name: string; armament: string }[] = [
-  { id: 'normal', name: 'Main battle tank', armament: 'APFSDS, HE' },
-  { id: 'heavy', name: 'Heavy tank', armament: 'APCBC, HE' },
-  { id: 'ifv', name: 'IFV', armament: 'APDS-T, HEI-T' },
-  { id: 'humvee', name: 'Humvee', armament: 'M2 .50 cal' },
-  { id: 'rocket', name: 'Rocket artillery', armament: '6-rocket salvo' },
-  { id: 'support', name: 'Support', armament: 'SAM, FPV drone' },
+const BRIEFING_VEHICLES: readonly { id: VehicleClass; name: string; armament: string; note: string }[] = [
+  { id: 'normal', name: 'Main battle tank', armament: 'APFSDS and HE', note: 'A balanced tank with a fast turret and a coaxial machine gun.' },
+  { id: 'heavy', name: 'Heavy tank', armament: 'APCBC and HE', note: 'Thick frontal armour and a heavy gun. Slower to turn and reposition.' },
+  { id: 'ifv', name: 'IFV', armament: '30 mm autocannon', note: 'Fast on tracks. Switch between armour-piercing and explosive ammunition.' },
+  { id: 'humvee', name: 'Humvee', armament: 'M2 .50 cal', note: 'Quick on roads, lightly protected. Keep moving and avoid heavier guns.' },
+  { id: 'rocket', name: 'Rocket artillery', armament: 'Six-round rocket pod', note: 'Choose between guided and unguided rockets. Leave room to reload.' },
+  { id: 'support', name: 'Support', armament: 'SAM and FPV drone', note: 'Press 2 to select the FPV, then click to launch. It detonates on impact.' },
+  { id: 'littlebird', name: 'Little Bird', armament: 'Missiles and machine gun', note: 'Player only. Shift / Ctrl control lift. Point and tilt with the mouse or trackpad; W/S pitch and A/D bank. Hold X to brake.' },
 ];
+
+const PROFILE: Record<VehicleClass, string> = {
+  normal: 'M30 77 40 60H98L111 43h53l13 9 83 2v6l-83 1-10 13 16 9-16 21H48L30 91Z M48 87H165M57 96h98',
+  heavy: 'M23 80 42 58h48l17-17h57l21 12h80v9h-80l-17 13 17 8-13 23H39L23 95Z M40 84h128M47 95h114',
+  ifv: 'M31 76 42 50h65l8-16h31l10 9h64v5h-64l-9 10 27 18 1 17-13 10H44L31 93Z M43 83h122M50 95h108',
+  humvee: 'M30 78h15l21-15 18-20h55l17 23 29 7 10 13-3 11h-26a15 15 0 1 0-30 0H86a15 15 0 1 0-30 0H33Z M89 49h43l11 16H78Z M105 43V33h65 M59 97a12 12 0 1 0 24 0 12 12 0 1 0-24 0 M139 97a12 12 0 1 0 24 0 12 12 0 1 0-24 0',
+  rocket: 'M23 91V64h126V44h31l14 15 20 9v23h-21a14 14 0 1 0-28 0h-48a14 14 0 1 0-28 0h-5a14 14 0 1 0-28 0Z M29 30l102-13 5 24L34 55Z M44 36l72-10 M154 49h23l12 14h-35Z M58 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0 M91 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0 M167 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0',
+  support: 'M23 91V64h126V44h31l14 15 20 9v23h-21a14 14 0 1 0-28 0h-48a14 14 0 1 0-28 0h-5a14 14 0 1 0-28 0Z M39 51V35l84-8v22Z M63 23V13h39v12 M154 49h23l12 14h-35Z M58 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0 M91 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0 M167 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0',
+  littlebird: 'M29 55 113 62Q130 43 163 43 195 43 209 63 222 84 194 88h-46l-25-14-94-12Z M28 60l-8-21h10l17 20 M146 46V32h25 M76 32h164 M178 47q20 8 24 22h-28Z M148 86l-7 17m46-17 8 17m-69 0h79l10-7 M137 72h80v8h-80Z',
+};
 
 const BRIEFING_CONTROLS: readonly { keys: readonly string[]; action: string }[] = [
   { keys: ['W', 'A', 'S', 'D'], action: 'Drive' },
@@ -96,6 +107,7 @@ export class HUD {
   // State tracking for zero-churn DOM updates
   private loadingEverCalled = false;
   private briefingVisible = true;
+  private hasDeployed = false;
   private elapsedSec = 0;
   private maxObservedRespawn = 3.0;
 
@@ -133,10 +145,6 @@ export class HUD {
   private readonly lkSquareEl: SVGRectElement;
   private readonly lkLabelEl: SVGTextElement;
   private fpvEl: HTMLDivElement | null = null;
-  private fpvBatteryFillEl: HTMLDivElement | null = null;
-  private fpvStatsEl: HTMLDivElement | null = null;
-  private fpvSignalEl: HTMLDivElement | null = null;
-  private fpvVigEl: HTMLDivElement | null = null;
   private readonly killBannerEl: HTMLDivElement;
   private readonly damageArcEl: HTMLDivElement;
 
@@ -328,9 +336,17 @@ export class HUD {
   }
 
   public setBriefingVisible(visible: boolean): void {
+    if (!visible) this.hasDeployed = true;
+    if (this.briefingVisible !== visible && visible && this.hasDeployed) {
+      this.engageMainTextEl.textContent = 'Resume battle';
+      this.briefingBackdropEl.querySelector('h1')!.textContent = 'Battle paused';
+    }
     this.briefingVisible = visible;
     this.briefingBackdropEl.classList.toggle('is-visible', visible);
     this.container.classList.toggle('is-briefing', visible);
+    if (visible && this.hasDeployed && !this.engageBtnEl.disabled && !this.briefingBackdropEl.contains(document.activeElement)) {
+      this.engageBtnEl.focus({ preventScroll: true });
+    }
   }
 
   private radarAccum = 0;
@@ -381,41 +397,24 @@ export class HUD {
     el.innerHTML = `
       <div class="fcs-fpv-tag">FPV</div>
       <div class="fcs-fpv-stats">
-        <div class="fcs-fpv-row"><span>BATT</span><div class="fcs-fpv-bar"><div class="fcs-fpv-bar-fill"></div></div><span class="fcs-fpv-val fcs-fpv-battv">100%</span></div>
         <div class="fcs-fpv-row"><span>SPD</span><span class="fcs-fpv-val fcs-fpv-spd">0 km/h</span></div>
         <div class="fcs-fpv-row"><span>ALT</span><span class="fcs-fpv-val fcs-fpv-alt">0 m</span></div>
         <div class="fcs-fpv-row"><span>RNG</span><span class="fcs-fpv-val fcs-fpv-rng">0 m</span></div>
+        <div class="fcs-fpv-row"><span>NEXT</span><span class="fcs-fpv-val fcs-fpv-cooldown">9 s</span></div>
       </div>
-      <div class="fcs-fpv-signal"><span class="fcs-fpv-sigl">SIGNAL</span><span class="fcs-fpv-bars"></span><span class="fcs-fpv-weak">WEAK SIGNAL</span></div>
       <div class="fcs-fpv-x"></div>
-      <div class="fcs-fpv-hint">LMB DETONATE · RMB ABORT · W/S THROTTLE</div>
-      <div class="fcs-fpv-vig"></div>`;
-    this.fpvBatteryFillEl = el.querySelector('.fcs-fpv-bar-fill');
-    this.fpvStatsEl = el.querySelector('.fcs-fpv-stats');
-    this.fpvSignalEl = el.querySelector('.fcs-fpv-signal');
-    this.fpvVigEl = el.querySelector('.fcs-fpv-vig');
+      <div class="fcs-fpv-hint">DETONATES ON IMPACT · RMB ABORT · W/S THROTTLE · A/D TURN</div>`;
     return el;
   }
 
   private updateFpvOverlay(f: NonNullable<HUDTelemetry['fpv']>): void {
     const root = this.fpvEl;
     if (!root) return;
-    const battPct = Math.round(f.battery * 100);
-    (root.querySelector('.fcs-fpv-battv') as HTMLElement).textContent = `${battPct}%`;
-    if (this.fpvBatteryFillEl) this.fpvBatteryFillEl.style.width = `${battPct}%`;
     (root.querySelector('.fcs-fpv-spd') as HTMLElement).textContent = `${f.speedKmh} km/h`;
     (root.querySelector('.fcs-fpv-alt') as HTMLElement).textContent = `${f.altM} m`;
     (root.querySelector('.fcs-fpv-rng') as HTMLElement).textContent = `${f.rangeM} m`;
-    // signal bars
-    const barsEl = root.querySelector('.fcs-fpv-bars') as HTMLElement;
-    let barsHtml = '';
-    for (let i = 0; i < 5; i++) barsHtml += `<i class="${i < f.signalBars ? 'on' : ''}"></i>`;
-    if (barsEl.dataset.bars !== barsHtml) {
-      barsEl.dataset.bars = barsHtml;
-      barsEl.innerHTML = barsHtml;
-    }
-    root.classList.toggle('is-weak', f.weak);
-    if (this.fpvVigEl) this.fpvVigEl.style.opacity = f.weak ? '0.55' : '0';
+    (root.querySelector('.fcs-fpv-cooldown') as HTMLElement).textContent = f.cooldown > 0 ? `${Math.ceil(f.cooldown)} s` : 'Ready';
+
   }
 
   private updateScoreboard(t: HUDTelemetry): void {
@@ -791,10 +790,12 @@ export class HUD {
 
     // 3. Speedometer
     const absSpeed = Math.abs(Math.round(Number.isFinite(t.speedKmh) ? t.speedKmh : 0));
-    const speedStr = `${absSpeed}`;
+    const speedStr = t.altitudeM === undefined ? `${absSpeed}` : `${absSpeed} / ${Math.round(t.altitudeM)} m`;
     if (speedStr !== this.lastSpeedStr) {
       this.lastSpeedStr = speedStr;
       this.speedNumEl.textContent = speedStr;
+      const unit = this.speedNumEl.nextElementSibling;
+      if (unit) unit.textContent = t.altitudeM === undefined ? 'km/h' : 'speed / altitude';
     }
 
     // 4. Primary Weapon / Cannon Reload & Shell Selector
@@ -805,7 +806,7 @@ export class HUD {
 
     const cannonTitleEl = this.cannonStatusEl.previousElementSibling as HTMLElement | null;
     if (cannonTitleEl) {
-      cannonTitleEl.textContent = t.vehicleClass === 'rocket' ? 'Rocket pod' : 'Main gun';
+      cannonTitleEl.textContent = t.vehicleClass === 'littlebird' ? 'Missile pod' : t.vehicleClass === 'rocket' ? 'Rocket pod' : 'Main gun';
     }
 
     const cannonP = t.hasMainCannon ? clamp01(t.cannonReloadProgress) : 1;
@@ -824,8 +825,8 @@ export class HUD {
     if (t.vehicleClass === 'support' && t.activeShellIndex === 1) {
       cannonStr = t.fpvSlotStatus ?? 'FPV · NEXT UPDATE';
       cannonBadge = 'neutral';
-    } else if (t.vehicleClass === 'rocket' || t.vehicleClass === 'support') {
-      const ordnance = t.vehicleClass === 'support' ? 'SAM' : 'Rockets';
+    } else if (t.salvoSize) {
+      const ordnance = t.vehicleClass === 'support' ? 'SAM' : t.vehicleClass === 'littlebird' ? 'Missiles' : 'Rockets';
       const emptyLabel = t.vehicleClass === 'support' ? 'SAM empty' : 'Pod empty';
       if (t.rocketsLeft > 0) {
         cannonStr = `${ordnance} ${t.rocketsLeft} / ${t.salvoSize ?? 6}`;
@@ -1234,6 +1235,7 @@ export class HUD {
 
     for (let i = 0; i < obstacles.length; i++) {
       const obs = obstacles[i];
+      if (obs.destroyed) continue;
       const dx = obs.x - playerX;
       const dz = obs.z - playerZ;
       if (dx * dx + dz * dz > maxDistSq) continue;
@@ -1463,7 +1465,7 @@ export class HUD {
   }
 
   private updateRespawnBanner(t: HUDTelemetry): void {
-    const showRespawn = !t.alive && !this.briefingVisible;
+    const showRespawn = !t.alive && !t.fpv && !this.briefingVisible;
     if (showRespawn !== this.lastRespawnVisible) {
       this.lastRespawnVisible = showRespawn;
       this.respawnBannerEl.classList.toggle('is-visible', showRespawn);
@@ -2078,43 +2080,66 @@ export class HUD {
     head.className = 'fcs-briefing-head';
     const title = document.createElement('h1');
     title.className = 'fcs-briefing-title';
-    title.textContent = 'untitled tank game';
+    title.id = 'briefing-title';
+    title.textContent = 'Field briefing';
     const sub = document.createElement('p');
     sub.className = 'fcs-briefing-sub';
-    sub.textContent = 'Team deathmatch · 6 v 6 · no score limit';
+    sub.textContent = '6 vs 6 team deathmatch. No score limit.';
     head.append(title, sub);
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-labelledby', title.id);
 
     // Vehicle Class Selector
     const classSection = document.createElement('div');
     classSection.className = 'fcs-bsec';
     const classLabel = document.createElement('div');
     classLabel.className = 'fcs-bsec-label';
-    classLabel.textContent = 'Vehicle';
+    classLabel.textContent = 'Choose a vehicle';
 
     const classList = document.createElement('div');
     classList.className = 'fcs-vlist';
+    const detail = document.createElement('div');
+    detail.className = 'fcs-briefing-detail';
+    detail.innerHTML = `<div class="fcs-profile"><svg viewBox="0 0 286 122" aria-hidden="true"><path class="fcs-profile-datum" d="M14 107h258M32 12v100M250 12v100"/><path class="fcs-profile-outline"/></svg></div>
+      <h2></h2><p class="fcs-profile-loadout"></p><p class="fcs-profile-note"></p>`;
+    const detailName = detail.querySelector('h2')!;
+    const loadout = detail.querySelector('.fcs-profile-loadout')!;
+    const note = detail.querySelector('.fcs-profile-note')!;
+    const outline = detail.querySelector('.fcs-profile-outline')!;
+    const showDetails = (spec: (typeof BRIEFING_VEHICLES)[number]) => {
+      const stats = TANK_STATS[spec.id];
+      const speed = Math.round(stats.maxForwardSpeed * playerDriveScale(spec.id) * 3.6);
+      detailName.textContent = spec.name;
+      loadout.textContent = `${spec.armament} / ${speed} km/h`;
+      note.textContent = spec.note;
+      outline.setAttribute('d', PROFILE[spec.id]);
+      detail.classList.toggle('is-aircraft', stats.drive === 'air');
+    };
+    showDetails(BRIEFING_VEHICLES[0]);
 
     const classBtns: HTMLButtonElement[] = [];
     BRIEFING_VEHICLES.forEach((spec, idx) => {
       const stats = TANK_STATS[spec.id];
-      const kmh = Math.floor(stats.maxForwardSpeed * 3.6);
-      const armament = spec.id === 'rocket' && stats.salvoSize
-        ? `${stats.salvoSize}-rocket salvo`
-        : spec.armament;
-
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = `fcs-vrow${idx === 0 ? ' is-selected' : ''}`;
+      btn.setAttribute('aria-pressed', String(idx === 0));
       const name = document.createElement('span');
       name.className = 'fcs-vname';
       name.textContent = spec.name;
       const specEl = document.createElement('span');
       specEl.className = 'fcs-vspec';
-      specEl.textContent = `${kmh} km/h · ${armament}`;
+      specEl.textContent = stats.drive === 'air' ? 'Air' : stats.drive === 'wheeled' ? 'Wheeled' : 'Tracked';
       btn.append(name, specEl);
       btn.addEventListener('click', () => {
-        classBtns.forEach((b) => b.classList.remove('is-selected'));
+        classBtns.forEach((b) => {
+          b.classList.remove('is-selected');
+          b.setAttribute('aria-pressed', 'false');
+        });
         btn.classList.add('is-selected');
+        btn.setAttribute('aria-pressed', 'true');
+        showDetails(spec);
         this.callbacks.onSelectVehicleClass?.(spec.id);
       });
       classBtns.push(btn);
@@ -2127,7 +2152,7 @@ export class HUD {
     kbSection.className = 'fcs-bsec';
     const kbLabel = document.createElement('div');
     kbLabel.className = 'fcs-bsec-label';
-    kbLabel.textContent = 'Controls';
+    kbLabel.textContent = 'Quick controls';
 
     const kbGrid = document.createElement('div');
     kbGrid.className = 'fcs-kbgrid';
@@ -2150,6 +2175,9 @@ export class HUD {
       kbGrid.appendChild(row);
     }
     kbSection.append(kbLabel, kbGrid);
+    const changeNote = document.createElement('p');
+    changeNote.className = 'fcs-briefing-rule';
+    changeNote.textContent = 'Vehicle changes apply at base or on your next spawn.';
 
     // Primary Play Button with bottom-edge loading bar
     const engageBtn = document.createElement('button');
@@ -2173,7 +2201,13 @@ export class HUD {
 
     engageBtn.append(engageMainText, engageSubText, engageLoader);
 
-    modal.append(head, classSection, kbSection, engageBtn);
+    const board = document.createElement('div');
+    board.className = 'fcs-briefing-board';
+    board.append(classSection, detail);
+    const footer = document.createElement('div');
+    footer.className = 'fcs-briefing-footer';
+    footer.append(changeNote, engageBtn);
+    modal.append(head, board, kbSection, footer);
     backdrop.appendChild(modal);
 
     return {

@@ -17,7 +17,23 @@ interface FallingPropAnim {
   angVel: number;
   maxAngle: number;
   sinkY: number;
+  startScaleY: number;
+  collapse: boolean;
+  obstacle: ObstacleCollider;
+  batch?: PropBatchSlot;
 }
+
+interface PropBatchSlot {
+  index: number;
+  world: THREE.Matrix4;
+  parts: readonly { mesh: THREE.InstancedMesh; local: THREE.Matrix4 }[];
+}
+
+const PROP_DURABILITY: Record<ObstacleKind, number> = {
+  building: 340, station: 260, tower: 210, rock: 95, barrier: 75, tree: 28, crates: 16,
+};
+const TERRAIN_SIZE = 1240;
+const TERRAIN_SEGMENTS = 256;
 
 interface MoundDef {
   x: number;
@@ -102,7 +118,13 @@ export class World implements TerrainQuery {
   private readonly pads: LandmarkPad[] = [];
   private readonly obstacles: ObstacleCollider[] = [];
   private readonly fallingProps: FallingPropAnim[] = [];
+  private readonly propBatchSlots = new Map<ObstacleCollider, PropBatchSlot>();
+  private readonly propInstanceMatrix = new THREE.Matrix4();
+  private rubble: THREE.InstancedMesh | null = null;
+  private rubbleIndex = 0;
+  public onObstacleDestroyed?: (obstacle: ObstacleCollider) => void;
   private grassMesh: THREE.InstancedMesh | null = null;
+  private terrainPositions!: THREE.BufferAttribute;
   private grassTimeUniform = { value: 0 };
   private elapsedTime = 0;
 
@@ -277,44 +299,32 @@ export class World implements TerrainQuery {
       // Bank blend zone ends ~6 m past the waterline; beyond it terrain is untouched
       if (lat >= hw + 6) continue;
       const level = this.riverLevelAt(r, x);
-      // Channel profile: bed sits ~1.05 m under the surface with ±0.1 m ripple,
-      // so depth never exceeds ~1.15 m. Lerp (not min) also fills terrain
-      // hollows inside the corridor instead of leaving them over-deep.
-      const bed = level - 1.05 + (valueNoise(x * 0.11 + 7.7, z * 0.11 - 3.1) - 0.5) * 0.2;
-      const carveT = 1 - smoothstep(hw, hw + 6, lat);
-      h = THREE.MathUtils.lerp(h, bed, carveT);
-      // Hard cap: no point inside the corridor may sit more than ~1.18 m under
-      // the surface, even where a terrain hollow reaches into the bank blend.
-      const floorY = level - 1.18;
-      if (h < floorY) h = floorY;
+      const silt = valueNoise(x * 0.11 + 7.7, z * 0.11 - 3.1) - 0.5;
+      const shelf = smoothstep(hw * 0.48, hw + 1.9, lat + silt * 1.2);
+      const bed = level + THREE.MathUtils.lerp(-1.04 + silt * 0.19, 0.58, shelf);
+      h = THREE.MathUtils.lerp(bed, h, smoothstep(hw + 1.6, hw + 6, lat));
     }
     return h;
   }
 
   /** Water depth in metres at (x,z); 0 outside river corridors. */
   public getWaterDepthAt(x: number, z: number): number {
-    let depth = 0;
-    for (let i = 0; i < this.rivers.length; i++) {
-      const r = this.rivers[i];
-      const lat = Math.abs(z - this.riverCentreZ(r, x));
-      if (lat >= this.riverHalfWidth(r, x) + 6) continue;
-      const level = this.riverLevelAt(r, x);
-      const d = level - this.getHeightAt(x, z);
-      if (d > depth) depth = d;
-    }
-    return depth > 0 ? depth : 0;
+    const surface = this.riverSurfaceAt(x, z);
+    return surface === undefined ? 0 : Math.max(0, surface - this.getHeightAt(x, z));
   }
 
   /** River surface level at (x,z); 0 when the point is outside every corridor. */
   public getWaterLevelAt(x: number, z: number): number {
+    return this.riverSurfaceAt(x, z) ?? 0;
+  }
+
+  private riverSurfaceAt(x: number, z: number): number | undefined {
     for (let i = 0; i < this.rivers.length; i++) {
       const r = this.rivers[i];
       const lat = Math.abs(z - this.riverCentreZ(r, x));
-      if (lat < this.riverHalfWidth(r, x) + 6) {
-        return this.riverLevelAt(r, x);
-      }
+      if (lat < this.riverHalfWidth(r, x) + 1.6) return this.riverLevelAt(r, x);
     }
-    return 0;
+    return undefined;
   }
 
   private riverCentreZ(r: RiverDef, x: number): number {
@@ -503,20 +513,22 @@ export class World implements TerrainQuery {
   }
 
   private buildTerrainMesh(): void {
-    const terrainSize = 1240;
-    const segs = 256;
-    const geo = new THREE.PlaneGeometry(terrainSize, terrainSize, segs, segs);
+    const geo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, TERRAIN_SEGMENTS, TERRAIN_SEGMENTS);
     geo.rotateX(-Math.PI / 2);
 
     const pos = geo.attributes.position as THREE.BufferAttribute;
+    this.terrainPositions = pos;
     const roadAttr = new Float32Array(pos.count);
     const meadowAttr = new Float32Array(pos.count);
+    const wetAttr = new Float32Array(pos.count);
 
     for (let i = 0; i < pos.count; i++) {
       const vx = pos.getX(i);
       const vz = pos.getZ(i);
       const vy = this.getHeightAt(vx, vz);
       pos.setY(i, vy);
+      const surface = this.riverSurfaceAt(vx, vz);
+      wetAttr[i] = surface === undefined ? 0 : 1 - smoothstep(0.08, 0.64, vy - surface);
 
       let dirtMask = this.getRoadFactorAt(vx, vz);
       for (const pad of this.pads) {
@@ -531,6 +543,7 @@ export class World implements TerrainQuery {
 
     geo.setAttribute('aRoadMask', new THREE.BufferAttribute(roadAttr, 1));
     geo.setAttribute('aMeadowDry', new THREE.BufferAttribute(meadowAttr, 1));
+    geo.setAttribute('aRiverWet', new THREE.BufferAttribute(wetAttr, 1));
     geo.computeVertexNormals();
 
     const tex = this.assets.terrainTextures;
@@ -543,7 +556,7 @@ export class World implements TerrainQuery {
     });
 
     // Fast 4-tap splat + wet-puddle specular + drifting cumulus cloud shadows + directional Mie aerial perspective
-    mat.customProgramCacheKey = () => 'steppe-terrain-hyper-v2';
+    mat.customProgramCacheKey = () => 'steppe-terrain-hyper-v3';
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uDirtColor = { value: tex.dirtColor };
       shader.uniforms.uDirtNormal = { value: tex.dirtNormal };
@@ -556,10 +569,12 @@ export class World implements TerrainQuery {
           `#include <common>
           attribute float aRoadMask;
           attribute float aMeadowDry;
+          attribute float aRiverWet;
           varying vec3 vTerrainWorldPos;
           varying vec3 vTerrainWorldNormal;
           varying float vRoadMask;
-          varying float vMeadowDry;`
+          varying float vMeadowDry;
+          varying float vRiverWet;`
         )
         .replace(
           '#include <worldpos_vertex>',
@@ -567,7 +582,8 @@ export class World implements TerrainQuery {
           vTerrainWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
           vTerrainWorldNormal = normalize(mat3(modelMatrix) * objectNormal);
           vRoadMask = aRoadMask;
-          vMeadowDry = aMeadowDry;`
+          vMeadowDry = aMeadowDry;
+          vRiverWet = aRiverWet;`
         );
 
       shader.fragmentShader = shader.fragmentShader
@@ -582,6 +598,7 @@ export class World implements TerrainQuery {
           varying vec3 vTerrainWorldNormal;
           varying float vRoadMask;
           varying float vMeadowDry;
+          varying float vRiverWet;
 
           float fastCloudNoise(vec2 p) {
             vec2 i = floor(p);
@@ -614,6 +631,7 @@ export class World implements TerrainQuery {
 
           vec3 baseAlbedo = mix(grassCol, dirtCol, splatDirt);
           baseAlbedo = mix(baseAlbedo, dirtCol * vec3(0.46, 0.44, 0.42), puddleMask * 0.78);
+          baseAlbedo = mix(baseAlbedo, dirtCol * vec3(0.52, 0.47, 0.39), vRiverWet * 0.85);
 
           // Drifting overhead cumulus cloud shadows across the 520m valley
           vec2 cloudUV = vTerrainWorldPos.xz * 0.0085 + vec2(uTime * 0.011, uTime * 0.005);
@@ -633,6 +651,7 @@ export class World implements TerrainQuery {
                         * smoothstep(0.94, 0.995, vTerrainWorldNormal.y);
           // Mirror-smooth wet puddle specular glints (0.13) vs matte grass/soil (0.90)
           roughnessFactor = mix(mix(0.92, 0.76, vRoadMask), 0.13, puddleR);
+          roughnessFactor = mix(roughnessFactor, 0.35, vRiverWet * 0.8);
           `
         )
         .replace(
@@ -711,6 +730,7 @@ export class World implements TerrainQuery {
       { cx: 330, cz: -95, yaw: -2.6, count: 3 },
     ];
     const wallTransforms: THREE.Matrix4[] = [];
+    const wallColliders: ObstacleCollider[] = [];
     const dummy = new THREE.Object3D();
     let wallIdx = 0;
     for (const c of bermClusters) {
@@ -726,7 +746,7 @@ export class World implements TerrainQuery {
         dummy.scale.setScalar(1);
         dummy.updateMatrix();
         wallTransforms.push(dummy.matrix.clone());
-        this.obstacles.push({
+        wallColliders.push({
           id: `hesco_${wallIdx++}`,
           kind: 'barrier',
           x: wx,
@@ -734,12 +754,12 @@ export class World implements TerrainQuery {
           z: wz,
           radius: 1.42,
           height: 1.43,
-          destructible: false,
+          destructible: true,
           destroyed: false,
         });
       }
     }
-    this.addBatchedStaticModel(this.assets.models.barrier_wall, wallTransforms, false);
+    this.addBatchedStaticModel(this.assets.models.barrier_wall, wallTransforms, false, wallColliders);
 
     // 5. Destructible Supply Crate Stacks near compounds & checkpoints
     const crateCoords: [number, number, number][] = [
@@ -775,6 +795,7 @@ export class World implements TerrainQuery {
         radius: 1.38,
         height: 2.6,
         destructible: true,
+        lightCover: true,
         destroyed: false,
         mesh: crate,
       });
@@ -783,6 +804,8 @@ export class World implements TerrainQuery {
     // 6. Deterministic Limestone Boulder Outcrops — batched into TWO InstancedMeshes (1 draw call each)!
     const largeRockTransforms: THREE.Matrix4[] = [];
     const medRockTransforms: THREE.Matrix4[] = [];
+    const largeRockColliders: ObstacleCollider[] = [];
+    const medRockColliders: ObstacleCollider[] = [];
     let rockIdx = 0;
     for (let i = 0; i < 120; i++) {
       const angle = i * 2.399963 + 0.5;
@@ -801,7 +824,7 @@ export class World implements TerrainQuery {
       if (isLarge) largeRockTransforms.push(dummy.matrix.clone());
       else medRockTransforms.push(dummy.matrix.clone());
 
-      this.obstacles.push({
+      (isLarge ? largeRockColliders : medRockColliders).push({
         id: `rock_${rockIdx++}`,
         kind: 'rock',
         x: rx,
@@ -809,17 +832,18 @@ export class World implements TerrainQuery {
         z: rz,
         radius: (isLarge ? 1.32 : 0.74) * scale,
         height: (isLarge ? 1.38 : 0.74) * scale,
-        destructible: false,
+        destructible: true,
         destroyed: false,
       });
     }
-    this.addBatchedStaticModel(this.assets.models.boulder_large, largeRockTransforms, true);
-    this.addBatchedStaticModel(this.assets.models.boulder_medium, medRockTransforms, false);
+    this.addBatchedStaticModel(this.assets.models.boulder_large, largeRockTransforms, true, largeRockColliders);
+    this.addBatchedStaticModel(this.assets.models.boulder_medium, medRockTransforms, false, medRockColliders);
 
     // 7. Aspen Tree Clusters — 10 groves of 4-9 trees batched into shared InstancedMeshes
     //    (trunk colliders stay solid obstacles; instancing keeps draw calls flat)
     const treeRng = mulberry32(0x7ee5);
     const treeTransforms: THREE.Matrix4[] = [];
+    const treeColliders: ObstacleCollider[] = [];
     let treeIdx = 0;
     const clusterCount = 10;
     for (let c = 0; c < clusterCount; c++) {
@@ -852,7 +876,7 @@ export class World implements TerrainQuery {
         dummy.updateMatrix();
         treeTransforms.push(dummy.matrix.clone());
 
-        this.obstacles.push({
+        treeColliders.push({
           id: `tree_${treeIdx++}`,
           kind: 'tree',
           x: tx,
@@ -860,57 +884,64 @@ export class World implements TerrainQuery {
           z: tz,
           radius: 0.48 * scale, // Trunk collision cylinder
           height: 14.2 * scale,
-          destructible: false,
+          destructible: true,
+          lightCover: true,
           destroyed: false,
         });
       }
     }
-    this.addBatchedStaticModel(this.assets.models.tree, treeTransforms, true);
+    this.addBatchedStaticModel(this.assets.models.tree, treeTransforms, true, treeColliders);
   }
 
-  /**
-   * One translucent strip mesh per river: vertex y follows the smoothed water
-   * level, banks get a foam/silt tint attribute, and the material scrolls
-   * procedural ripple normals along the flow. Two draw calls total.
-   */
+  /** Match the terrain triangles at the shore, not just the driving height query. */
+  private renderedGroundAt(x: number, z: number): number {
+    const toGrid = (v: number) => THREE.MathUtils.clamp((v / TERRAIN_SIZE + 0.5) * TERRAIN_SEGMENTS, 0, TERRAIN_SEGMENTS);
+    const gx = toGrid(x), gz = toGrid(z);
+    const ix = Math.min(TERRAIN_SEGMENTS - 1, Math.floor(gx));
+    const iz = Math.min(TERRAIN_SEGMENTS - 1, Math.floor(gz));
+    const fx = gx - ix, fz = gz - iz;
+    const stride = TERRAIN_SEGMENTS + 1;
+    const i = iz * stride + ix;
+    const pos = this.terrainPositions;
+    const east = pos.getY(i + 1), south = pos.getY(i + stride);
+    if (fx + fz <= 1) return east * fx + south * fz + pos.getY(i) * (1 - fx - fz);
+    return east * (1 - fz) + south * (1 - fx) + pos.getY(i + stride + 1) * (fx + fz - 1);
+  }
+
+  /** Two strips, with no reflection or refraction render passes. */
   private buildRiverWaterMeshes(): void {
-    const ACROSS = [-1, -0.55, 0, 0.55, 1]; // lat fractions of (halfWidth - 0.4)
-    const BANK = [1, 0.4, 0, 0.4, 1];
-    const COLS = 161; // every 8 m over the 1280 m river span
-    const X0 = -640;
-    const STEP = 8;
+    const COLS = 310;
+    const ROWS = 21;
+    const STEP = TERRAIN_SIZE / COLS;
 
     for (const r of this.rivers) {
-      const vertCount = (COLS + 1) * ACROSS.length;
+      const vertCount = (COLS + 1) * ROWS;
       const positions = new Float32Array(vertCount * 3);
       const uvs = new Float32Array(vertCount * 2);
-      const banks = new Float32Array(vertCount);
+      const depths = new Float32Array(vertCount);
       const indices: number[] = [];
-      const rows = ACROSS.length;
 
       for (let c = 0; c <= COLS; c++) {
-        const x = X0 + c * STEP;
+        const x = -TERRAIN_SIZE * 0.5 + c * STEP;
         const cz = this.riverCentreZ(r, x);
-        const hw = Math.max(4, this.riverHalfWidth(r, x) - 0.4);
+        const hw = this.riverHalfWidth(r, x) + 4.5;
         const level = this.riverLevelAt(r, x);
-        const u = x * 0.06;
-        for (let j = 0; j < rows; j++) {
-          const vi = (c * rows + j) * 3;
-          positions[vi] = x;
-          positions[vi + 1] = level;
-          positions[vi + 2] = cz + ACROSS[j] * hw;
-          const ti = c * rows + j;
-          uvs[ti * 2] = u;
-          uvs[ti * 2 + 1] = j / (rows - 1);
-          banks[ti] = BANK[j];
+        for (let j = 0; j < ROWS; j++) {
+          const i = c * ROWS + j;
+          const lateral = (2 * j / (ROWS - 1) - 1) * hw;
+          const z = cz + lateral;
+          positions.set([x, level, z], i * 3);
+          uvs.set([x, lateral], i * 2);
+          const edgeFade = 1 - smoothstep(0.82, 1, Math.abs(lateral / hw));
+          depths[i] = Math.min(level - this.renderedGroundAt(x, z), 2 * edgeFade - 0.015);
         }
       }
       for (let c = 0; c < COLS; c++) {
-        for (let j = 0; j < rows - 1; j++) {
-          const a = c * rows + j;
-          const b = (c + 1) * rows + j;
-          const d = c * rows + j + 1;
-          const e = (c + 1) * rows + j + 1;
+        for (let j = 0; j < ROWS - 1; j++) {
+          const a = c * ROWS + j;
+          const b = a + ROWS;
+          const d = a + 1;
+          const e = b + 1;
           indices.push(a, d, b, b, d, e);
         }
       }
@@ -918,21 +949,22 @@ export class World implements TerrainQuery {
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
       geo.setAttribute('aWaterUv', new THREE.BufferAttribute(uvs, 2));
-      geo.setAttribute('aBank', new THREE.BufferAttribute(banks, 1));
+      geo.setAttribute('aWaterDepth', new THREE.BufferAttribute(depths, 1));
       geo.setIndex(indices);
       geo.computeVertexNormals();
 
-      const mat = new THREE.MeshStandardMaterial({
-        color: new THREE.Color().setRGB(0.04, 0.05, 0.032),
-        roughness: 0.18,
+      const mat = new THREE.MeshPhysicalMaterial({
+        color: 0xffffff,
+        roughness: 0.13,
         metalness: 0.0,
-        envMapIntensity: 1.0,
+        ior: 1.333,
+        envMapIntensity: 1.1,
         transparent: true,
-        opacity: 0.88,
         depthWrite: false,
-        side: THREE.FrontSide,
+        side: THREE.DoubleSide,
+        forceSinglePass: true,
       });
-      mat.customProgramCacheKey = () => 'river-water-v1';
+      mat.customProgramCacheKey = () => 'river-water-v2';
       mat.onBeforeCompile = (shader) => {
         shader.uniforms.uTime = this.grassTimeUniform;
         shader.vertexShader = shader.vertexShader
@@ -940,16 +972,16 @@ export class World implements TerrainQuery {
             '#include <common>',
             `#include <common>
             attribute vec2 aWaterUv;
-            attribute float aBank;
+            attribute float aWaterDepth;
             varying vec2 vWaterUv;
-            varying float vWaterBank;
+            varying float vWaterDepth;
             varying vec3 vWaterWorld;`
           )
           .replace(
             '#include <worldpos_vertex>',
             `#include <worldpos_vertex>
             vWaterUv = aWaterUv;
-            vWaterBank = aBank;
+            vWaterDepth = aWaterDepth;
             vWaterWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;`
           );
         shader.fragmentShader = shader.fragmentShader
@@ -958,71 +990,56 @@ export class World implements TerrainQuery {
             `#include <common>
             uniform float uTime;
             varying vec2 vWaterUv;
-            varying float vWaterBank;
+            varying float vWaterDepth;
             varying vec3 vWaterWorld;`
           )
           .replace(
             '#include <color_fragment>',
             `#include <color_fragment>
-            // Murky silt-laden steppe water: olive-brown, darker in the channel
-            vec3 deepWater = vec3(0.020, 0.028, 0.022);
-            vec3 shallowWater = vec3(0.048, 0.058, 0.036);
-            vec3 siltWater = vec3(0.105, 0.095, 0.058);
-            float siltBand = smoothstep(0.30, 0.95, vWaterBank);
-            diffuseColor.rgb = mix(mix(deepWater, shallowWater, vWaterBank * 0.4), siltWater, siltBand * 0.55);`
+            if (vWaterDepth <= 0.0) discard;
+            vec2 flow = vWaterUv - vec2(uTime * 0.92, 0.0);
+            float eddy = sin(flow.x * 0.48 + flow.y * 0.63) + sin(flow.x * 0.29 - flow.y * 0.84);
+            float shore = smoothstep(0.025, 0.09, vWaterDepth) * (1.0 - smoothstep(0.09, 0.27, vWaterDepth));
+            float flecks = sin(flow.x * 2.2 + eddy) * sin(flow.x * 0.9 - flow.y * 3.6);
+            float foam = shore * smoothstep(0.23, 0.83, flecks + eddy * 0.16) * 0.42;
+            vec3 silt = mix(vec3(0.072, 0.083, 0.049), vec3(0.025, 0.054, 0.045), smoothstep(0.0, 1.08, vWaterDepth));
+            diffuseColor.rgb = mix(silt * (1.0 + eddy * 0.035), vec3(0.52, 0.55, 0.49), foam);`
           )
           .replace(
             '#include <normal_fragment_maps>',
             `
-            // Gentle scrolling ripple field along the flow (+x), ~40% calmer
-            float wt = uTime;
-            vec2 wp = vWaterWorld.xz * vec2(0.55, 0.85);
-            float w1 = sin(wp.x * 1.7 - wt * 1.9 + wp.y * 0.8);
-            float w2 = sin(wp.y * 2.3 + wt * 1.4 - wp.x * 0.6);
-            float w3 = sin((wp.x + wp.y) * 3.1 - wt * 2.6);
-            float w4 = sin(wp.x * 4.2 + wt * 3.4);
+            vec2 swirls = flow + vec2(0.62 * eddy, 0.46 * sin(flow.x * 0.77 - flow.y * 0.49));
+            float w1 = cos(dot(swirls, vec2(2.1, 0.82)) - uTime * 1.4 + eddy * 0.8);
+            float w2 = cos(dot(swirls, vec2(0.95, -3.2)) + uTime * 2.1 + eddy);
+            float w5 = cos(dot(flow, vec2(3.82, -1.56)) - uTime * 3.3 + eddy);
+            float w3 = cos(dot(flow, vec2(8.6, 3.3)) - uTime * 2.7);
+            float w4 = cos(dot(flow, vec2(-3.5, 12.1)) + uTime * 3.2);
+            vec3 waterView = cameraPosition - vWaterWorld;
+            float micro = 1.0 - smoothstep(18.0, 90.0, length(waterView));
+            float ripple = mix(0.32, 1.0, smoothstep(0.02, 0.7, vWaterDepth));
             vec3 worldWaterN = normalize(vec3(
-              -(w1 * 0.55 + w3 * 0.30 + w4 * 0.15) * 0.10,
+              ripple * (w1 * 0.032 + w2 * 0.014 - w5 * 0.029 + (w3 * 0.036 - w4 * 0.013) * micro),
               1.0,
-              -(w2 * 0.60 + w3 * 0.25) * 0.10
+              ripple * (w1 * 0.014 - w2 * 0.031 + w5 * 0.023 + (w3 * 0.014 + w4 * 0.042) * micro)
             ));
-            normal = normalize((viewMatrix * vec4(worldWaterN, 0.0)).xyz);
+            normal = normalize((viewMatrix * vec4(worldWaterN * faceDirection, 0.0)).xyz);
+            float waterNoV = clamp(abs(dot(worldWaterN, normalize(waterView))), 0.0, 1.0);
+            float fresnel = 0.0204 + 0.9796 * pow(1.0 - waterNoV, 5.0);
+            float absorption = 1.0 - exp(-1.6 * vWaterDepth / max(0.25, waterNoV));
+            diffuseColor.a = (1.0 - (1.0 - absorption) * (1.0 - fresnel)) * smoothstep(0.0, 0.12, vWaterDepth);
+            diffuseColor.a = max(diffuseColor.a, foam);
             `
           )
           .replace(
             '#include <roughnessmap_fragment>',
-            `float roughnessFactor = roughness;
-            // Smooth value-noise silt breakup along the banks (no grid cells, no repeating arcs)
-            vec2 siltP = vWaterWorld.xz * 0.35;
-            vec2 siltCell = floor(siltP);
-            vec2 siltFr = fract(siltP);
-            siltFr = siltFr * siltFr * (3.0 - 2.0 * siltFr);
-            vec2 siltJit = vec2(127.1, 311.7);
-            float sA = fract(sin(dot(siltCell, siltJit)) * 43758.5453);
-            float sB = fract(sin(dot(siltCell + vec2(1.0, 0.0), siltJit)) * 43758.5453);
-            float sC = fract(sin(dot(siltCell + vec2(0.0, 1.0), siltJit)) * 43758.5453);
-            float sD = fract(sin(dot(siltCell + vec2(1.0, 1.0), siltJit)) * 43758.5453);
-            float siltN = mix(mix(sA, sB, siltFr.x), mix(sC, sD, siltFr.x), siltFr.y);
-            float siltBreak = smoothstep(0.25, 0.75, siltN + vWaterBank * 0.35);
-            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.22, 0.20, 0.13), siltBreak * smoothstep(0.35, 0.9, vWaterBank) * 0.5);
-            roughnessFactor = mix(roughnessFactor, 0.6, siltBreak * 0.3);`
-          )
-          .replace(
-            '#include <lights_fragment_end>',
-            `#include <lights_fragment_end>
-            // Fresnel-gated sky reflection: grazing angles mirror the sky,
-            // near-vertical views stay dark and opaque (no swimming-pool sheen)
-            vec3 waterViewDir = normalize(cameraPosition - vWaterWorld);
-            float waterNdotV = saturate(dot(worldWaterN, waterViewDir));
-            float waterFres = pow(1.0 - waterNdotV, 4.0);
-            reflectedLight.indirectSpecular *= mix(0.12, 1.0, waterFres);`
+            `float roughnessFactor = roughness + 0.021 * eddy + foam * 0.34;`
           );
       };
 
       const mesh = new THREE.Mesh(geo, mat);
       mesh.name = 'river_water';
       mesh.renderOrder = 2;
-      mesh.receiveShadow = false;
+      mesh.receiveShadow = true;
       mesh.castShadow = false;
       mesh.frustumCulled = false; // 1.3 km strip; cheap enough to always draw
       this.root.add(mesh);
@@ -1032,13 +1049,15 @@ export class World implements TerrainQuery {
   private addBatchedStaticModel(
     template: THREE.Object3D,
     worldMatrices: readonly THREE.Matrix4[],
-    castShadow: boolean
+    castShadow: boolean,
+    colliders: readonly ObstacleCollider[]
   ): void {
     if (worldMatrices.length === 0) return;
     template.updateMatrixWorld(true);
     const invRoot = new THREE.Matrix4().copy(template.matrixWorld).invert();
     const localMat = new THREE.Matrix4();
     const finalMat = new THREE.Matrix4();
+    const parts: { mesh: THREE.InstancedMesh; local: THREE.Matrix4 }[] = [];
 
     template.traverse((obj) => {
       if (!(obj as THREE.Mesh).isMesh) return;
@@ -1055,7 +1074,12 @@ export class World implements TerrainQuery {
       inst.instanceMatrix.needsUpdate = true;
       inst.computeBoundingSphere();
       this.root.add(inst);
+      parts.push({ mesh: inst, local: localMat.clone() });
     });
+    for (let i = 0; i < colliders.length; i++) {
+      this.obstacles.push(colliders[i]);
+      this.propBatchSlots.set(colliders[i], { index: i, world: worldMatrices[i], parts });
+    }
   }
 
   private placeRuinedBuilding(id: string, x: number, z: number, yaw: number): void {
@@ -1085,7 +1109,7 @@ export class World implements TerrainQuery {
       z: worldCz,
       radius: 9.6,
       height: 13.0,
-      destructible: false,
+      destructible: true,
       destroyed: false,
       mesh: bldg,
     });
@@ -1110,7 +1134,7 @@ export class World implements TerrainQuery {
       z,
       radius: 8.8,
       height: 6.0,
-      destructible: false,
+      destructible: true,
       destroyed: false,
       mesh: station,
     });
@@ -1122,9 +1146,7 @@ export class World implements TerrainQuery {
     towerAssembly.position.set(x, y, z);
     towerAssembly.rotation.y = yaw;
     towerAssembly.updateMatrixWorld(true);
-    towerAssembly.traverse((o) => {
-      if (o.name !== 'barrier_gate') o.matrixAutoUpdate = false;
-    });
+    towerAssembly.traverse((o) => { o.matrixAutoUpdate = false; });
     this.root.add(towerAssembly);
 
     // Main 5.8x5.8m tower at local [0, 0, 0]
@@ -1136,7 +1158,7 @@ export class World implements TerrainQuery {
       z,
       radius: 3.05,
       height: 10.45,
-      destructible: false,
+      destructible: true,
       destroyed: false,
       mesh: towerAssembly,
     });
@@ -1144,6 +1166,9 @@ export class World implements TerrainQuery {
     // Checkpoint barrier gate sub-assembly at local [+7.5, 0, 0] (destructible if rammed!)
     const gateNode = towerAssembly.getObjectByName('barrier_gate');
     if (gateNode) {
+      // The gate can fall on its own, and remains standing if only the tower is hit.
+      this.root.attach(gateNode);
+      gateNode.matrixAutoUpdate = true;
       const cosY = Math.cos(yaw);
       const sinY = Math.sin(yaw);
       const gx = x + 7.5 * cosY;
@@ -1157,6 +1182,7 @@ export class World implements TerrainQuery {
         radius: 2.3,
         height: 2.3,
         destructible: true,
+        lightCover: true,
         destroyed: false,
         mesh: gateNode,
       });
@@ -1426,25 +1452,85 @@ export class World implements TerrainQuery {
     }
   }
 
-  public crushObstacle(obstacle: ObstacleCollider, impactDirXZ?: THREE.Vector2): void {
-    if (obstacle.destroyed || !obstacle.destructible) return;
+  public damageObstacle(obstacle: ObstacleCollider, amount: number, dirX = 0, dirZ = 0): boolean {
+    if (obstacle.destroyed || !obstacle.destructible || amount <= 0) return false;
+    obstacle.damage = (obstacle.damage ?? 0) + amount;
+    const durability = obstacle.lightCover && obstacle.kind === 'barrier' ? 24 : PROP_DURABILITY[obstacle.kind];
+    if (obstacle.damage < durability) return false;
     obstacle.destroyed = true;
-    if (!obstacle.mesh) return;
+    const batch = this.propBatchSlots.get(obstacle);
+    const mesh = obstacle.mesh ?? (batch ? new THREE.Object3D() : null);
+    if (mesh) {
+      if (batch) batch.world.decompose(mesh.position, mesh.quaternion, mesh.scale);
+      mesh.matrixAutoUpdate = true;
+      const axis = dirX * dirX + dirZ * dirZ > 0.001
+        ? new THREE.Vector3(dirZ, 0, -dirX).normalize()
+        : new THREE.Vector3(1, 0, 0);
+      const collapse = !obstacle.lightCover;
+      this.fallingProps.push({
+        mesh,
+        axis,
+        angle: 0,
+        angVel: collapse ? 0.1 : obstacle.kind === 'tree' ? 1.35 : 3.2,
+        maxAngle: collapse ? 0.3 : Math.PI * 0.48,
+        sinkY: collapse ? Math.min(0.6, obstacle.height * 0.1) : obstacle.kind === 'crates' ? 0.55 : 0.05,
+        startScaleY: mesh.scale.y,
+        collapse,
+        obstacle,
+        batch,
+      });
+    }
+    this.onObstacleDestroyed?.(obstacle);
+    return true;
+  }
 
-    const dirX = impactDirXZ && impactDirXZ.lengthSq() > 0.001 ? impactDirXZ.x : 0.7;
-    const dirZ = impactDirXZ && impactDirXZ.lengthSq() > 0.001 ? impactDirXZ.y : 0.7;
-    const len = Math.hypot(dirX, dirZ) || 1;
-    // Rotation axis perpendicular to impact direction in world XZ (`up × impactDir`)
-    const axis = new THREE.Vector3(dirZ / len, 0, -dirX / len).normalize();
+  public blastObstacles(x: number, y: number, z: number, radius: number, amount: number): void {
+    if (radius <= 0 || amount <= 0) return;
+    for (const o of this.obstacles) {
+      if (o.destroyed || !o.destructible) continue;
+      const dx = o.x - x, dz = o.z - z;
+      const edge = Math.max(0, Math.hypot(dx, dz) - o.radius);
+      const dy = Math.max(o.y - y, y - o.y - o.height, 0);
+      const dist = Math.hypot(edge, dy);
+      if (dist < radius) this.damageObstacle(o, amount * (1 - dist / radius), dx, dz);
+    }
+  }
 
-    this.fallingProps.push({
-      mesh: obstacle.mesh,
-      axis,
-      angle: 0,
-      angVel: obstacle.kind === 'tree' ? 1.35 : 3.2,
-      maxAngle: obstacle.kind === 'tree' ? Math.PI * 0.47 : Math.PI * 0.48,
-      sinkY: obstacle.kind === 'crates' ? 0.55 : 0.05,
-    });
+  private scatterRubble(o: ObstacleCollider): void {
+    const capacity = 800;
+    if (!this.rubble) {
+      this.rubble = new THREE.InstancedMesh(
+        new THREE.DodecahedronGeometry(1, 0),
+        new THREE.MeshStandardMaterial({ roughness: 0.94 }),
+        capacity
+      );
+      this.rubble.name = 'scenery_rubble';
+      this.rubble.count = 0;
+      this.rubble.frustumCulled = false;
+      this.rubble.receiveShadow = true;
+      this.root.add(this.rubble);
+    }
+    const piece = new THREE.Object3D();
+    const color = new THREE.Color();
+    const count = Math.min(18, 5 + Math.ceil(o.radius));
+    for (let i = 0; i < count; i++) {
+      const a = i * 2.39996 + o.x;
+      const r = o.radius * Math.sqrt((i + 0.5) / count) * 0.97;
+      const x = o.x + Math.sin(a) * r, z = o.z + Math.cos(a) * r;
+      const size = Math.min(1.6, o.radius * 0.38) * (0.63 + 0.75 * hash2(i, o.x));
+      const shade = 0.39 + hash2(i, o.z) * 0.16;
+      color.setRGB(shade, shade * 0.92, shade * 0.79, THREE.SRGBColorSpace);
+      piece.position.set(x, this.getHeightAt(x, z) + size * 0.17, z);
+      piece.rotation.set(i * 1.7, a, i * 0.54);
+      piece.scale.set(size, size * 0.58, size * 0.83);
+      piece.updateMatrix();
+      this.rubble.setMatrixAt(this.rubbleIndex, piece.matrix);
+      this.rubble.setColorAt(this.rubbleIndex, color);
+      this.rubbleIndex = (this.rubbleIndex + 1) % capacity;
+    }
+    this.rubble.count = Math.min(capacity, this.rubble.count + count);
+    this.rubble.instanceMatrix.needsUpdate = true;
+    if (this.rubble.instanceColor) this.rubble.instanceColor.needsUpdate = true;
   }
 
   /** Dev/bench counter: total raycastWorld calls (reset via bench tooling). */
@@ -1464,31 +1550,41 @@ export class World implements TerrainQuery {
     const dz = dir.z;
     const horizLenSq = dx * dx + dz * dz;
 
-    if (horizLenSq > 1e-7) {
-      for (let i = 0; i < this.obstacles.length; i++) {
-        const obs = this.obstacles[i];
-        if (obs.destroyed) continue;
-        const ox = origin.x - obs.x;
-        const oz = origin.z - obs.z;
+    for (let i = 0; i < this.obstacles.length; i++) {
+      const obs = this.obstacles[i];
+      if (obs.destroyed) continue;
+      const ox = origin.x - obs.x;
+      const oz = origin.z - obs.z;
+      const c = ox * ox + oz * oz - obs.radius * obs.radius;
+      let first = 0, last = bestDist;
+      if (horizLenSq > 1e-7) {
         const b = ox * dx + oz * dz;
-        const c = ox * ox + oz * oz - obs.radius * obs.radius;
         if (c > 0 && b > 0) continue;
-
         const disc = b * b - horizLenSq * c;
         if (disc < 0) continue;
+        const root = Math.sqrt(disc);
+        first = (-b - root) / horizLenSq;
+        last = (-b + root) / horizLenSq;
+      } else if (c > 0) continue;
 
-        const t = Math.max(0, (-b - Math.sqrt(disc)) / horizLenSq);
-        if (t >= bestDist) continue;
+      let cap = false;
+      if (Math.abs(dy) > 1e-7) {
+        const t1 = (obs.y - origin.y) / dy;
+        const t2 = (obs.y + obs.height - origin.y) / dy;
+        const enter = Math.min(t1, t2);
+        if (enter > first) { first = enter; cap = true; }
+        last = Math.min(last, Math.max(t1, t2));
+      } else if (origin.y < obs.y || origin.y > obs.y + obs.height) continue;
 
-        const py = origin.y + dy * t;
-        if (py >= obs.y && py <= obs.y + obs.height) {
-          bestDist = t;
-          hitKind = 'obstacle';
-          hitObs = obs;
-          hitPoint.set(origin.x + dx * t, py, origin.z + dz * t);
-          hitNormal.set(hitPoint.x - obs.x, 0, hitPoint.z - obs.z).normalize();
-        }
-      }
+      const t = Math.max(0, first);
+      if (t > last || t >= bestDist) continue;
+      bestDist = t;
+      hitKind = 'obstacle';
+      hitObs = obs;
+      hitPoint.set(origin.x + dx * t, origin.y + dy * t, origin.z + dz * t);
+      if (t === 0) hitNormal.copy(dir).negate();
+      else if (cap) hitNormal.set(0, -Math.sign(dy), 0);
+      else hitNormal.set(hitPoint.x - obs.x, 0, hitPoint.z - obs.z).normalize();
     }
 
     // 2. Fast adaptive heightmap march + 4-step binary refinement
@@ -1615,7 +1711,17 @@ export class World implements TerrainQuery {
       fp.angle += step;
       fp.mesh.rotateOnWorldAxis(fp.axis, step);
       fp.mesh.position.y -= fp.sinkY * (step / fp.maxAngle);
+      if (fp.collapse) fp.mesh.scale.y = fp.startScaleY * (1 - 0.91 * fp.angle / fp.maxAngle);
+      if (fp.batch) {
+        fp.mesh.updateMatrix();
+        for (const { mesh, local } of fp.batch.parts) {
+          this.propInstanceMatrix.multiplyMatrices(fp.mesh.matrix, local);
+          mesh.setMatrixAt(fp.batch.index, this.propInstanceMatrix);
+          mesh.instanceMatrix.needsUpdate = true;
+        }
+      }
       if (fp.angle >= fp.maxAngle - 0.001) {
+        if (fp.collapse) this.scatterRubble(fp.obstacle);
         this.fallingProps.splice(i, 1);
       }
     }

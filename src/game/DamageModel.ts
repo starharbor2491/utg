@@ -11,7 +11,7 @@
  * - Armour is in mm per face: front / side / rear / top / bottom.
  */
 
-export type DamageClass = 'normal' | 'heavy' | 'ifv' | 'humvee' | 'rocket' | 'support';
+export type DamageClass = 'normal' | 'heavy' | 'ifv' | 'humvee' | 'rocket' | 'support' | 'littlebird';
 
 export type ModuleId =
   | 'engine'
@@ -249,6 +249,19 @@ export const DAMAGE_LAYOUTS: Record<DamageClass, ClassDamageLayout> = {
   },
   rocket: ROCKET_LAYOUT,
   support: SUPPORT_LAYOUT,
+  littlebird: {
+    softSkin: true,
+    hullArmor: { front: 10, side: 8, rear: 8, top: 6, bottom: 7 },
+    turretArmor: { front: 5, side: 5, rear: 5, top: 5, bottom: 5 },
+    modules: [
+      { id: 'engine', boxes: [nx(0.27, 0.69, 0.46, 0.73, 1, 0.78)] },
+      { id: 'fuel', boxes: [nx(0.22, 0.24, 0.52, 0.78, 0.49, 0.75)] },
+      { id: 'driver', crew: 'driver', boxes: [nx(0.24, 0.42, 0.76, 0.5, 0.83, 0.96)] },
+      { id: 'gunner', crew: 'gunner', boxes: [nx(0.5, 0.42, 0.76, 0.76, 0.83, 0.96)] },
+      { id: 'gun', boxes: [nx(0, 0.05, 0.08, 0.2, 0.95, 1, TURRET, EXT)] },
+      { id: 'launcher', boxes: [nx(0.8, 0.02, 0, 1, 0.98, 1, TURRET, EXT)] },
+    ],
+  },
 };
 
 // ---------- runtime module state ----------

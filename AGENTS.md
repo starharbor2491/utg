@@ -6,16 +6,17 @@
 - **Production build**: `npm run build` (`tsc && vite build`, outputs `dist/`)
 - **Single-file standalone HTML**: `npm run build:single` (`tsc && vite build && node scripts/pack-single-html.mjs` — packs everything into `untitled-tank-game.html`, runnable directly over `file://` with zero dependencies)
 - **Damage-model unit tests**: `node scripts/damage-selftest.mjs` (pure `DamageModel`, no three.js)
+- **Gameplay regression tests**: `node scripts/gameplay-selftest.mjs` against the dev server with Playwright available. Set `PLAYWRIGHT_MODULE` to the module path if installed outside the repo.
 - **Local preview**: `npm run preview` (`http://127.0.0.1:4173`) or `./PLAY.command`
 
 ## Architecture & Conventions
 - **Coordinate system (`src/game/types.ts`)**:
   - Right-handed Y-up (`1 unit = 1 meter`).
   - `yaw = 0` points along `+Z`, `forwardXZ(yaw) = (Math.sin(yaw), 0, Math.cos(yaw))`, `rightXZ(yaw) = (-Math.cos(yaw), 0, sin(yaw))`.
-  - All 6 vehicle classes (`normal`, `heavy`, `ifv`, `humvee`, `rocket`, `support`) are grounded at `min.y = 0` in rest pose inside `src/game/AssetLoader.ts`.
+  - Vehicle rigs are grounded at `min.y = 0` in rest pose. Only the player can select `littlebird`; `Tank.stepFlight` integrates rotor thrust along the airframe's up vector.
   - In Three.js right-handed space, `gunPivot.rotation.x = -gunPitch` elevates the `+Z` barrel upward.
 - **Damage model (`src/game/DamageModel.ts` + `Tank.takeDamage`)**: no HP — per-module integrity (engine/fuel/ammo/tracks/wheels/turret_ring/gun/launcher/crew), normalized module boxes measured from rig bounds, per-face armour zones with slope-tilted normals, penetration → slug path + spall cone, HE blast falloff, fires/cook-offs/crew-KO/field-repair. `integrityScale` is an *incoming-damage multiplier*, never a spawn handicap (modules always spawn at full integrity). Friendly fire is prevented in `Ballistics`/`DroneManager`; kills credit `lastAttacker` within 20 s.
-- **FPV drone (`src/game/Drone.ts`)**: support-class kamikaze drone, one airborne per vehicle, `fpv_warhead` shaped charge (top-attack on steep dives). Player flies via `PlayerController.droneMode` (latched per-frame click edges — `frameLmb`/`frameRmb` — so instant `page.mouse.click()` works); bots use range-banded autopilot (climb to cruise altitude, pure-pursuit terminal dive). Counter-drone: projectile sweeps within `hitRadius` (0.35 m) kill drones; armed bots counter-aim < 110 m with LOS + 0.6 s reaction + ~1.2° aim error.
+- **FPV drone (`src/game/Drone.ts`)**: one airborne per vehicle. Player cooldown starts at launch. Latched click edges launch or abort; the projectile-immune drone detonates on contact. Signal, battery, and operator loss do not end player flights.
 - **Performance & Thermal Discipline (`src/main.ts`)**:
   - Renders directly to the native WebGL2 backbuffer (`antialias: true`) so Apple Silicon uses zero-bandwidth on-chip tile MSAA rather than offscreen multi-pass `EffectComposer` resolves.
   - Frame pacing is capped at `60 FPS` during active play, `15 FPS` on the pause/start overlay, and `0 FPS` when `document.hidden` is true; directional shadow maps update at `30 Hz`.

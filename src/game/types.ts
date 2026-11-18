@@ -13,9 +13,9 @@ import * as THREE from 'three';
 
 export type Team = 'blue' | 'red';
 
-export type VehicleClass = 'normal' | 'heavy' | 'ifv' | 'humvee' | 'rocket' | 'support';
+export type VehicleClass = 'normal' | 'heavy' | 'ifv' | 'humvee' | 'rocket' | 'support' | 'littlebird';
 
-export type DriveType = 'tracked' | 'wheeled';
+export type DriveType = 'tracked' | 'wheeled' | 'air';
 
 export type ObstacleKind = 'building' | 'tower' | 'station' | 'rock' | 'barrier' | 'tree' | 'crates';
 
@@ -32,8 +32,11 @@ export interface ObstacleCollider {
   radius: number;
   /** Vertical height above `y` (meters) for shell/tracer occlusion */
   height: number;
-  /** If true (trees, supply crates), heavy tanks crush/topple this obstacle on impact or HE blast */
+  /** Damageable scenery, as opposed to a solid wreck. */
   destructible: boolean;
+  /** Easier to knock over and less important for steering/LOS. */
+  lightCover?: boolean;
+  damage?: number;
   destroyed: boolean;
   mesh?: THREE.Object3D;
 }
@@ -52,7 +55,8 @@ export interface TerrainQuery {
   getNormalAt(x: number, z: number, out?: THREE.Vector3): THREE.Vector3;
   getRoadFactorAt(x: number, z: number): number;
   getObstacles(): readonly ObstacleCollider[];
-  crushObstacle(obstacle: ObstacleCollider, impactDirXZ?: THREE.Vector2): void;
+  damageObstacle(obstacle: ObstacleCollider, amount: number, dirX?: number, dirZ?: number): boolean;
+  blastObstacles(x: number, y: number, z: number, radius: number, amount: number): void;
   raycastWorld(origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number): WorldRayHit | null;
   getSafeSpawnPoint(
     preferRadiusMin: number,
@@ -188,6 +192,10 @@ export interface TankIntent {
   fireMG: boolean;
   /** Optional shell slot switch (0 or 1) */
   selectShell?: 0 | 1 | null;
+  /** Aircraft: pointer heading and cyclic pitch, plus signed collective. */
+  flightYaw?: number;
+  flightPitch?: number;
+  lift?: number;
 }
 
 export type { ModuleId, ModuleHealthState, CrewRole, ModulePart } from './DamageModel';
@@ -353,6 +361,7 @@ export interface MinimapObstacle {
   z: number;
   radius: number;
   kind: ObstacleKind;
+  destroyed?: boolean;
 }
 
 /** River centreline sample for the tactical radar (world space). */
@@ -385,6 +394,7 @@ export interface HUDTelemetry {
   respawnRemaining: number;
 
   speedKmh: number;
+  altitudeM?: number;
   gearLabel: string;
   throttle: number;
 
@@ -419,12 +429,10 @@ export interface HUDTelemetry {
   /** F5b: present while the player's FPV drone is airborne — HUD switches
    *  to the drone overlay and hides vehicle chrome. */
   fpv?: {
-    battery: number;   // 0..1
     speedKmh: number;
     altM: number;
     rangeM: number;
-    signalBars: number; // 1..5
-    weak: boolean;
+    cooldown: number;
   };
   /** Support slot-2 status for the vehicle panel: FPV READY / FPV n S / FPV AIRBORNE */
   fpvSlotStatus?: string;

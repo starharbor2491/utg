@@ -29,6 +29,7 @@ export class PlayerController {
   /** F5b: while a player FPV drone is airborne the mouse drives the drone,
    *  the vehicle brakes, and the camera sits at the drone. */
   public droneMode = false;
+  private aircraftControls = false;
   public fpvCamPos: THREE.Vector3 | null = null;
   public fpvCamQuat: THREE.Quaternion | null = null;
   private _droneDX = 0;
@@ -119,6 +120,7 @@ export class PlayerController {
     this._onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (!this.pointerLocked && e.code === 'Space' && tag === 'BUTTON') return;
 
       if (
         e.code === 'Space' ||
@@ -133,7 +135,7 @@ export class PlayerController {
       this.keysDown.add(e.code);
 
       if (!e.repeat) {
-        if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'KeyV') {
+        if (e.code === 'KeyV' || (!this.aircraftControls && (e.code === 'ShiftLeft' || e.code === 'ShiftRight'))) {
           this._sniperZoom = !this._sniperZoom;
         } else if (e.code === 'Digit1') {
           this.pendingShellSlot = 0;
@@ -238,8 +240,8 @@ export class PlayerController {
 
       this._cameraYaw = wrapAnglePi(this._cameraYaw - dx * sens);
 
-      const minPitch = this._sniperZoom ? -0.34 : -0.48;
-      const maxPitch = this._sniperZoom ? 0.46 : 0.62;
+      const minPitch = this.aircraftControls ? -0.68 : this._sniperZoom ? -0.34 : -0.48;
+      const maxPitch = this.aircraftControls ? 0.66 : this._sniperZoom ? 0.46 : 0.62;
       this._cameraPitch = THREE.MathUtils.clamp(
         this._cameraPitch - dy * sens,
         minPitch,
@@ -254,7 +256,7 @@ export class PlayerController {
       if (delta === 0) return;
 
       if (this._sniperZoom) {
-        this.sniperFovDeg = THREE.MathUtils.clamp(this.sniperFovDeg + delta * 2.0, 13, 28);
+        this.sniperFovDeg = THREE.MathUtils.clamp(this.sniperFovDeg * (delta > 0 ? 1.19 : 1 / 1.19), 4, 28);
       } else {
         this.tpDistance = THREE.MathUtils.clamp(
           this.tpDistance + delta * 0.9,
@@ -374,6 +376,7 @@ export class PlayerController {
     shakeTrauma: number
   ): TankIntent {
     const safeDt = Math.min(Math.max(dt, 0.0001), 0.08);
+    this.aircraftControls = playerTank.stats.drive === 'air';
     this.frameLmb = this._edgeLmb;
     this.frameRmb = this._edgeRmb;
     this._edgeLmb = false;
@@ -383,7 +386,7 @@ export class PlayerController {
     if (!this.initialized) {
       this.initialized = true;
       this._cameraYaw = playerTank.hullYaw;
-      this._cameraPitch = -0.05;
+      this._cameraPitch = this.aircraftControls ? 0 : -0.05;
       this.followPivot.copy(playerTank.position);
     } else if (this.followPivot.distanceToSquared(playerTank.position) > 25 * 25) {
       this.followPivot.copy(playerTank.position);
@@ -446,7 +449,7 @@ export class PlayerController {
         if (
           camBlockHit &&
           (camBlockHit.hitKind === 'terrain' ||
-            (camBlockHit.obstacle && !camBlockHit.obstacle.destructible))
+            (camBlockHit.obstacle && !camBlockHit.obstacle.lightCover))
         ) {
           const safeDist = Math.max(3.4, camBlockHit.distance - 0.55);
           this._baseCamPos.copy(this._anchor).addScaledVector(this._camOffsetDir, safeDist);
@@ -466,7 +469,7 @@ export class PlayerController {
     // Smoothly interpolate camera FOV
     const fovLerp = 1 - Math.exp(-16 * safeDt);
     this.currentFovDeg += (targetFovDeg - this.currentFovDeg) * fovLerp;
-    if (Math.abs(this.camera.fov - this.currentFovDeg) > 0.01) {
+    if (!this.fpvCamPos && Math.abs(this.camera.fov - this.currentFovDeg) > 0.01) {
       this.camera.fov = this.currentFovDeg;
       this.camera.updateProjectionMatrix();
     }
@@ -610,6 +613,12 @@ export class PlayerController {
     this.intent.throttle = fwd - rev;
     this.intent.steer = left - right;
     this.intent.brake = this.keysDown.has('KeyX');
+    this.intent.flightYaw = this.aircraftControls ? this._cameraYaw : undefined;
+    this.intent.flightPitch = this.aircraftControls ? -this._cameraPitch : undefined;
+    this.intent.lift = this.aircraftControls
+      ? Number(this.keysDown.has('ShiftLeft') || this.keysDown.has('ShiftRight')) -
+        Number(this.keysDown.has('ControlLeft') || this.keysDown.has('ControlRight'))
+      : undefined;
     this.intent.aimPoint.copy(this.commanderAimWorld);
     // Handle [1], [2], or [Q] shell / belt slot toggle
     if (this.pendingShellSlot !== null) {
@@ -625,7 +634,7 @@ export class PlayerController {
 
     const activeControl = this._pointerLocked || this._engaged;
     this.intent.fireCannon =
-      activeControl && (this.mouseLeftDown || this.keysDown.has('KeyF'));
+      activeControl && (this.mouseLeftDown || this.frameLmb || this.keysDown.has('KeyF'));
     this.intent.fireMG =
       activeControl && (this.keysDown.has('Space') || this.keysDown.has('KeyC'));
 
@@ -640,10 +649,12 @@ export class PlayerController {
     return out;
   }
 
-  /** Edge-triggered drone buttons (LMB detonate / RMB abort) — per-frame
+  /** Edge-triggered drone buttons (LMB launch / RMB abort) — per-frame
    *  latched edges so instant clicks register. */
   public takeDroneEdges(): { lmb: boolean; rmb: boolean } {
-    return { lmb: this.frameLmb, rmb: this.frameRmb };
+    const edges = { lmb: this.frameLmb, rmb: this.frameRmb };
+    this.frameLmb = this.frameRmb = false;
+    return edges;
   }
 
   // ---- chase-camera state save/restore across FPV ----
