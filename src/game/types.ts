@@ -193,9 +193,10 @@ export interface TankIntent {
   fireMG: boolean;
   /** Optional shell slot switch (0 or 1) */
   selectShell?: 0 | 1 | null;
-  /** Aircraft: pointer heading and per-step cyclic pitch change, plus signed throttle adjustment. */
+  /** Aircraft: pointer heading and per-step cyclic inputs, plus signed throttle adjustment. */
   flightYaw?: number;
   flightPitchDelta?: number;
+  flightRollDelta?: number;
   collectiveAdjust?: number;
 }
 

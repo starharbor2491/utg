@@ -1321,7 +1321,7 @@ export class Tank implements TankEntity {
     const cyclicStep = Math.min(1, this.stats.hullTurnRate / 3) * dt;
     // Cyclic settings stay where the pilot leaves them; opposite input levels the craft.
     pose.x = clamp(pose.x + ((intent?.throttle ?? 0) * 0.95 * cyclicStep + (intent?.flightPitchDelta ?? 0)) * control, -Math.PI / 2, Math.PI / 2);
-    pose.z = clamp(pose.z - (intent?.steer ?? 0) * control * 0.9 * cyclicStep, -0.58, 0.58);
+    pose.z = clamp(pose.z + ((intent?.flightRollDelta ?? 0) - (intent?.steer ?? 0) * 0.9 * cyclicStep) * control, -0.58, 0.58);
 
     // The rotor pushes along the aircraft's tilted up vector. Drag and thrust,
     // not key state, determine velocity. Nothing adjusts throttle to hold altitude.

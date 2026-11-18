@@ -33,6 +33,7 @@ export class PlayerController {
   public droneMode = false;
   private aircraftControls = false;
   private flightPitchDelta = 0;
+  private flightRollDelta = 0;
   public fpvCamPos: Vec3 | null = null;
   public fpvCamQuat: Quat | null = null;
   private _droneDX = 0;
@@ -145,7 +146,7 @@ export class PlayerController {
       }
 
       if (alt && !this.freeLooking) {
-        this.flightPitchDelta = 0;
+        this.flightPitchDelta = this.flightRollDelta = 0;
         this.orbitYaw = this.droneMode ? 0 : this._cameraYaw;
         this.orbitPitch = this.droneMode ? 0 : this._cameraPitch;
         this._edgeLmb = this._edgeRmb = false;
@@ -261,7 +262,11 @@ export class PlayerController {
       const fovScale = this._sniperZoom ? (this.sniperFovDeg / BASE_FOV_DEG) * 0.92 : 1.0;
       const sens = baseSens * fovScale;
 
-      this._cameraYaw = wrapAnglePi(this._cameraYaw - dx * sens);
+      if (this.aircraftControls && this.keysDown.has('KeyR')) {
+        this.flightRollDelta += dx * sens;
+      } else {
+        this._cameraYaw = wrapAnglePi(this._cameraYaw - dx * sens);
+      }
       if (this.aircraftControls) this.flightPitchDelta += dy * sens;
 
       const minPitch = this.aircraftControls ? -VERTICAL_PITCH : this._sniperZoom ? -0.34 : -0.48;
@@ -364,7 +369,7 @@ export class PlayerController {
 
   private clearHeldInput(): void {
     this.keysDown.clear();
-    this.flightPitchDelta = 0;
+    this.flightPitchDelta = this.flightRollDelta = 0;
     this.mouseLeftDown = this.mouseRightDown = false;
     this._edgeLmb = this._edgeRmb = false;
     this._droneDX = this._droneDY = 0;
@@ -415,7 +420,8 @@ export class PlayerController {
     }
     this.aircraftControls = playerTank.stats.drive === 'air';
     const flightPitchDelta = this.flightPitchDelta;
-    this.flightPitchDelta = 0;
+    const flightRollDelta = this.flightRollDelta;
+    this.flightPitchDelta = this.flightRollDelta = 0;
     this.frameLmb = this._edgeLmb;
     this.frameRmb = this._edgeRmb;
     this._edgeLmb = false;
@@ -624,6 +630,7 @@ export class PlayerController {
     this.intent.brake = !this.aircraftControls && this.keysDown.has('KeyX');
     this.intent.flightYaw = this.aircraftControls ? this._cameraYaw : undefined;
     this.intent.flightPitchDelta = this.aircraftControls && this.pointerLocked && !freeLook ? flightPitchDelta : undefined;
+    this.intent.flightRollDelta = this.aircraftControls && this.pointerLocked && !freeLook ? flightRollDelta : undefined;
     this.intent.collectiveAdjust = this.aircraftControls
       ? Number(this.keysDown.has('ShiftLeft') || this.keysDown.has('ShiftRight')) -
         Number(this.keysDown.has('ControlLeft') || this.keysDown.has('ControlRight'))

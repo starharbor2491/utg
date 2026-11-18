@@ -46,8 +46,8 @@ const BRIEFING_VEHICLES: readonly { id: VehicleClass; name: string; armament: st
   { id: 'humvee', name: 'Humvee', armament: 'M2 .50 cal', note: 'Quick on roads, lightly protected. Keep moving and avoid heavier guns.' },
   { id: 'rocket', name: 'Rocket artillery', armament: 'Six-round rocket pod', note: 'Choose between guided and unguided rockets. Leave room to reload.' },
   { id: 'support', name: 'Support', armament: 'SAM and FPV drone', note: 'Press 2 to select the FPV, then click to launch. It detonates on impact.' },
-  { id: 'littlebird', name: 'Little Bird', armament: 'Guided missiles and machine gun', note: 'Shift / Ctrl adjust throttle. Mouse turns and pitches; A/D banks. 1 selects guided missiles; 2 selects the machine gun.' },
-  { id: 'apache', name: 'Apache', armament: '16-missile volley and heavy Gatling', note: 'Shift / Ctrl adjust throttle. Mouse turns and pitches; A/D banks. Select 1 for the 16-missile volley or 2 for the Gatling.' },
+  { id: 'littlebird', name: 'Little Bird', armament: 'Guided missiles and machine gun', note: 'Shift / Ctrl adjust throttle. Mouse turns and pitches. Hold R and move the mouse sideways to roll, or use A/D.' },
+  { id: 'apache', name: 'Apache', armament: '16-missile volley and heavy Gatling', note: 'Shift / Ctrl adjust throttle. Mouse turns and pitches. Hold R and move the mouse sideways to roll, or use A/D.' },
 ];
 
 const PROFILE: Record<VehicleClass, string> = {

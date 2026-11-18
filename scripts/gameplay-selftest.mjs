@@ -111,6 +111,30 @@ try {
     const back = await player();
     assert.ok(back.flight.pitch < arrows.flight.pitch - 0.09 && back.flight.roll < arrows.flight.roll - 0.09,
       `${up.cls}: opposite arrows reverse pitch and bank`);
+
+    const aimBeforeRoll = await cam();
+    await page.keyboard.down('r');
+    await page.mouse.move(660, 350, { steps: 4 });
+    await page.evaluate(() => window.__tankQA.fastForward(0.15));
+    const rightRoll = await player();
+    assert.ok(rightRoll.flight.roll > back.flight.roll + 0.12, `${up.cls}: R + mouse right banks right`);
+    assert.ok(Math.abs(angleDelta(rightRoll.yaw, back.yaw)) < 0.03, `${up.cls}: cursor roll does not change heading`);
+    assert.equal((await cam()).yaw, aimBeforeRoll.yaw, `${up.cls}: cursor roll does not orbit the camera`);
+    assert.equal(rightRoll.flight.throttle, back.flight.throttle);
+
+    await page.keyboard.down('Alt');
+    await page.mouse.move(710, 350);
+    await page.evaluate(() => window.__tankQA.fastForward(0.1));
+    assert.equal((await player()).flight.roll, rightRoll.flight.roll, `${up.cls}: Alt overrides cursor roll`);
+    await page.mouse.move(660, 350);
+    await page.keyboard.up('Alt');
+
+    await page.mouse.move(500, 350, { steps: 4 });
+    await page.evaluate(() => window.__tankQA.fastForward(0.1));
+    assert.ok((await player()).flight.roll < back.flight.roll - 0.06, `${up.cls}: R + mouse left banks left`);
+    await page.mouse.move(560, 350);
+    await page.evaluate(() => window.__tankQA.fastForward(0.1));
+    await page.keyboard.up('r');
   }
   await mouseFlight();
   assert.equal(await page.evaluate(() => window.__tankQA.getRenderStats().rocketsLeft), 2, 'free-look clicks do not fire missiles');
