@@ -533,7 +533,10 @@ export class World implements TerrainQuery {
         }
       }
       roadAttr[i] = dirtMask;
-      meadowAttr[i] = valueNoise(vx * 0.048 + 11.3, vz * 0.048 + 11.3);
+      meadowAttr[i] =
+        0.58 * valueNoise(vx * 0.016 + 11.3, vz * 0.016 + 11.3) +
+        0.29 * valueNoise(vx * 0.043 - 7.1, vz * 0.043 + 23.5) +
+        0.13 * valueNoise(vx * 0.107 - 3.8, vz * 0.107 + 31.4);
     }
 
     geo.setAttribute('aRoadMask', roadAttr, 1, 'ATTR7');
@@ -551,7 +554,7 @@ export class World implements TerrainQuery {
     mat.setParameter('uTime', this.grassTimeUniform.value);
     this.animatedMaterials.push(mat);
 
-    // Fast 4-tap splat + wet-puddle specular + drifting cumulus cloud shadows + directional Mie aerial perspective
+    // Four detail samples break tiling; the meadow field still reads from high above.
     addShaderHooks(mat, {
       vsDecl: `
         attribute float aRoadMask;
@@ -587,12 +590,19 @@ export class World implements TerrainQuery {
           return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
         }`,
       albedo: `
-        vec2 detailUV = vTerrainWorldPos.xz * 0.145;
-        vec3 grassCol = texture2D(uGrassColor, detailUV).rgb;
-        grassCol *= mix(vec3(0.74, 0.85, 0.60), vec3(1.05, 0.96, 0.72), vMeadowDry * 0.74);
-        vec3 dirtCol = texture2D(uDirtColor, detailUV * 1.15).rgb * vec3(0.90, 0.83, 0.74);
+        vec2 terrainXZ = vTerrainWorldPos.xz;
+        vec2 detailUV = terrainXZ * 0.145;
+        vec2 rotatedUV = mat2(0.8, 0.6, -0.6, 0.8) * terrainXZ * 0.083 + vec2(17.4, -6.1);
+        float mixDetail = mix(0.19, 0.81, smoothstep(0.25, 0.74, vMeadowDry));
+        vec3 grassCol = mix(texture2D(uGrassColor, detailUV).rgb, texture2D(uGrassColor, rotatedUV).rgb, mixDetail);
+        vec3 dirtCol = mix(texture2D(uDirtColor, detailUV * 1.17).rgb,
+                           texture2D(uDirtColor, rotatedUV * 1.21 + 7.3).rgb, 1.0 - mixDetail);
+        float dryMeadow = smoothstep(0.32, 0.74, vMeadowDry);
+        grassCol *= mix(vec3(0.56, 0.78, 0.53), vec3(1.32, 1.04, 0.61), dryMeadow);
+        dirtCol *= mix(vec3(0.70, 0.72, 0.65), vec3(1.22, 0.99, 0.76), dryMeadow);
         float slopeFactor = smoothstep(0.11, 0.34, 1.0 - clamp(vTerrainWorldNormal.y, 0.0, 1.0));
-        float splatDirt = clamp(max(vRoadMask * 0.96, slopeFactor * 0.88) + (vMeadowDry - 0.62) * 0.22, 0.0, 1.0);
+        float barePatches = smoothstep(0.53, 0.78, vMeadowDry) * 0.84;
+        float splatDirt = max(max(vRoadMask * 0.96, slopeFactor * 0.88), barePatches);
         float rutWave = sin(vTerrainWorldPos.x * 0.85 + vTerrainWorldPos.z * 0.65);
         float puddleMask = smoothstep(0.62, 0.92, vRoadMask) * smoothstep(0.56, 0.80, vMeadowDry + rutWave * 0.18) * smoothstep(0.94, 0.995, vTerrainWorldNormal.y);
         vec3 baseAlbedo = mix(grassCol, dirtCol, splatDirt);

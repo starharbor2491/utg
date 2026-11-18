@@ -309,7 +309,7 @@ interface Wreck {
   cls: VehicleClass; seed: number; emitWorld: Vec3[];
 }
 const WRECK_POOL_MAX = 10, WRECK_LIFETIME = 75, BURN_TIME = 2.5, HEAT_TIME = 25;
-const HULL_MASS: Record<VehicleClass, number> = { normal: 42, heavy: 58, ifv: 33, humvee: 11, rocket: 15, support: 15, littlebird: 5 };
+const HULL_MASS: Record<VehicleClass, number> = { normal: 42, heavy: 58, ifv: 33, humvee: 11, rocket: 15, support: 15, littlebird: 5, apache: 9 };
 
 export class DestructionManager {
   private readonly scene: Entity;
@@ -539,11 +539,11 @@ export class DestructionManager {
   }
 
   public async prewarmWrecksAndVehicles(app: AppBase, scene: Entity, camera: Entity, assets: LoadedGameAssets): Promise<void> {
-    const classes: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket', 'support', 'littlebird'];
+    const classes: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket', 'support', 'littlebird', 'apache'];
     const warm = group('shader_prewarm', scene);
     let slot = 0;
     for (const cls of classes) for (const team of ['blue', 'red'] as Team[]) {
-      if (cls === 'littlebird' && team === 'red') continue;
+      if ((cls === 'littlebird' || cls === 'apache') && team === 'red') continue;
       const rig = instantiateTankRig(assets, cls, team);
       const fake = { root: rig.root, rig, team, stats: { vehicleClass: cls } } as unknown as Tank;
       const geo = this._ensureGeoCached(cls, team, fake), wreck = this._createWreckRecord();

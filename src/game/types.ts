@@ -14,7 +14,7 @@ import type { Vec3 } from './engine/math';
 
 export type Team = 'blue' | 'red';
 
-export type VehicleClass = 'normal' | 'heavy' | 'ifv' | 'humvee' | 'rocket' | 'support' | 'littlebird';
+export type VehicleClass = 'normal' | 'heavy' | 'ifv' | 'humvee' | 'rocket' | 'support' | 'littlebird' | 'apache';
 
 export type DriveType = 'tracked' | 'wheeled' | 'air';
 
@@ -166,7 +166,7 @@ export interface TankStats {
   hullHalfLength: number;
   /** Wheeled vehicles: bicycle-model wheelbase (meters) */
   wheelbase?: number;
-  /** Rocket pod: rounds per salvo + seconds between launches */
+  /** Rocket pod: rounds per salvo + seconds between launches (0 fires together). */
   salvoSize?: number;
   salvoInterval?: number;
 }
@@ -193,10 +193,10 @@ export interface TankIntent {
   fireMG: boolean;
   /** Optional shell slot switch (0 or 1) */
   selectShell?: 0 | 1 | null;
-  /** Aircraft: pointer heading and cyclic pitch, plus signed collective. */
+  /** Aircraft: pointer heading and per-step cyclic pitch change, plus signed throttle adjustment. */
   flightYaw?: number;
-  flightPitch?: number;
-  lift?: number;
+  flightPitchDelta?: number;
+  collectiveAdjust?: number;
 }
 
 export type { ModuleId, ModuleHealthState, CrewRole, ModulePart } from './DamageModel';

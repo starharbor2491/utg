@@ -5,7 +5,7 @@
 - **Engine**: PlayCanvas 2.24, WebGL2 and GLSL only, TypeScript and Vite.
 - **Rendering**: native WebGL2 backbuffer with MSAA. No Three.js renderer, EffectComposer, bloom chain, or WebGPU path.
 - **Loop**: `src/main.ts` owns manual frame submission, 60 FPS active / 15 FPS paused / hidden-tab suspension, shadow cadence, adaptive quality, UI, and QA hooks.
-- **Assets**: textured CC0 GLBs loaded by PlayCanvas container assets. Meshopt and the PlayCanvas Basis decoder are vendored locally. `src/game/engine/hdr.ts` decodes the Radiance sky into the engine environment pipeline.
+- **Assets**: textured GLBs loaded by PlayCanvas container assets. See `CREDITS.md` for licenses. Meshopt and the PlayCanvas Basis decoder are vendored locally. `src/game/engine/hdr.ts` decodes the Radiance sky into the engine environment pipeline.
 - **Engine adapters**: `src/game/engine/` owns geometry construction and normalized GLB readback, scene entities, materials and shader hooks, instancing, math, HDR, and app access.
 
 ## Gameplay
@@ -13,7 +13,7 @@
 - `Match`, `Tank`, `PlayerController`, `BotAI`, `Ballistics`, `Drone`, and `DamageModel` implement the TDM, part-based damage, vehicles, guided weapons, FPV behavior, and flight model.
 - `World` owns terrain, rivers, cover, scenery, grass streaming, lighting, and collision queries.
 - `Effects` uses fixed-capacity instanced pools. `Destruction` owns cached wreck geometry, terrain-contact rigid bodies, debris, burning materials, and wreck obstacles.
-- Procedural rigs live in `src/game/models/`: Little Bird, shared 6×6 chassis, rocket cassette, Support radar/drone equipment, FPV drone, and animated track links. Heavy ERA and the Humvee M2 are assembled in `AssetLoader`.
+- Rigs live in `src/game/models/`: Apache and Little Bird GLBs with procedural mounts, shared 6×6 chassis, rocket cassette, Support radar/drone equipment, FPV drone, and animated track links. Heavy ERA and the Humvee M2 are assembled in `AssetLoader`.
 
 ## Offline packaging
 

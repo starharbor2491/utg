@@ -24,7 +24,7 @@ npm run dev
 | `W / S` or `Up / Down` | Forward throttle / Reverse |
 | `A / D` or `Left / Right` | Hull traverse (neutral & moving steer) |
 | `Mouse` | Aim turret & gun (cursor locked inside window) |
-| Hold `Alt` + move mouse | Look all the way around in ground vehicles, Little Bird, or FPV. Release to return to aiming. |
+| Hold `Alt` + move mouse | Look all the way around in ground vehicles, helicopters, or FPV. Release to return to aiming. |
 | `Left Click` (or `F`) | Fire main cannon (or 30mm chain-gun on IFV) |
 | `Right Click` (or `Shift` / `V`) | 2.8x Gunner Boresight Zoom (tap to toggle or hold to zoom) |
 | `1 / 2` or `Q` | Switch between Shell / Ammo Belt Type 1 & Type 2 |
@@ -35,4 +35,6 @@ npm run dev
 
 In the **Support** vehicle, press `2` and click to launch your FPV. Aim with the mouse, steer with `A / D`, speed up with `W`, or hold `S` to hover. The FPV detonates on impact. Right click aborts and lets it fall. Enemy fire can’t shoot the drone down, and battery, distance, or loss of the launch vehicle won’t cut your control.
 
-**Little Bird** is player-only. Hold `Shift` to add lift and `Ctrl` to descend. Move the mouse or trackpad to yaw and pitch, use `W / S` to tilt the nose down or up, and `A / D` to bank. Tilting redirects rotor thrust, so speed builds over time and carries through a turn. Level the nose or hold `X` to brake. Left click fires the missile pod; `Space` fires the machine gun. Use right click or `V` for the optic, and `1` / `2` to choose guided or unguided rounds.
+**Little Bird** and **Apache** are player-only. Hold `Shift` to raise throttle or `Ctrl` to lower it. Move the mouse up/down to pitch and left/right to turn. The normal camera can orbit all the way around and look straight up or down. `W / S` or `↑ / ↓` also pitch the helicopter, all the way to vertical, and `A / D` or `← / →` bank. Throttle, pitch and bank stay where you leave them. Use opposite input to level out; there is no automatic hover, air brake, or altitude ceiling. Hold `Alt` to look around without steering. Right click or `V` toggles the optic.
+
+Press `1` to select missiles or `2` to select the gun, then left click to fire. `Space` fires the gun regardless of the selected slot. The Little Bird carries two guided missiles and reloads in 1.75 seconds. The Apache fires all 16 high-yield missiles in one volley, reloads in 4.5 seconds, and carries a heavy Gatling.

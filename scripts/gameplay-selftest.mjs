@@ -37,9 +37,10 @@ try {
     await page.keyboard.up('Alt');
     await page.evaluate(() => window.__tankQA.fastForward(0.25));
     const before = await cam();
-    const heading = (await player()).yaw;
+    const { yaw: heading, flight } = await player();
     await page.keyboard.down('Alt');
     await page.waitForFunction(() => window.__tankQA.getCamDebug().freeLooking);
+    const frozenAim = (await cam()).aim;
     let last = drone ? Math.atan2(before.camDir[0], before.camDir[2]) : before.yaw;
     let sweep = 0;
     for (let i = 1; i <= 8; i++) {
@@ -49,7 +50,7 @@ try {
       const angle = drone ? Math.atan2(next.camDir[0], next.camDir[2]) : next.yaw;
       sweep += angleDelta(angle, last);
       last = angle;
-      assert.deepEqual(next.aim, before.aim);
+      assert.deepEqual(next.aim, frozenAim);
     }
     assert.ok(Math.abs(Math.abs(sweep) - 2 * Math.PI) < 0.3, `camera sweeps 360° (${sweep.toFixed(2)} rad)`);
     // A click while looking around must not turn into a shot, launch or FPV abort.
@@ -58,7 +59,11 @@ try {
     await page.mouse.down({ button: 'right' });
     await page.mouse.up({ button: 'right' });
     await page.evaluate(() => window.__tankQA.fastForward(0.12));
-    if (!drone) assert.ok(Math.abs(angleDelta((await player()).yaw, heading)) < 0.2, 'orbit does not steer the vehicle');
+    if (!drone) {
+      const next = await player();
+      assert.ok(Math.abs(angleDelta(next.yaw, heading)) < 0.2, 'orbit does not steer the vehicle');
+      if (flight) assert.equal(next.flight.pitch, flight.pitch, 'orbit does not pitch the airframe');
+    }
     await page.mouse.move(560, 350);
     await page.keyboard.up('Alt');
     await page.evaluate(() => window.__tankQA.fastForward(0.1));
@@ -69,17 +74,59 @@ try {
   }
 
   await orbit();
+  async function mouseFlight() {
+    if ((await cam()).fov < 55) {
+      await page.keyboard.press('v');
+      await page.waitForFunction(() => window.__tankQA.getCamDebug().fov > 55);
+    }
+    await page.mouse.move(560, 350);
+    // After a vehicle swap, let the new airframe finish turning to the existing camera heading.
+    await page.evaluate(() => window.__tankQA.fastForward(2));
+    const before = await player();
+    await page.mouse.move(660, 440, { steps: 4 });
+    await page.evaluate(() => window.__tankQA.fastForward(0.5));
+    const down = await player();
+    assert.ok(down.flight.pitch > before.flight.pitch + 0.06, `${down.cls}: mouse down pitches the airframe down`);
+    assert.ok(angleDelta(down.yaw, before.yaw) < -0.07, `${down.cls}: mouse right turns the airframe`);
+    await page.mouse.move(560, 350, { steps: 4 });
+    await page.evaluate(() => window.__tankQA.fastForward(0.5));
+    const up = await player();
+    assert.ok(up.flight.pitch < down.flight.pitch - 0.06, 'mouse up raises the nose');
+    assert.ok(Math.abs(angleDelta(up.yaw, before.yaw)) < 0.08, 'mouse left turns it back');
+    assert.equal(up.flight.throttle, before.flight.throttle, 'mouse never adjusts collective');
+    await page.keyboard.down('ArrowUp');
+    await page.keyboard.down('ArrowRight');
+    await page.evaluate(() => window.__tankQA.fastForward(0.25));
+    await page.keyboard.up('ArrowRight');
+    await page.keyboard.up('ArrowUp');
+    const arrows = await player();
+    assert.ok(arrows.flight.pitch > up.flight.pitch + 0.09 && arrows.flight.roll > up.flight.roll + 0.09,
+      `${up.cls}: keyboard arrows still pitch and bank`);
+    assert.equal(arrows.flight.throttle, up.flight.throttle);
+    await page.keyboard.down('ArrowDown');
+    await page.keyboard.down('ArrowLeft');
+    await page.evaluate(() => window.__tankQA.fastForward(0.25));
+    await page.keyboard.up('ArrowLeft');
+    await page.keyboard.up('ArrowDown');
+    const back = await player();
+    assert.ok(back.flight.pitch < arrows.flight.pitch - 0.09 && back.flight.roll < arrows.flight.roll - 0.09,
+      `${up.cls}: opposite arrows reverse pitch and bank`);
+  }
+  await mouseFlight();
   assert.equal(await page.evaluate(() => window.__tankQA.getRenderStats().rocketsLeft), 2, 'free-look clicks do not fire missiles');
   // Reset aim after moving to the edge of the viewport in the pointer test.
   await page.evaluate(() => window.__tankQA.teleportForTest(0, -420, 0));
   const birdBefore = await player();
   await page.keyboard.down('Shift');
+  await page.evaluate(() => window.__tankQA.fastForward(0.65));
   await page.keyboard.down('w');
-  await page.evaluate(() => window.__tankQA.fastForward(2));
+  await page.evaluate(() => window.__tankQA.fastForward(0.6));
   await page.keyboard.up('w');
+  await page.evaluate(() => window.__tankQA.fastForward(1.4));
   await page.keyboard.up('Shift');
   const birdAfter = await page.evaluate(() => window.__tankQA.getMatchState().tanks[0]);
   assert.ok(birdAfter.y > birdBefore.y + 8 && birdAfter.z > birdBefore.z + 12, 'Little Bird climbs and flies forward');
+  assert.equal(birdAfter.flight.throttle, 1);
   await page.mouse.click(560, 350);
   await page.keyboard.down('Space');
   await page.evaluate(() => window.__tankQA.fastForward(0.8));
@@ -97,6 +144,26 @@ try {
   const paused = await page.evaluate(() => window.__tankQA.getMatchState());
   await page.waitForTimeout(250);
   assert.deepEqual(await page.evaluate(() => window.__tankQA.getMatchState()), paused, 'briefing pauses simulation');
+  await page.evaluate(() => window.__tankQA.teleportForTest(0, -420, 0));
+  await page.getByRole('button', { name: 'Apache Air' }).click();
+  await page.locator('.fcs-engage-btn').click();
+  const render = () => page.evaluate(() => window.__tankQA.getRenderStats());
+  assert.equal((await render()).rocketsLeft, 16);
+  await mouseFlight();
+  await page.keyboard.press('2');
+  await page.waitForFunction(() => window.__tankQA.getRenderStats().activeShell === 'GATLING');
+  await page.mouse.down();
+  await page.evaluate(() => window.__tankQA.fastForward(0.2));
+  await page.mouse.up();
+  assert.ok((await player()).flight.mgHeat > 0, 'Apache fires its Gatling with the gun slot selected');
+  assert.equal((await render()).rocketsLeft, 16, 'the Gatling does not spend missiles');
+  await page.keyboard.press('1');
+  await page.waitForFunction(() => window.__tankQA.getRenderStats().activeShell === '16× HE');
+  await page.mouse.click(560, 350);
+  await page.waitForFunction(() => window.__tankQA.getRenderStats().rocketsLeft === 0, undefined, { timeout: 3000 });
+  assert.equal((await render()).salvoActive, false);
+  await page.keyboard.press('p');
+  await page.getByRole('heading', { name: 'Battle paused' }).waitFor();
   await page.evaluate(() => window.__tankQA.teleportForTest(0, -420, 0));
   await page.getByRole('button', { name: 'Support Wheeled' }).click();
   assert.equal((await page.locator('.fcs-engage-main').textContent()).trim(), 'Resume battle');
@@ -139,10 +206,11 @@ try {
   await page.keyboard.press('2');
   await page.waitForFunction(() => window.__tankQA.getRenderStats().activeShell === 'FPV');
   await page.keyboard.down('Alt');
+  await page.waitForFunction(() => window.__tankQA.getCamDebug().freeLooking);
   await page.mouse.click(560, 350);
   await page.keyboard.up('Alt');
   await page.evaluate(() => window.__tankQA.fastForward(0.1));
-  assert.equal(await page.evaluate(() => window.__tankQA.getMatchState().drones.active), 0, 'free-look clicks do not launch the FPV');
+  assert.equal((await cam()).fpvActive, false, 'free-look clicks do not launch the player FPV');
   await page.mouse.click(560, 350);
   await page.locator('.fcs-fpv.is-active').waitFor();
   await page.locator('.fcs-marker-layer.is-fpv').waitFor({ state: 'attached' });
@@ -229,9 +297,9 @@ try {
         }
         const scale = human ? (cls === 'humvee' ? 1 : 1.25) : 0.6;
         check(near(tank.speed, stats.maxForwardSpeed * scale), `${cls} ${human ? 'player' : 'NPC'} top speed`);
-        tank.stepKinematics(dt, { ...intent, steer: 1 }, flat, []);
+        for (let i = 0; i < 24; i++) tank.stepKinematics(dt, { ...intent, steer: 1 }, flat, []);
         const slip = -tank.velocity.x * Math.cos(tank.hullYaw) + tank.velocity.z * Math.sin(tank.hullYaw);
-        check(human ? Math.abs(slip) > 0.02 : near(slip, 0), `${cls} drift`);
+        check(human ? Math.abs(slip) > 2 : near(slip, 0), `${cls} sustained drift`);
         const fire = { ...intent, throttle: 0, fireCannon: true, fireMG: true };
         const timers = human ? 0.5 : 1;
         tank.stepKinematics(dt, fire, flat, []);
@@ -246,33 +314,75 @@ try {
     assertNoEmpty('after ground vehicles');
     const shooter = mkTank('normal', true);
     const bird = mkTank('littlebird', true);
-    findByName(bird.root, 'littlebird_main_rotor');
-    const flight = { ...intent, flightYaw: 0, lift: 1, steer: 0 };
+    check(findByName(bird.root, 'Rotor_Main'), 'Little Bird uses the imported rigged airframe');
+    const flight = { ...intent, flightYaw: 0, collectiveAdjust: 1, steer: 0 };
+    const neutral = { ...flight, throttle: 0, collectiveAdjust: 0 };
     let missiles = 0, burst = 0;
-    for (let i = 0; i < 150; i++) bird.stepKinematics(dt, { ...flight, fireCannon: i === 84, fireMG: true }, flat, [], {
+    for (let i = 0; i < 162; i++) bird.stepKinematics(dt, { ...flight, throttle: i < 42 ? 1 : 0, fireCannon: i === 108, fireMG: i < 70 }, flat, [], {
       onFireCannon: (_t, pos, _dir, shell) => { if (pos.y > 3 && shell.id === 'littlebird_missile') missiles++; },
-      onFireMG: () => burst++,
+      onFireMG: (_t, _pos, _dir, shell) => { if (shell.id === 'littlebird_mg') burst++; },
     });
     check(bird.position.y > 8 && bird.position.z > 12 && bird.rotorAngle > 0, 'aircraft climbs, moves, and spins its rotor');
-    check(missiles === 2 && burst > 8, 'aircraft fires missiles and its machine gun');
+    check(missiles === 2 && burst > 8, `aircraft fires missiles and its machine gun (${missiles} missiles, ${burst} MG rounds)`);
     check(bird.hullTilt.x > 0.4 && bird.velocity.z > 9, 'forward cyclic pitches the aircraft and accelerates it');
     const inertia = bird.velocity.z;
-    bird.stepKinematics(dt, { ...flight, throttle: 0, flightYaw: Math.PI / 2, lift: 0 }, flat, []);
+    const pitch = bird.hullTilt.x;
+    bird.stepKinematics(dt, { ...neutral, flightYaw: Math.PI / 2 }, flat, []);
     check(bird.velocity.z > inertia * 0.95, 'releasing cyclic and turning does not snap the aircraft velocity');
-    const bank = mkTank('littlebird', true, v(0, 30));
-    for (let i = 0; i < 120; i++) bank.stepKinematics(dt, { ...flight, throttle: 0, steer: -1, lift: 0 }, flat, []);
-    check(bank.hullTilt.z > 0.4 && bank.velocity.x < -4, 'left cyclic banks and accelerates the aircraft to the left');
-    const altitude = bank.position.y;
-    for (let i = 0; i < 120; i++) bank.stepKinematics(dt, { ...flight, throttle: 0, lift: -1 }, flat, []);
-    check(bank.position.y < altitude - 3, 'reducing collective descends without requiring a tilt');
-    const pointerBird = mkTank('littlebird', true, v(0, 30));
-    for (let i = 0; i < 100; i++) pointerBird.stepKinematics(dt,
-      { ...flight, throttle: 0, lift: 0, flightYaw: Math.PI / 2, flightPitch: 0.43 }, flat, []);
-    check(pointerBird.velocity.x > 3 && pointerBird.hullYaw > 1.4, 'pointer aim tilts thrust and flies without WASD input');
-    const xVel = pointerBird.velocity.x;
-    for (let i = 0; i < 75; i++) pointerBird.stepKinematics(dt,
-      { ...flight, throttle: 0, lift: 0, flightYaw: Math.PI / 2, brake: true }, flat, []);
-    check(pointerBird.velocity.x < xVel * 0.8, 'brake counter-tilts to reduce momentum');
+    check(bird.hullTilt.x === pitch && bird.flightThrottle === 1, 'pitch and throttle hold without input');
+    let birdGunSelected = false;
+    bird.stepKinematics(dt, { ...neutral, selectShell: 1, fireCannon: true }, flat, [], {
+      onFireMG: (_t, _pos, _dir, shell) => { birdGunSelected = shell.id === 'littlebird_mg'; },
+    });
+    for (let i = 0; i < 8; i++) bird.stepKinematics(dt, { ...neutral, fireCannon: true }, flat, [], {
+      onFireMG: (_t, _pos, _dir, shell) => { birdGunSelected = shell.id === 'littlebird_mg'; },
+    });
+    check(birdGunSelected, 'Little Bird can fire its machine gun from slot 2');
+    for (const cls of ['littlebird', 'apache']) {
+      const craft = mkTank(cls, true);
+      for (let i = 0; i < 60; i++) craft.stepKinematics(dt, { ...neutral, throttle: 1, steer: -1 }, flat, []);
+      check(craft.position.y === 0 && craft.flightThrottle === 0, `${cls}: cyclic alone changes no throttle`);
+      craft.respawnAt(v(), 0);
+      for (let i = 0; i < 600; i++) craft.stepKinematics(dt, { ...neutral, collectiveAdjust: 1 }, flat, []);
+      check(craft.position.y > 200 && craft.velocity.y > 0, `${cls}: climbs through the old 150 m ceiling`);
+      for (let i = 0; i < 60; i++) craft.stepKinematics(dt, { ...neutral, steer: -1 }, flat, []);
+      check(craft.hullTilt.z > 0.4 && craft.velocity.x < -4, `${cls}: bank redirects thrust`);
+      const bank = craft.hullTilt.z;
+      craft.stepKinematics(dt, { ...neutral, brake: true }, flat, []);
+      check(craft.hullTilt.z === bank && craft.flightThrottle === 1, `${cls}: brake input does not level an aircraft`);
+      for (let i = 0; i < 420; i++) craft.stepKinematics(dt, { ...neutral, collectiveAdjust: -1 }, flat, []);
+      check(craft.flightThrottle === 0 && craft.velocity.y < -3, `${cls}: reducing throttle descends`);
+      craft.respawnAt(v(0, 600), 0);
+      for (const pitchSign of [1, -1]) {
+        for (let i = 0; i < 300; i++) craft.stepKinematics(dt, { ...neutral, throttle: pitchSign }, flat, []);
+        const nose = applyQuat(v(0, 0, 1), craft.rig.hullTiltGroup.getRotation());
+        check(near(nose.y, -pitchSign) && Math.hypot(nose.x, nose.z) < 0.001,
+          `${cls}: manual cyclic points the nose straight ${pitchSign === 1 ? 'down' : 'up'}`);
+      }
+    }
+    const apache = mkTank('apache', true);
+    check(findByName(apache.root, 'Apache_Airframe') && findByName(apache.root, 'Apache_MainRotor') &&
+      findByName(apache.root, 'Apache_TailRotor'), 'Apache uses the imported FlightGear airframe and separate rotors');
+    const launches = [];
+    apache.stepKinematics(dt, { ...neutral, fireCannon: true }, flat, [], {
+      onFireCannon: (_t, pos, _dir, shell) => launches.push([pos.x, pos.y, shell.splashRadius, shell.splashDamage]),
+    });
+    check(launches.length === 16 && apache.rocketsLeft === 0 && near(apache.cannonCooldown, 4.5),
+      'Apache launches all 16 rounds on the trigger step then reloads');
+    check(new Set(launches.map(([x, y]) => `${x},${y}`)).size === 16 &&
+      launches.every(([, , radius, damage]) => radius > 13 && damage > 380),
+    'Apache fires a high-yield missile from each distinct mount');
+    const reloadBird = mkTank('littlebird', true);
+    reloadBird.stepKinematics(dt, { ...neutral, fireCannon: true }, flat, []);
+    for (let i = 0; i < 45 && reloadBird.rocketsLeft > 0; i++) reloadBird.stepKinematics(dt, neutral, flat, []);
+    check(reloadBird.rocketsLeft === 0 && near(reloadBird.cannonCooldown, 1.75), 'Little Bird starts a 1.75 s reload after the second missile');
+    for (const [craft, seconds] of [[apache, 4.5], [reloadBird, 1.75]]) {
+      const reloadSteps = Math.round(seconds / dt);
+      for (let i = 1; i < reloadSteps; i++) craft.stepKinematics(dt, neutral, flat, []);
+      check(craft.rocketsLeft === 0, `${craft.stats.vehicleClass}: pod stays empty until reload ends`);
+      for (let i = 0; i < 2; i++) craft.stepKinematics(dt, neutral, flat, []);
+      check(craft.rocketsLeft === craft.stats.salvoSize, `${craft.stats.vehicleClass}: full pod when reload ends`);
+    }
     assertNoEmpty('after aircraft');
     const victim = mkTank('heavy', false, v(0, 0, 10));
     const effects = new EffectsManager(scene);
@@ -284,7 +394,9 @@ try {
       ballistics.fireCoaxMG(shooter, v(0, 1, 0), v(0, 0, 1));
       for (let f = 0; f < 4; f++) ballistics.update(dt, flat, [victim], () => {});
     }
-    check(victim.alive && victim.crewAlive === victim.crewTotal && snapshot().some((integrity, i) => integrity < initial[i] - 0.1), 'small bullets wear modules without killing the crew');
+    const chipTotal = snapshot().reduce((sum, integrity, i) => sum + initial[i] - integrity, 0);
+    check(victim.alive && victim.crewAlive === victim.crewTotal && chipTotal > 0.35,
+      'buffed small bullets wear external modules without killing the crew');
 
     const manager = new DroneManager();
     manager.world = flat;
@@ -366,9 +478,28 @@ try {
         check(near(world.getWaterLevelAt(x, z) - world.getHeightAt(x, z), depth), 'water and terrain heights agree');
       }
     }
+    for (const cls of ['normal', 'humvee']) {
+      const ramp = { ...flat, getWaterDepthAt: (_x, z) => z >= 0 && z < 16 ? 1 : 0, getWaterLevelAt: () => 1 };
+      const crossing = mkTank(cls, true, v(0, 0, -4));
+      const startSpeed = TANK_STATS[cls].maxForwardSpeed * (cls === 'humvee' ? 1 : 1.25);
+      crossing.speed = startSpeed;
+      const sprays = [];
+      let slowest = startSpeed;
+      for (let i = 0; i < 90; i++) {
+        crossing.stepKinematics(dt, intent, ramp, [], {
+          onWaterWake: (p, k, sprayX, _sprayZ, bow) => {
+            if (bow) sprays.push({ x: p.x, y: p.y, z: p.z, k, sprayX });
+          },
+        });
+        slowest = Math.min(slowest, crossing.speed);
+      }
+      check(crossing.position.z > 16 && slowest > startSpeed * 0.90, `${cls} carries speed across water`);
+      check(sprays.some(p => p.sprayX > 1) && sprays.some(p => p.sprayX < -1) &&
+        sprays.every(p => p.k > 0.7 && near(p.y, 1.05) && p.z >= 0 && p.z < 16), `${cls} sprays outward from both bow corners at the water surface`);
+    }
     function nowDry(x, z) { return world.getWaterDepthAt(x, z) === 0; }
     // The detached test rigs share GPU meshes with the live game; the page owns their cleanup.
-    return 'All vehicle speed/drift/timer, chip damage, FPV durability and damage, destruction, and river checks passed';
+    return 'Vehicle drift, water spray, Apache volley, manual flight, MG damage, FPV, and destruction checks passed';
   });
   console.log(results);
   if (errors.length) {

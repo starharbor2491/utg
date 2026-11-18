@@ -1,4 +1,5 @@
 import './hud.css';
+import { assetUrl } from './AssetLoader';
 import { playerDriveScale, TANK_STATS } from './Tank';
 import type {
   HUDTelemetry,
@@ -45,7 +46,8 @@ const BRIEFING_VEHICLES: readonly { id: VehicleClass; name: string; armament: st
   { id: 'humvee', name: 'Humvee', armament: 'M2 .50 cal', note: 'Quick on roads, lightly protected. Keep moving and avoid heavier guns.' },
   { id: 'rocket', name: 'Rocket artillery', armament: 'Six-round rocket pod', note: 'Choose between guided and unguided rockets. Leave room to reload.' },
   { id: 'support', name: 'Support', armament: 'SAM and FPV drone', note: 'Press 2 to select the FPV, then click to launch. It detonates on impact.' },
-  { id: 'littlebird', name: 'Little Bird', armament: 'Missiles and machine gun', note: 'Player only. Shift / Ctrl control lift. Point and tilt with the mouse or trackpad; W/S pitch and A/D bank. Hold X to brake.' },
+  { id: 'littlebird', name: 'Little Bird', armament: 'Guided missiles and machine gun', note: 'Shift / Ctrl adjust throttle. Mouse turns and pitches; A/D banks. 1 selects guided missiles; 2 selects the machine gun.' },
+  { id: 'apache', name: 'Apache', armament: '16-missile volley and heavy Gatling', note: 'Shift / Ctrl adjust throttle. Mouse turns and pitches; A/D banks. Select 1 for the 16-missile volley or 2 for the Gatling.' },
 ];
 
 const PROFILE: Record<VehicleClass, string> = {
@@ -56,6 +58,7 @@ const PROFILE: Record<VehicleClass, string> = {
   rocket: 'M23 91V64h126V44h31l14 15 20 9v23h-21a14 14 0 1 0-28 0h-48a14 14 0 1 0-28 0h-5a14 14 0 1 0-28 0Z M29 30l102-13 5 24L34 55Z M44 36l72-10 M154 49h23l12 14h-35Z M58 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0 M91 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0 M167 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0',
   support: 'M23 91V64h126V44h31l14 15 20 9v23h-21a14 14 0 1 0-28 0h-48a14 14 0 1 0-28 0h-5a14 14 0 1 0-28 0Z M39 51V35l84-8v22Z M63 23V13h39v12 M154 49h23l12 14h-35Z M58 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0 M91 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0 M167 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0',
   littlebird: 'M29 55 113 62Q130 43 163 43 195 43 209 63 222 84 194 88h-46l-25-14-94-12Z M28 60l-8-21h10l17 20 M146 46V32h25 M76 32h164 M178 47q20 8 24 22h-28Z M148 86l-7 17m46-17 8 17m-69 0h79l10-7 M137 72h80v8h-80Z',
+  apache: 'M23 57 19 41l11 1 11 15 80 4 18-20 24 1 11 8h25l16 20 26 8-7 11h-79l-34-12-82-9Z M131 36v-8h28v8M61 35h166 M151 49l13 1 8 15h-28Z M177 55h18l13 15h-29Z M127 67h65v13h-65Z M139 82l-2 15m65-12 6 13m-21-8v4h46v5 M128 98a8 8 0 1 0 16 0 8 8 0 1 0-16 0 M201 99a8 8 0 1 0 16 0 8 8 0 1 0-16 0',
 };
 
 const BRIEFING_CONTROLS: readonly { keys: readonly string[]; action: string }[] = [
@@ -120,6 +123,7 @@ export class HUD {
   private lastLrfSubStr = '';
   private lastHpStr = '';
   private lastSpeedStr = '';
+  private lastSpeedUnit = '';
   private lastCannonStr = '';
   private lastCannonReady = true;
   private lastCannonBadge: 'ready' | 'reload' | 'neutral' = 'neutral';
@@ -798,8 +802,12 @@ export class HUD {
     if (speedStr !== this.lastSpeedStr) {
       this.lastSpeedStr = speedStr;
       this.speedNumEl.textContent = speedStr;
+    }
+    const speedUnit = t.altitudeM === undefined ? 'km/h' : `km/h / alt · ${Math.round(t.throttle * 100)}% throttle`;
+    if (speedUnit !== this.lastSpeedUnit) {
+      this.lastSpeedUnit = speedUnit;
       const unit = this.speedNumEl.nextElementSibling;
-      if (unit) unit.textContent = t.altitudeM === undefined ? 'km/h' : 'speed / altitude';
+      if (unit) unit.textContent = speedUnit;
     }
 
     // 4. Primary Weapon / Cannon Reload & Shell Selector
@@ -809,11 +817,13 @@ export class HUD {
     this.shellPillEls[1].classList.toggle('is-active-shell', t.activeShellIndex === 1);
 
     const cannonTitleEl = this.cannonStatusEl.previousElementSibling as HTMLElement | null;
+    const isAir = t.altitudeM !== undefined;
+    const airGunSelected = isAir && t.activeShellIndex === 1;
     if (cannonTitleEl) {
-      cannonTitleEl.textContent = t.vehicleClass === 'littlebird' ? 'Missile pod' : t.vehicleClass === 'rocket' ? 'Rocket pod' : 'Main gun';
+      cannonTitleEl.textContent = airGunSelected ? t.shell1Code : isAir ? 'Missile pod' : t.vehicleClass === 'rocket' ? 'Rocket pod' : 'Main gun';
     }
 
-    const cannonP = t.hasMainCannon ? clamp01(t.cannonReloadProgress) : 1;
+    const cannonP = t.hasMainCannon && !airGunSelected ? clamp01(t.cannonReloadProgress) : 1;
     const cannonReady = cannonP >= 0.999;
     this.cannonBarFillEl.style.width = `${(cannonP * 100).toFixed(1)}%`;
 
@@ -829,8 +839,11 @@ export class HUD {
     if (t.vehicleClass === 'support' && t.activeShellIndex === 1) {
       cannonStr = t.fpvSlotStatus ?? 'FPV · NEXT UPDATE';
       cannonBadge = 'neutral';
+    } else if (airGunSelected) {
+      cannonStr = t.mgOverheated ? 'Cooling' : 'Ready';
+      cannonBadge = t.mgOverheated ? 'reload' : 'ready';
     } else if (t.salvoSize) {
-      const ordnance = t.vehicleClass === 'support' ? 'SAM' : t.vehicleClass === 'littlebird' ? 'Missiles' : 'Rockets';
+      const ordnance = t.vehicleClass === 'support' ? 'SAM' : isAir ? 'Missiles' : 'Rockets';
       const emptyLabel = t.vehicleClass === 'support' ? 'SAM empty' : 'Pod empty';
       if (t.rocketsLeft > 0) {
         cannonStr = `${ordnance} ${t.rocketsLeft} / ${t.salvoSize ?? 6}`;
@@ -2089,7 +2102,32 @@ export class HUD {
     const sub = document.createElement('p');
     sub.className = 'fcs-briefing-sub';
     sub.textContent = '6 vs 6 team deathmatch. No score limit.';
-    head.append(title, sub);
+    const modelCredit = document.createElement('p');
+    modelCredit.className = 'fcs-briefing-sub';
+    modelCredit.append('Little Bird airframe: ');
+    const sourceLink = document.createElement('a');
+    sourceLink.href = 'https://sketchfab.com/3d-models/helicopters-mh-6-little-bird-69cb05db3fc3483cb729734262abf28e';
+    sourceLink.textContent = 'mario low poly';
+    const licenseLink = document.createElement('a');
+    licenseLink.href = 'https://creativecommons.org/licenses/by/4.0/';
+    licenseLink.textContent = 'CC BY 4.0';
+    for (const link of [sourceLink, licenseLink]) {
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.style.color = 'inherit';
+    }
+    modelCredit.append(sourceLink, ' · ', licenseLink, ' · Modified');
+    const apacheSource = document.createElement('a');
+    const apacheSourcePath = './assets/models/apache-source.zip';
+    apacheSource.textContent = 'Apache: Alex Park / FlightGear (source & GPL)';
+    apacheSource.href = apacheSourcePath;
+    apacheSource.download = 'apache-source.zip';
+    apacheSource.style.color = 'inherit';
+    if (window.__EMBEDDED_VFS__) {
+      void assetUrl(apacheSourcePath, 'application/zip').then((url) => { apacheSource.href = url; });
+    }
+    modelCredit.append(' | ', apacheSource);
+    head.append(title, sub, modelCredit);
     modal.setAttribute('role', 'dialog');
     modal.setAttribute('aria-modal', 'true');
     modal.setAttribute('aria-labelledby', title.id);

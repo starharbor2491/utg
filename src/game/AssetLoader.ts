@@ -16,6 +16,7 @@ import {
   meshoptInitialize,
 } from 'playcanvas';
 import { MeshoptDecoder } from 'meshoptimizer';
+import { buildApacheRig } from './models/Apache';
 import { buildRocketLauncherRig } from './models/RocketLauncher';
 import { buildSupportVehicleRig } from './models/SupportVehicle';
 import { buildLittleBirdRig } from './models/LittleBird';
@@ -30,7 +31,7 @@ import type { Team, VehicleClass } from './types';
 
 export type ModelKey =
   | 'player_mbt_lod1' | 'humvee' | 'ifv' | 'ruined_building' | 'guard_tower'
-  | 'fuel_station' | 'boulder_large' | 'boulder_medium' | 'tree' | 'barrier_wall' | 'supply_crates';
+  | 'fuel_station' | 'boulder_large' | 'boulder_medium' | 'tree' | 'barrier_wall' | 'supply_crates' | 'littlebird' | 'apache';
 
 export interface WheelNodeBinding { node: Entity; side: 'L' | 'R'; radius: number }
 
@@ -51,6 +52,7 @@ export interface InstantiatedTankRig {
   articulate?: (gunPitch: number) => void;
   tracks?: { side: 'L' | 'R'; advance: (meters: number) => void }[];
   spinRotors?: (dt: number) => void;
+  spinGatling?: (dt: number) => void;
   hullMeshes: Entity[];
 }
 
@@ -82,6 +84,8 @@ const MODEL_PATHS: Record<ModelKey, string> = {
   tree: './assets/models/tree.glb',
   barrier_wall: './assets/models/barrier_wall.glb',
   supply_crates: './assets/models/supply_crates.glb',
+  littlebird: './assets/models/littlebird.glb',
+  apache: './assets/models/apache.glb',
 };
 
 declare global {
@@ -112,7 +116,7 @@ async function embeddedUrl(path: string, mime: string): Promise<string | null> {
   return URL.createObjectURL(new Blob([bytes as unknown as BlobPart], { type: mime }));
 }
 
-async function assetUrl(path: string, mime: string): Promise<string> {
+export async function assetUrl(path: string, mime: string): Promise<string> {
   return await embeddedUrl(path, mime) ?? path;
 }
 
@@ -220,7 +224,7 @@ export async function loadAllGameAssets(
 
 function prepareModelMaterialsAndShadows(root: Entity, key: ModelKey): void {
   const isFoliage = key === 'tree';
-  const isVehicle = key === 'player_mbt_lod1' || key === 'humvee' || key === 'ifv';
+  const isVehicle = key === 'player_mbt_lod1' || key === 'humvee' || key === 'ifv' || key === 'littlebird' || key === 'apache';
   const isSmallProp = key === 'boulder_medium' || key === 'barrier_wall' || key === 'supply_crates';
   if (isFoliage) {
     const remove: Entity[] = [];
@@ -246,6 +250,20 @@ function prepareModelMaterialsAndShadows(root: Entity, key: ModelKey): void {
       if (!(mat instanceof StandardMaterial)) continue;
       mat.reflectivity = isFoliage ? 0.8 : 1.08;
       mat.useDynamicRefraction = false;
+      if (key === 'apache') {
+        // The converted GLB already carries distinct livery, metal, and glazing finishes.
+        if (obj.name === 'Apache_Canopy') {
+          mat.depthWrite = false;
+          obj.render!.castShadows = false;
+        }
+        mat.update();
+        continue;
+      }
+      if (key === 'littlebird' && mat.name === 'vidrio') {
+        mat.refraction = 0;
+        mat.opacity = 0.40;
+        mat.depthWrite = false;
+      }
       if (isFoliage && (mat.alphaTest > 0 || mName.includes('leaves'))) {
         mat.cull = CULLFACE_NONE;
         mat.twoSidedLighting = true;
@@ -264,6 +282,15 @@ function prepareModelMaterialsAndShadows(root: Entity, key: ModelKey): void {
       mat.update();
     }
   });
+  if (key === 'littlebird') {
+    // The source faces +Z with its origin under the rotor; seat its skids at the existing rig size.
+    const scale = 0.70;
+    // Container children aren't active until their template is attached to a scene.
+    const minY = worldBounds(root, undefined, true, true).min.y;
+    if (!Number.isFinite(minY)) throw new Error('Little Bird airframe has no measurable geometry.');
+    root.setLocalScale(scale, scale, scale);
+    root.setLocalPosition(0, -minY * scale, 0);
+  }
 }
 
 export function instantiateTankRig(assets: LoadedGameAssets, vehicleClass: VehicleClass, team: Team): InstantiatedTankRig {
@@ -276,7 +303,8 @@ export function instantiateTankRig(assets: LoadedGameAssets, vehicleClass: Vehic
 function buildVehicleRig(assets: LoadedGameAssets, vehicleClass: VehicleClass, team: Team): InstantiatedTankRig {
   if (vehicleClass === 'rocket') return buildRocketLauncherRig(team);
   if (vehicleClass === 'support') return buildSupportVehicleRig(team);
-  if (vehicleClass === 'littlebird') return buildLittleBirdRig(team);
+  if (vehicleClass === 'littlebird') return buildLittleBirdRig(team, assets.models.littlebird);
+  if (vehicleClass === 'apache') return buildApacheRig(team, assets.models.apache);
 
   const root = group(`tank_${team}_${vehicleClass}`);
   const hullTiltGroup = group('hull_tilt_group', root);

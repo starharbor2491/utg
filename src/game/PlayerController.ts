@@ -8,6 +8,7 @@ const DEFAULT_TP_DISTANCE = 11.5;
 const MIN_TP_DISTANCE = 7.5;
 const MAX_TP_DISTANCE = 18.0;
 const MAX_AIM_RAY_DIST = 550;
+const VERTICAL_PITCH = Math.PI / 2;
 
 function wrapAnglePi(a: number): number {
   let r = (a + Math.PI) % (Math.PI * 2);
@@ -31,6 +32,7 @@ export class PlayerController {
    *  the vehicle brakes, and the camera sits at the drone. */
   public droneMode = false;
   private aircraftControls = false;
+  private flightPitchDelta = 0;
   public fpvCamPos: Vec3 | null = null;
   public fpvCamQuat: Quat | null = null;
   private _droneDX = 0;
@@ -51,6 +53,7 @@ export class PlayerController {
   private orbitPitch = 0;
   private readonly fpvLookRotation = new Quat();
   private readonly fpvCombinedRotation = new Quat();
+  private readonly airCameraRotation = new Quat();
   private _sniperZoom = false;
   private rmbZoomDownTime = 0;
   private rmbTurnedZoomOn = false;
@@ -142,6 +145,7 @@ export class PlayerController {
       }
 
       if (alt && !this.freeLooking) {
+        this.flightPitchDelta = 0;
         this.orbitYaw = this.droneMode ? 0 : this._cameraYaw;
         this.orbitPitch = this.droneMode ? 0 : this._cameraPitch;
         this._edgeLmb = this._edgeRmb = false;
@@ -258,9 +262,10 @@ export class PlayerController {
       const sens = baseSens * fovScale;
 
       this._cameraYaw = wrapAnglePi(this._cameraYaw - dx * sens);
+      if (this.aircraftControls) this.flightPitchDelta += dy * sens;
 
-      const minPitch = this.aircraftControls ? -0.68 : this._sniperZoom ? -0.34 : -0.48;
-      const maxPitch = this.aircraftControls ? 0.66 : this._sniperZoom ? 0.46 : 0.62;
+      const minPitch = this.aircraftControls ? -VERTICAL_PITCH : this._sniperZoom ? -0.34 : -0.48;
+      const maxPitch = this.aircraftControls ? VERTICAL_PITCH : this._sniperZoom ? 0.46 : 0.62;
       this._cameraPitch = clamp(
         this._cameraPitch - dy * sens,
         minPitch,
@@ -359,6 +364,7 @@ export class PlayerController {
 
   private clearHeldInput(): void {
     this.keysDown.clear();
+    this.flightPitchDelta = 0;
     this.mouseLeftDown = this.mouseRightDown = false;
     this._edgeLmb = this._edgeRmb = false;
     this._droneDX = this._droneDY = 0;
@@ -368,7 +374,7 @@ export class PlayerController {
 
   public setViewAngles(yaw: number, pitch: number): void {
     this._cameraYaw = wrapAnglePi(yaw);
-    this._cameraPitch = clamp(pitch, -0.55, 0.65);
+    this._cameraPitch = this.aircraftControls ? clamp(pitch, -VERTICAL_PITCH, VERTICAL_PITCH) : clamp(pitch, -0.55, 0.65);
   }
 
   public setSniperZoom(enabled: boolean): void {
@@ -404,7 +410,12 @@ export class PlayerController {
     shakeTrauma: number
   ): TankIntent {
     const safeDt = Math.min(Math.max(dt, 0.0001), 0.08);
+    if (this.aircraftControls && playerTank.stats.drive !== 'air') {
+      this._cameraPitch = clamp(this._cameraPitch, this._sniperZoom ? -0.34 : -0.48, this._sniperZoom ? 0.46 : 0.62);
+    }
     this.aircraftControls = playerTank.stats.drive === 'air';
+    const flightPitchDelta = this.flightPitchDelta;
+    this.flightPitchDelta = 0;
     this.frameLmb = this._edgeLmb;
     this.frameRmb = this._edgeRmb;
     this._edgeLmb = false;
@@ -446,10 +457,11 @@ export class PlayerController {
     let targetFovDeg: number;
     if (this.sniperZoom && playerTank.alive) {
       // Gunner optic mounted just above/forward of turret roof so hull never occludes view
+      const opticOffset = this.aircraftControls ? playerTank.stats.hullHalfLength + 0.6 : 1.25;
       this._baseCamPos.set(
-        playerTank.position.x + sinY * 1.25,
-        playerTank.position.y + 1.95 + sinP * 0.25,
-        playerTank.position.z + cosY * 1.25
+        playerTank.position.x + sinY * opticOffset,
+        playerTank.position.y + (this.aircraftControls ? 2.55 : 1.95) + sinP * 0.25,
+        playerTank.position.z + cosY * opticOffset
       );
       const minGroundY = world.getHeightAt(this._baseCamPos.x, this._baseCamPos.z) + 0.65;
       if (this._baseCamPos.y < minGroundY) {
@@ -465,11 +477,8 @@ export class PlayerController {
       );
 
       const dist = freeLook ? Math.max(7, this.tpDistance) : this.tpDistance;
-      this._baseCamPos.set(
-        this._anchor.x - this._lookDir.x * dist,
-        freeLook ? this._anchor.y - this._lookDir.y * dist : this._anchor.y + 1.85 - this._lookDir.y * dist * 0.78,
-        this._anchor.z - this._lookDir.z * dist
-      );
+      this._baseCamPos.copy(this._anchor).addScaled(this._lookDir, -dist);
+      if (!freeLook && !this.aircraftControls) this._baseCamPos.y += 1.85 + this._lookDir.y * dist * 0.22;
 
       // Pull camera forward if a tall building/cliff sits between anchor and chase camera
       this._camOffsetDir.sub2(this._baseCamPos, this._anchor);
@@ -482,7 +491,7 @@ export class PlayerController {
           (camBlockHit.hitKind === 'terrain' ||
             (camBlockHit.obstacle && !camBlockHit.obstacle.lightCover))
         ) {
-          const safeDist = Math.max(freeLook ? 0.2 : 3.4, camBlockHit.distance - 0.55);
+          const safeDist = Math.max(freeLook || this.aircraftControls ? 0.2 : 3.4, camBlockHit.distance - 0.55);
           this._baseCamPos.copy(this._anchor).addScaled(this._camOffsetDir, safeDist);
         }
       }
@@ -501,6 +510,12 @@ export class PlayerController {
     // Smoothly interpolate camera FOV
     const fovLerp = 1 - Math.exp(-16 * safeDt);
     this.currentFovDeg += (targetFovDeg - this.currentFovDeg) * fovLerp;
+    const camera = this.camera.camera!;
+    const far = this.aircraftControls ? Math.max(1400, Math.ceil((this._baseCamPos.y + 950) / 100) * 100) : 1400;
+    if (camera.farClip !== far) {
+      camera.farClip = far;
+      camera.nearClip = Math.max(0.3, Math.min(3, far / 5000));
+    }
     if (!this.fpvCamPos && Math.abs(this.camera.camera!.fov - this.currentFovDeg) > 0.01) {
       this.camera.camera!.fov = this.currentFovDeg;
     }
@@ -552,7 +567,11 @@ export class PlayerController {
     } else {
       this.camera.setPosition(this._finalCamPos);
       if (freeLook) {
-        this.camera.lookAt(this._anchor);
+        this.camera.lookAt(this._anchor, this.aircraftControls ? this._camUp : Vec3.UP);
+      } else if (this.aircraftControls) {
+        // Build from yaw and pitch so the camera basis stays defined at the poles.
+        const pitch = clamp(viewPitch + shakePitch, -VERTICAL_PITCH, VERTICAL_PITCH);
+        this.camera.setRotation(quatFromEuler(this.airCameraRotation, pitch, viewYaw + shakeYaw + Math.PI, 0, 'YXZ'));
       } else {
         const effYaw = viewYaw + shakeYaw;
         const effPitch = clamp(viewPitch + shakePitch, -1.35, 1.35);
@@ -602,10 +621,10 @@ export class PlayerController {
 
     this.intent.throttle = fwd - rev;
     this.intent.steer = left - right;
-    this.intent.brake = this.keysDown.has('KeyX');
+    this.intent.brake = !this.aircraftControls && this.keysDown.has('KeyX');
     this.intent.flightYaw = this.aircraftControls ? this._cameraYaw : undefined;
-    this.intent.flightPitch = this.aircraftControls ? -this._cameraPitch : undefined;
-    this.intent.lift = this.aircraftControls
+    this.intent.flightPitchDelta = this.aircraftControls && this.pointerLocked && !freeLook ? flightPitchDelta : undefined;
+    this.intent.collectiveAdjust = this.aircraftControls
       ? Number(this.keysDown.has('ShiftLeft') || this.keysDown.has('ShiftRight')) -
         Number(this.keysDown.has('ControlLeft') || this.keysDown.has('ControlRight'))
       : undefined;

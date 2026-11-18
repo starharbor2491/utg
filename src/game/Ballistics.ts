@@ -725,7 +725,7 @@ export class BallisticsManager {
     slot.age = 0;
     slot.maxAge = 1.45;
     slot.isPlayer = shooter.isHuman;
-    const mgBaseDamage = beltSpec ? beltSpec.directDamage : 2.8;
+    const mgBaseDamage = beltSpec ? beltSpec.directDamage : 5.4;
     slot.directDamage = shooter.isHuman ? mgBaseDamage : mgBaseDamage * 0.6;
     slot.splashDamage = beltSpec ? beltSpec.splashDamage : 0;
     slot.splashRadius = beltSpec ? beltSpec.splashRadius : 0;

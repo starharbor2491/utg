@@ -54,6 +54,7 @@ export class Match {
       rocket: new Tank('you_rocket', 'blue', 'rocket', assets, spawn, blueYaw, true, 'You'),
       support: new Tank('you_support', 'blue', 'support', assets, spawn, blueYaw, true, 'You'),
       littlebird: new Tank('you_littlebird', 'blue', 'littlebird', assets, spawn, blueYaw, true, 'You'),
+      apache: new Tank('you_apache', 'blue', 'apache', assets, spawn, blueYaw, true, 'You'),
     };
 
     this.tanks.push(this.humanVehicles.normal);

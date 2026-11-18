@@ -11,7 +11,7 @@
  * - Armour is in mm per face: front / side / rear / top / bottom.
  */
 
-export type DamageClass = 'normal' | 'heavy' | 'ifv' | 'humvee' | 'rocket' | 'support' | 'littlebird';
+export type DamageClass = 'normal' | 'heavy' | 'ifv' | 'humvee' | 'rocket' | 'support' | 'littlebird' | 'apache';
 
 export type ModuleId =
   | 'engine'
@@ -260,6 +260,19 @@ export const DAMAGE_LAYOUTS: Record<DamageClass, ClassDamageLayout> = {
       { id: 'gunner', crew: 'gunner', boxes: [nx(0.5, 0.42, 0.76, 0.76, 0.83, 0.96)] },
       { id: 'gun', boxes: [nx(0, 0.05, 0.08, 0.2, 0.95, 1, TURRET, EXT)] },
       { id: 'launcher', boxes: [nx(0.8, 0.02, 0, 1, 0.98, 1, TURRET, EXT)] },
+    ],
+  },
+  apache: {
+    softSkin: true,
+    hullArmor: { front: 30, side: 22, rear: 14, top: 16, bottom: 18 },
+    turretArmor: { front: 20, side: 16, rear: 12, top: 15, bottom: 12 },
+    modules: [
+      { id: 'engine', boxes: [nx(0.14, 0.58, 0.48, 0.86, 0.89, 0.70)] },
+      { id: 'fuel', boxes: [nx(0.32, 0.23, 0.49, 0.68, 0.51, 0.69)] },
+      { id: 'driver', crew: 'driver', boxes: [nx(0.33, 0.52, 0.72, 0.67, 0.85, 0.83)] },
+      { id: 'gunner', crew: 'gunner', boxes: [nx(0.34, 0.38, 0.83, 0.66, 0.70, 0.94)] },
+      { id: 'gun', boxes: [nx(0, 0, 0, 1, 1, 1, TURRET, EXT)] },
+      { id: 'launcher', boxes: [nx(0, 0.32, 0.44, 0.24, 0.64, 0.71, HULL, EXT), nx(0.76, 0.32, 0.44, 1, 0.64, 0.71, HULL, EXT)] },
     ],
   },
 };

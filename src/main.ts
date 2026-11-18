@@ -137,6 +137,7 @@ function markerCodeForClass(cls: VehicleClass): string {
   if (cls === 'rocket') return 'Rocket';
   if (cls === 'support') return 'Support';
   if (cls === 'littlebird') return 'Little Bird';
+  if (cls === 'apache') return 'Apache';
   return 'MBT';
 }
 
@@ -519,8 +520,8 @@ async function bootstrap(): Promise<void> {
     onTrackDust: (pos: Vec3, intensity01: number) => {
       effects.spawnTrackDust(pos, intensity01);
     },
-    onWaterWake: (pos: Vec3, intensity01: number) => {
-      effects.spawnWaterWake(pos, intensity01);
+    onWaterWake: (pos: Vec3, intensity01: number, sprayX: number, sprayZ: number, bow: boolean) => {
+      effects.spawnWaterWake(pos, intensity01, sprayX, sprayZ, bow);
     },
     onWreckSmoke: (pos: Vec3) => {
       effects.spawnWreckSmoke(pos);
@@ -817,7 +818,11 @@ async function bootstrap(): Promise<void> {
     const vh = window.innerHeight;
     projectWorldToScreen(controller.commanderAimWorld, camera, vw, vh, commanderAimScreen, _projScratch);
 
-    playerTank.getMuzzleWorld(_muzzlePos, _muzzleDir);
+    if (playerTank.stats.drive === 'air' && playerTank.selectedShellIndex === 1) {
+      playerTank.getCoaxWorld(_muzzlePos, _muzzleDir);
+    } else {
+      playerTank.getMuzzleWorld(_muzzlePos, _muzzleDir);
+    }
     const activeShell = playerTank.activeShell;
     const rangeMeters = predictBarrelImpact(
       _muzzlePos,
@@ -905,7 +910,7 @@ async function bootstrap(): Promise<void> {
         ? Math.max(0, playerTank.position.y - world.getHeightAt(playerTank.position.x, playerTank.position.z))
         : undefined,
       gearLabel: 'F',
-      throttle: lastPlayerThrottle,
+      throttle: playerTank.stats.drive === 'air' ? playerTank.flightThrottle : lastPlayerThrottle,
       hullYaw: playerTank.hullYaw,
       turretWorldYaw: playerTank.turretWorldYaw,
       cameraYaw: controller.droneMode
@@ -1508,6 +1513,10 @@ async function bootstrap(): Promise<void> {
         y: Math.round(t.position.y * 10) / 10,
         z: Math.round(t.position.z * 10) / 10,
         yaw: t.hullYaw,
+        flight: t.stats.drive === 'air' ? {
+          throttle: t.flightThrottle, pitch: t.hullTilt.x, roll: t.hullTilt.z, climb: t.velocity.y,
+          mgHeat: t.mgHeat,
+        } : undefined,
         seeker: t.seekerLock
           ? {
               target: t.seekerLock.target?.id ?? null,
@@ -2027,7 +2036,7 @@ async function bootstrap(): Promise<void> {
     },
     runThreeAudit: () => {
       const results: Record<string, AuditIssue[]> = {};
-      const testClasses: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket', 'support', 'littlebird'];
+      const testClasses: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket', 'support', 'littlebird', 'apache'];
       for (const cls of testClasses) {
         const tempTank = new Tank(`audit_${cls}`, 'blue', cls, assets, new Vec3(0, 0, 0), 0, false, 'Audit');
         results[cls] = auditThreeObject(tempTank.root, {

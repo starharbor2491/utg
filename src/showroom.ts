@@ -22,7 +22,7 @@ import { findByName, meshNode, worldBounds } from './game/engine/scene';
 import type { Team, VehicleClass } from './game/types';
 
 // Dev-only vehicle showroom. Query params remain compatible with the Three version.
-const CLASSES: readonly VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket', 'support', 'littlebird'];
+const CLASSES: readonly VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket', 'support', 'littlebird', 'apache'];
 const TEAMS: readonly Team[] = ['blue', 'red'];
 const params = new URLSearchParams(location.search);
 const singleClass = params.get('v') as VehicleClass | null;

@@ -119,12 +119,12 @@ const IFV_BELTS: readonly [ShellSpec, ShellSpec] = [
     shortCode: '30MM APDS',
     displayName: '30MM APDS-T SABOT',
     muzzleSpeed: 560,
-    directDamage: 28,
+    directDamage: 40,
     splashDamage: 0,
     splashRadius: 0,
     penetrationDepth: 2.35,
     penMm: 90,
-    moduleDamage: { slug: 0.55, spall: 0.15, spallCount: 5 },
+    moduleDamage: { slug: 0.72, spall: 0.20, spallCount: 5 },
     spallCount: 5,
     spallWeight: 0.34,
     explosionScale: 0.25,
@@ -136,12 +136,12 @@ const IFV_BELTS: readonly [ShellSpec, ShellSpec] = [
     shortCode: '30MM HEI',
     displayName: '30MM HEI-T EXPLOSIVE',
     muzzleSpeed: 450,
-    directDamage: 18,
-    splashDamage: 16,
+    directDamage: 27,
+    splashDamage: 24,
     splashRadius: 3.2,
     penetrationDepth: 0.95,
     penMm: 15,
-    moduleDamage: { slug: 0.3, spall: 0.1, spallCount: 2 },
+    moduleDamage: { slug: 0.43, spall: 0.14, spallCount: 2 },
     spallCount: 6,
     spallWeight: 0.25,
     explosionScale: 0.36,
@@ -156,12 +156,12 @@ const HUMVEE_50CAL: readonly [ShellSpec, ShellSpec] = [
     shortCode: '12.7 AP',
     displayName: '12.7MM M2 AP',
     muzzleSpeed: 890,
-    directDamage: 9,
+    directDamage: 14,
     splashDamage: 0,
     splashRadius: 0,
     penetrationDepth: 1.2,
     penMm: 22,
-    moduleDamage: { slug: 0.24, spall: 0.08, spallCount: 2 },
+    moduleDamage: { slug: 0.34, spall: 0.11, spallCount: 2 },
     spallCount: 3,
     spallWeight: 0.3,
     explosionScale: 0.18,
@@ -173,12 +173,12 @@ const HUMVEE_50CAL: readonly [ShellSpec, ShellSpec] = [
     shortCode: '12.7 API-T',
     displayName: '12.7MM M2 API-T INCENDIARY',
     muzzleSpeed: 890,
-    directDamage: 7,
-    splashDamage: 6,
+    directDamage: 11,
+    splashDamage: 9,
     splashRadius: 2.4,
     penetrationDepth: 0.9,
     penMm: 8,
-    moduleDamage: { slug: 0.1, spall: 0, spallCount: 0 },
+    moduleDamage: { slug: 0.15, spall: 0, spallCount: 0 },
     spallCount: 4,
     spallWeight: 0.28,
     explosionScale: 0.3,
@@ -287,8 +287,17 @@ const ROCKET_SHELLS: readonly [ShellSpec, ShellSpec] = [
 ];
 
 export function playerDriveScale(cls: VehicleClass): number {
-  return cls === 'humvee' || cls === 'littlebird' ? 1 : 1.25;
+  return cls === 'humvee' || TANK_STATS[cls].drive === 'air' ? 1 : 1.25;
 }
+
+const LITTLE_BIRD_MISSILE: ShellSpec = {
+  ...SAM_SHELLS[0], id: 'littlebird_missile', shortCode: 'GUIDED', displayName: 'GUIDED MISSILE',
+};
+const APACHE_MISSILE: ShellSpec = {
+  ...ROCKET_SHELLS[0], id: 'apache_missile', shortCode: '16× HE', displayName: 'HIGH-YIELD MISSILE',
+  directDamage: 760, splashDamage: 470, splashRadius: 16, penMm: 260, explosionScale: 2.1,
+  dispersionRad: 0.04, moduleDamage: { slug: 1.15, spall: 0.38, spallCount: 12 },
+};
 
 export const TANK_STATS: Record<VehicleClass, TankStats> = {
   normal: {
@@ -486,18 +495,40 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
     hullTurnRate: 3.5, turretTurnRate: 5, gunElevateRate: 4.8,
     gunMinPitch: -0.85, gunMaxPitch: 0.68,
     hasMainCannon: true, hasCoaxMG: true, infiniteMG: false,
-    cannonReloadTime: 7, mgFireInterval: 0.085, recoilImpulse: 0.02,
+    cannonReloadTime: 3.5, mgFireInterval: 0.085, recoilImpulse: 0.02,
     salvoSize: 2, salvoInterval: 0.65,
     shellMuzzleSpeed: SAM_SHELLS[0].muzzleSpeed,
     shellDirectDamage: SAM_SHELLS[0].directDamage,
     shellSplashDamage: SAM_SHELLS[0].splashDamage,
     shellSplashRadius: SAM_SHELLS[0].splashRadius,
-    shells: [
-      { ...SAM_SHELLS[0], id: 'littlebird_missile', shortCode: 'GUIDED', displayName: 'GUIDED MISSILE' },
-      { ...ROCKET_SHELLS[0], id: 'littlebird_rocket', shortCode: 'ROCKET', displayName: 'UNGUIDED ROCKET', guidance: undefined },
-    ],
+    shells: [LITTLE_BIRD_MISSILE, {
+      ...HUMVEE_50CAL[0], id: 'littlebird_mg', shortCode: 'MG', displayName: 'MACHINE GUN',
+      directDamage: 5.5, muzzleSpeed: 720, penMm: 14, moduleDamage: { slug: 0.12, spall: 0.04, spallCount: 2 },
+    }],
     hitRadius: 1.31, collisionRadius: 1.18,
     drive: 'air', hullHalfWidth: 0.94, hullHalfLength: 1.5,
+  },
+  apache: {
+    vehicleClass: 'apache',
+    displayName: 'APACHE',
+    maxForwardSpeed: 38, maxReverseSpeed: 18,
+    forwardAccel: 9, reverseAccel: 7, brakeDecel: 10,
+    hullTurnRate: 2.25, turretTurnRate: 4.6, gunElevateRate: 4.2,
+    gunMinPitch: -1.04, gunMaxPitch: 0.54,
+    hasMainCannon: true, hasCoaxMG: true, infiniteMG: false,
+    cannonReloadTime: 9, mgFireInterval: 0.066, recoilImpulse: 0.036,
+    salvoSize: 16, salvoInterval: 0,
+    shellMuzzleSpeed: APACHE_MISSILE.muzzleSpeed,
+    shellDirectDamage: APACHE_MISSILE.directDamage,
+    shellSplashDamage: APACHE_MISSILE.splashDamage,
+    shellSplashRadius: APACHE_MISSILE.splashRadius,
+    shells: [APACHE_MISSILE, {
+      ...IFV_BELTS[0], id: 'apache_gatling', shortCode: 'GATLING', displayName: 'HEAVY GATLING',
+      muzzleSpeed: 660, directDamage: 52, penMm: 112,
+      moduleDamage: { slug: 0.88, spall: 0.23, spallCount: 5 }, tracerColorRGB: [9, 5.5, 2],
+    }],
+    hitRadius: 2.25, collisionRadius: 2.1,
+    drive: 'air', hullHalfWidth: 1.1, hullHalfLength: 2.5,
   },
 };
 
@@ -633,6 +664,7 @@ export class Tank implements TankEntity {
   /** Radian pose state written to the rig each step (never read back from quaternions). */
   public readonly hullTilt = { x: 0, y: 0, z: 0 };
   public rotorAngle = 0;
+  public flightThrottle = 0;
 
   public hitCounter = 0;
   /** QA: last takeDamage internals (entry face, pen, modules hit). */
@@ -814,7 +846,7 @@ export class Tank implements TankEntity {
       onFireCannon?: (tank: Tank, pos: Vec3, dir: Vec3, shell: ShellSpec, guideTarget?: TankEntity | null) => void;
       onFireMG?: (tank: Tank, pos: Vec3, dir: Vec3, beltSpec?: ShellSpec) => void;
       onTrackDust?: (pos: Vec3, intensity01: number) => void;
-      onWaterWake?: (pos: Vec3, intensity01: number) => void;
+      onWaterWake?: (pos: Vec3, intensity01: number, sprayX: number, sprayZ: number, bow: boolean) => void;
       onWreckSmoke?: (pos: Vec3) => void;
     },
     seekerExtras?: readonly TankEntity[]
@@ -855,8 +887,8 @@ export class Tank implements TankEntity {
     if (intent?.selectShell === 0 || intent?.selectShell === 1) {
       if (this.selectedShellIndex !== intent.selectShell) {
         this.selectedShellIndex = intent.selectShell;
-        // Brief chamber switch delay only on heavy breech-loaded cannons, instant on IFV dual-feed
-        if (this.stats.hasMainCannon) {
+        // Helicopter slots select separate weapons and do not touch each other's timers.
+        if (this.stats.hasMainCannon && this.stats.drive !== 'air') {
           this.cannonCooldown = Math.max(this.cannonCooldown, this.isHuman ? 0.225 : 0.45);
         }
       }
@@ -981,12 +1013,11 @@ export class Tank implements TankEntity {
     const primarySt = mst(this.stats.salvoSize ? 'launcher' : 'gun');
     const primaryOut = primarySt === 'destroyed';
     const gunnerDisabled = gunnerOut;
-    const isIFV = !this.stats.hasMainCannon;
-    // On IFV ("only machine gun, infinite ammo"), both LMB (fireCannon) and Space (fireMG) fire the 30mm autocannon/MG!
-    const rawMGTrigger = isIFV ? Boolean(intent?.fireCannon || intent?.fireMG) : Boolean(intent?.fireMG);
+    const airborne = this.stats.drive === 'air';
+    const mgIsPrimary = !this.stats.hasMainCannon || (airborne && this.selectedShellIndex === 1);
+    const rawMGTrigger = Boolean(intent?.fireMG || (mgIsPrimary && intent?.fireCannon));
     // Classes without a separate main cannon lose their only weapon when 'gun' dies;
     // MBTs/heavy keep the coax MG when the main gun is knocked out.
-    const airborne = this.stats.drive === 'air';
     const mgWeaponOut = (!this.stats.hasMainCannon || airborne) && gunSt === 'destroyed';
     const wantsMG = Boolean(
       rawMGTrigger && this.stats.hasCoaxMG && !this.mgOverheated && !gunnerDisabled && !mgWeaponOut
@@ -1016,18 +1047,11 @@ export class Tank implements TankEntity {
     if (airborne) {
       this.stepFlight(safeDt, intent, world, mobilityMult, driverOut, mst('engine') === 'destroyed');
     } else {
-    // Fording: depth > 0.25 m scrubs top speed (tracked -> x0.5, wheeled -> x0.35
-    // at 1.1 m) and bleeds acceleration; wakes replace track dust in water.
+    // Water adds drag gradually, so momentum carries the vehicle across the bank.
     const waterDepth = world.getWaterDepthAt?.(this.position.x, this.position.z) ?? 0;
-    const fordT = waterDepth > 0.25 ? Math.min(1.1, waterDepth) / 1.1 : 0;
-    const fordMul =
-      fordT > 0
-        ? this.stats.drive === 'wheeled'
-          ? 1 - 0.65 * fordT
-          : 1 - 0.5 * fordT
-        : 1;
+    const fordT = clamp(waterDepth / 1.1, 0, 1);
     const driveScale = this.isHuman ? playerDriveScale(this.stats.vehicleClass) : 0.6;
-    const accelMul = (fordT > 0 ? 0.72 : 1) * driveScale;
+    const accelMul = (1 - 0.12 * fordT) * driveScale;
 
     const rawThrottle = intent ? clamp(intent.throttle, -1, 1) : 0;
     const rawSteer = intent ? clamp(intent.steer, -1, 1) : 0;
@@ -1041,8 +1065,8 @@ export class Tank implements TankEntity {
       if (Math.abs(this.speed) <= decel) this.speed = 0;
       else this.speed -= Math.sign(this.speed) * decel;
     } else if (Math.abs(throttle) > 0.02) {
-      const maxFwd = this.stats.maxForwardSpeed * driveScale * mobilityMult * fordMul;
-      const maxRev = this.stats.maxReverseSpeed * driveScale * mobilityMult * fordMul;
+      const maxFwd = this.stats.maxForwardSpeed * driveScale * mobilityMult;
+      const maxRev = this.stats.maxReverseSpeed * driveScale * mobilityMult;
       if (throttle > 0) {
         const accel = this.speed < 0 ? this.stats.brakeDecel : this.stats.forwardAccel * mobilityMult * accelMul;
         this.speed = Math.min(maxFwd, this.speed + accel * rawThrottle * safeDt);
@@ -1051,10 +1075,11 @@ export class Tank implements TankEntity {
         this.speed = Math.max(-maxRev, this.speed + accel * rawThrottle * safeDt);
       }
     } else {
-      const drag = 6.2 * safeDt;
+      const drag = (this.isHuman ? 4.4 : 6.2) * safeDt;
       if (Math.abs(this.speed) <= drag) this.speed = 0;
       else this.speed -= Math.sign(this.speed) * drag;
     }
+    this.speed *= Math.exp(-fordT * (this.stats.drive === 'wheeled' ? 0.23 : 0.18) * safeDt);
 
     const roadBoost = 1.0 + 0.08 * world.getRoadFactorAt(this.position.x, this.position.z);
     const effectiveSpeed = this.speed * roadBoost;
@@ -1088,8 +1113,8 @@ export class Tank implements TankEntity {
     if (this.isHuman && Math.abs(effectiveSpeed) > 0.12) {
       // Keep some sideways momentum as the hull rotates, then recover grip.
       const oldSlip = -cosH * this.velocity.x + sinH * this.velocity.z;
-      const grip = brake ? 2.8 : isWheeled ? 4 : 6;
-      const maxSlip = Math.abs(effectiveSpeed) * (brake ? 0.46 : 0.35);
+      const grip = (brake ? 1.4 : isWheeled ? 1.8 : 2.6) * (1 - 0.45 * fordT);
+      const maxSlip = Math.abs(effectiveSpeed) * (brake ? 0.78 : 0.62);
       slip = clamp(oldSlip * Math.exp(-grip * safeDt), -maxSlip, maxSlip);
     }
     this.velocity.set(sinH * effectiveSpeed - cosH * slip, 0, cosH * effectiveSpeed + sinH * slip);
@@ -1144,32 +1169,28 @@ export class Tank implements TankEntity {
     }
 
     const absSpd = Math.abs(effectiveSpeed);
-    const wantDust = absSpd > 3.0 && (callbacks?.onTrackDust || (fordT > 0 && callbacks?.onWaterWake));
-    if (wantDust) {
-      this.dustAccum += safeDt * (0.4 + absSpd * 0.45);
-      if (this.dustAccum >= 0.16) {
+    if (absSpd > 2.5 && (callbacks?.onTrackDust || callbacks?.onWaterWake)) {
+      this.dustAccum += safeDt;
+      if (this.dustAccum >= (waterDepth > 0.01 ? 0.085 : 0.115)) {
         this.dustAccum = 0;
-        const intensity = clamp(absSpd / this.stats.maxForwardSpeed, 0.2, 0.9);
-        const rightX = -cosH;
-        const rightZ = sinH;
-        const rearDist = isWheeled
-          ? -this.stats.hullHalfLength * 0.62
-          : -3.2 * Math.sign(effectiveSpeed || 1);
-        const sideOff = isWheeled ? this.stats.hullHalfWidth * 0.8 : 1.4;
-        const sides = isWheeled ? 2 : 1;
-        for (let sIdx = 0; sIdx < sides; sIdx++) {
-          const sideSign = sides === 2 ? (sIdx === 0 ? -1 : 1) : 1;
-          _tmpVecA.set(
-            this.position.x + sinH * rearDist + rightX * sideOff * sideSign,
-            this.position.y + 0.25,
-            this.position.z + cosH * rearDist + rightZ * sideOff * sideSign
-          );
-          if (fordT > 0 && callbacks?.onWaterWake) {
-            const wY = world.getWaterLevelAt?.(_tmpVecA.x, _tmpVecA.z) ?? this.position.y;
-            _tmpVecA.y = wY + 0.12;
-            callbacks.onWaterWake(_tmpVecA, intensity);
-          } else {
-            callbacks?.onTrackDust?.(_tmpVecA, intensity);
+        const bow = this.stats.hullHalfLength * 0.77 * Math.sign(effectiveSpeed);
+        const side = this.stats.hullHalfWidth * 0.8;
+        const intensity = clamp(absSpd / this.stats.maxForwardSpeed, 0.16, 1);
+        for (let sideSign = -1; sideSign <= 1; sideSign += 2) {
+          const sx = -cosH * sideSign, sz = sinH * sideSign;
+          for (let end = -1; end <= 1; end += 2) {
+            const x = this.position.x + sinH * bow * end + sx * side;
+            const z = this.position.z + cosH * bow * end + sz * side;
+            const depth = world.getWaterDepthAt?.(x, z) ?? 0;
+            if (depth > 0.025 && callbacks.onWaterWake) {
+              const k = intensity * clamp(depth * 2.4, 0.18, 1);
+              const spray = end === 1 ? absSpd * 0.29 : absSpd * 0.08;
+              _tmpVecA.set(x, (world.getWaterLevelAt?.(x, z) ?? world.getHeightAt(x, z) + depth) + 0.05, z);
+              callbacks.onWaterWake(_tmpVecA, k, sx * spray + this.velocity.x * 0.12, sz * spray + this.velocity.z * 0.12, end === 1);
+            } else if (end === -1 && depth <= 0.025) {
+              _tmpVecA.set(x, this.position.y + 0.25, z);
+              callbacks.onTrackDust?.(_tmpVecA, intensity);
+            }
           }
         }
       }
@@ -1227,7 +1248,7 @@ export class Tank implements TankEntity {
             }
           }
         } else if (
-          intent?.fireCannon &&
+          intent?.fireCannon && !mgIsPrimary &&
           this.cannonCooldown <= 0 &&
           this._rocketsLeft > 0 &&
           canFireCannon &&
@@ -1238,6 +1259,11 @@ export class Tank implements TankEntity {
           this.salvoFired = 0;
           this.salvoSpec = this.activeShell;
           this.salvoGuideTarget = this.seekerLocked ? this.seekerTarget : null;
+          if (this.stats.salvoInterval === 0) {
+            while (this._rocketsLeft > 0) this._fireNextRocket(callbacks);
+            this.salvoActive = false;
+            this.cannonCooldown = this.cannonReloadDuration * reloadMult;
+          }
         }
       } else if (intent?.fireCannon && this.cannonCooldown <= 0 && canFireCannon) {
         this.cannonCooldown = this.cannonReloadDuration * reloadMult;
@@ -1247,6 +1273,7 @@ export class Tank implements TankEntity {
     }
 
     // Fire Coax MG (Normal/Heavy) OR Primary Infinite-Ammo 30mm Chain-Gun (IFV)
+    if (wantsMG) this.rig.spinGatling?.(safeDt);
     if (wantsMG && this.mgCooldown <= 0) {
       this.mgCooldown = this.stats.mgFireInterval * (this.isHuman ? 0.5 : 1);
       if (!this.stats.infiniteMG) {
@@ -1264,14 +1291,16 @@ export class Tank implements TankEntity {
         this,
         _tmpVecA,
         _tmpVecB,
-        isIFV ? this.activeShell : undefined
+        airborne ? this.stats.shells[1] : mgIsPrimary ? this.activeShell : undefined
       );
     }
   }
 
   private stepFlight(dt: number, intent: TankIntent | null, world: TerrainQuery, mobility: number, pilotOut: boolean, engineOut: boolean): void {
-    const lift = pilotOut ? 0 : intent?.lift ?? 0;
-    const rotorDt = dt * (engineOut ? 0.32 : 1 + lift * 0.065);
+    if (!pilotOut && intent?.collectiveAdjust) {
+      this.flightThrottle = clamp(this.flightThrottle + intent.collectiveAdjust * dt * 0.9, 0, 1);
+    }
+    const rotorDt = dt * (engineOut ? 0.22 : 0.42 + this.flightThrottle * 0.7);
     this.rig.spinRotors?.(rotorDt);
     this.rotorAngle += 35 * rotorDt;
     const yaw = intent?.flightYaw;
@@ -1288,20 +1317,18 @@ export class Tank implements TankEntity {
     const forwardSpeed = v.x * sin + v.z * cos;
     const sideSpeed = v.x * cos - v.z * sin;
     const pose = this.hullTilt;
-    const pitchCmd = intent?.brake ? -0.045 * forwardSpeed
-      : (intent?.flightPitch ?? 0) * 0.86 + (intent?.throttle ?? 0) * 0.52;
-    const rollCmd = intent?.brake ? 0.055 * sideSpeed : -(intent?.steer ?? 0) * 0.47;
-    const control = pilotOut || engineOut || (grounded && lift <= 0) ? 0 : Math.sqrt(mobility);
-    pose.x = damp(pose.x, clamp(pitchCmd, -0.52, 0.61) * control, 4.6, dt);
-    pose.z = damp(pose.z, clamp(rollCmd, -0.5, 0.5) * control, 5.2, dt);
+    const control = pilotOut || engineOut ? 0 : Math.sqrt(mobility);
+    const cyclicStep = Math.min(1, this.stats.hullTurnRate / 3) * dt;
+    // Cyclic settings stay where the pilot leaves them; opposite input levels the craft.
+    pose.x = clamp(pose.x + ((intent?.throttle ?? 0) * 0.95 * cyclicStep + (intent?.flightPitchDelta ?? 0)) * control, -Math.PI / 2, Math.PI / 2);
+    pose.z = clamp(pose.z - (intent?.steer ?? 0) * control * 0.9 * cyclicStep, -0.58, 0.58);
 
     // The rotor pushes along the aircraft's tilted up vector. Drag and thrust,
-    // not key state, determine velocity. Collective includes a light hover assist.
+    // not key state, determine velocity. Nothing adjusts throttle to hold altitude.
     const rotor = applyQuat(_tmpVecA.set(0, 1, 0), quatFromEuler(_tmpQuat, pose.x, pose.y, pose.z, 'YXZ'));
     setLocalEulerRad(this.rig.hullTiltGroup, pose.x, pose.y, pose.z, 'YXZ');
     const gravity = 9.81;
-    const trim = gravity * (0.45 + 0.55 / rotor.y);
-    const collective = engineOut ? 0 : clamp(trim + lift * (lift > 0 ? 8.9 * mobility : 4.6) - v.y * 1.1, 1, 22);
+    const collective = engineOut ? 0 : this.flightThrottle * 23 * mobility;
     const dragF = forwardSpeed * (0.09 + Math.abs(forwardSpeed) * (forwardSpeed < 0 ? 0.006 : 0.0018));
     const dragS = sideSpeed * (0.16 + Math.abs(sideSpeed) * 0.004);
     const f = rotor.z * collective - dragF;
@@ -1334,7 +1361,6 @@ export class Tank implements TankEntity {
       if (v.y < -5.5) this._damageModule('engine', Math.min(1, (-v.y - 5.5) * 0.067));
       v.y = Math.max(0, v.y);
     }
-    else if (p.y >= floor + 150) { p.y = floor + 150; v.y = Math.min(0, v.y); }
     this.speed = Math.hypot(v.x, v.z);
     this.root.setLocalPosition(p);
     setLocalEulerRad(this.root, 0, this.hullYaw, 0);
@@ -2099,8 +2125,8 @@ export class Tank implements TankEntity {
       const lx = _tmpVecA.x, ly = _tmpVecA.y, lz = _tmpVecA.z;
 
       // ---------- external modules: direct box hits regardless of armour ----------
-      const smallArms = weapon === 'mg' && (!spec || spec.id.startsWith('humvee_'));
-      const chip = smallArms ? Math.min(0.035, amount * 0.005) : 0;
+      const smallArms = weapon === 'mg' && (!spec || spec.id.startsWith('humvee_') || spec.id === 'littlebird_mg');
+      const chip = smallArms ? Math.min(0.065, amount * 0.005) : 0;
       const extSlug = smallArms ? chip : (md?.slug ?? amount * 0.004) * Math.min(1, penMm / 40);
       if (extSlug > 0) {
         for (const rt of this.modules.values()) {
@@ -2482,6 +2508,8 @@ export class Tank implements TankEntity {
     setVisible(this.root, true);
     this.hullTilt.x = this.hullTilt.y = this.hullTilt.z = 0;
     this.rotorAngle = 0;
+    this.flightThrottle = 0;
+    this.dustAccum = 0;
     this.wheelSpin.clear();
     setLocalEulerRad(this.rig.hullTiltGroup, 0, 0, 0, 'YXZ');
     setLocalEulerRad(this.rig.turretPivot, 0, 0, 0);

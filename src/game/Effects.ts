@@ -391,16 +391,26 @@ export class EffectsManager {
       r1: 0.43, g1: 0.38, b1: 0.29, peakAlpha: 0.28 * k, fadeInFrac: 0.14 });
   }
 
-  public spawnWaterWake(pos: Vec3, intensity01: number): void {
+  public spawnWaterWake(pos: Vec3, intensity01: number, sprayX: number, sprayZ: number, bow: boolean): void {
     const k = Math.max(0, Math.min(1, intensity01));
     if (k < 0.05) return;
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < (bow ? 5 : 2); i++) {
       const p = this.smoke();
-      Object.assign(p, { age: 0, maxAge: rand(0.4, 0.75), px: pos.x + rand(-0.5, 0.5), py: pos.y + rand(0, 0.25), pz: pos.z + rand(-0.5, 0.5),
-        vx: rand(-1.6, 1.6), vy: rand(1.6, 3.8) * (0.5 + 0.6 * k), vz: rand(-1.6, 1.6), drag: 2.6, buoyancy: 1.4,
-        startScale: rand(0.3, 0.55), endScale: rand(1, 1.8), rot: Math.random() * 6.28, rotSpeed: rand(-1.6, 1.6),
-        r0: 0.72, g0: 0.82, b0: 0.86, rMid: 0.55, gMid: 0.68, bMid: 0.72, midFrac: 0.4,
-        r1: 0.40, g1: 0.52, b1: 0.58, peakAlpha: 0.4 * k, fadeInFrac: 0.1 });
+      Object.assign(p, { age: 0, maxAge: rand(0.36, 0.65), px: pos.x + rand(-0.42, 0.42), py: pos.y, pz: pos.z + rand(-0.42, 0.42),
+        vx: sprayX + rand(-1.5, 1.5), vy: rand(bow ? 2.7 : 1.1, bow ? 6.8 : 2.7) * (0.5 + 0.8 * k), vz: sprayZ + rand(-1.5, 1.5), drag: 2.0, buoyancy: -8,
+        startScale: rand(0.26, 0.52), endScale: rand(0.9, bow ? 1.9 : 1.4), rot: Math.random() * 6.28, rotSpeed: rand(-1.6, 1.6),
+        r0: 1.52, g0: 1.74, b0: 1.82, rMid: 0.82, gMid: 1.10, bMid: 1.20, midFrac: 0.4,
+        r1: 0.59, g1: 0.76, b1: 0.83, peakAlpha: (bow ? 1.0 : 0.55) * k, fadeInFrac: 0.07 });
+    }
+    if (!bow) return;
+    // Use the existing streak batch for droplets that arc out of the white spray.
+    for (let i = 0; i < 3 + Math.round(4 * k); i++) {
+      const drop = this.spark();
+      const spread = rand(0.55, 1.55);
+      Object.assign(drop, { age: 0, maxAge: rand(0.25, 0.51), px: pos.x + rand(-0.22, 0.22), py: pos.y + 0.10, pz: pos.z + rand(-0.22, 0.22),
+        vx: sprayX * spread + rand(-2.4, 2.4), vy: rand(2.4, 7.8) * (0.42 + 0.74 * k), vz: sprayZ * spread + rand(-2.4, 2.4),
+        drag: 1.6, gravity: 16, width: rand(0.08, 0.15), baseLen: 0.12, stretch: 0.021, floorY: -999,
+        r0: 1.25 * k, g0: 1.7 * k, b0: 1.9 * k, r1: 0.36 * k, g1: 0.65 * k, b1: 0.74 * k });
     }
   }
 
