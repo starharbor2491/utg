@@ -61,6 +61,7 @@ const PROFILE: Record<VehicleClass, string> = {
 const BRIEFING_CONTROLS: readonly { keys: readonly string[]; action: string }[] = [
   { keys: ['W', 'A', 'S', 'D'], action: 'Drive' },
   { keys: ['Mouse'], action: 'Aim' },
+  { keys: ['Alt'], action: 'Free-look (hold)' },
   { keys: ['Left click'], action: 'Fire main gun' },
   { keys: ['Right click'], action: 'Zoom' },
   { keys: ['1', '2', 'Q'], action: 'Switch shell' },
@@ -360,7 +361,10 @@ export class HUD {
     this.elapsedSec += safeDt;
 
     const fpv = telemetry.fpv ?? null;
-    if (this.fpvEl) this.fpvEl.classList.toggle('is-active', fpv !== null);
+    if (this.fpvEl) {
+      this.fpvEl.classList.toggle('is-active', fpv !== null);
+      this.fpvEl.classList.toggle('is-free-look', telemetry.freeLooking);
+    }
     if (fpv) this.updateFpvOverlay(fpv);
     if (fpv) {
       // drone view: hide vehicle chrome, keep radar/minimap/scoreboard
@@ -447,7 +451,7 @@ export class HUD {
   }
 
   private updateReticlesAndOptics(t: HUDTelemetry): void {
-    const showHudReticles = t.alive && !this.briefingVisible && !t.fpv;
+    const showHudReticles = t.alive && !this.briefingVisible && !t.fpv && !t.freeLooking;
 
     // 1. Commander Aim Circle (38px diameter)
     if (showHudReticles && t.commanderAim.visible) {
@@ -2101,7 +2105,8 @@ export class HUD {
     classList.className = 'fcs-vlist';
     const detail = document.createElement('div');
     detail.className = 'fcs-briefing-detail';
-    detail.innerHTML = `<div class="fcs-profile"><svg viewBox="0 0 286 122" aria-hidden="true"><path class="fcs-profile-datum" d="M14 107h258M32 12v100M250 12v100"/><path class="fcs-profile-outline"/></svg></div>
+    detail.innerHTML = `<div class="fcs-profile"><span class="fcs-profile-label">Vehicle profile</span>
+      <svg viewBox="0 0 286 122" aria-hidden="true"><path class="fcs-profile-datum" d="M14 107h258M32 21v91M250 21v91M56 103v4m24-4v4m24-4v4m24-4v4m24-4v4m24-4v4m24-4v4m24-4v4"/><path class="fcs-profile-outline"/></svg></div>
       <h2></h2><p class="fcs-profile-loadout"></p><p class="fcs-profile-note"></p>`;
     const detailName = detail.querySelector('h2')!;
     const loadout = detail.querySelector('.fcs-profile-loadout')!;

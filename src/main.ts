@@ -1,4 +1,32 @@
-import * as THREE from 'three';
+import {
+  Application,
+  Entity,
+  FILLMODE_FILL_WINDOW,
+  Material,
+  RESOLUTION_AUTO,
+  SHADOWUPDATE_NONE,
+  SHADOWUPDATE_THISFRAME,
+  StandardMaterial,
+  TONEMAP_ACES,
+} from 'playcanvas';
+import { setApp } from './game/engine/app';
+import {
+  applyMat4,
+  applyMat4Projective,
+  applyQuat,
+  Box3,
+  clamp,
+  degToRad,
+  distSq,
+  lerp,
+  Mat4,
+  Quat,
+  quatLookAtMinusZ,
+  transformDirection,
+  Vec3,
+} from './game/engine/math';
+import { setVisible, worldBounds } from './game/engine/scene';
+import type { InstancedMesh } from './game/engine/instancing';
 
 import { instantiateTankRig, loadAllGameAssets } from './game/AssetLoader';
 import { World } from './game/World';
@@ -37,15 +65,23 @@ interface UnitMarkerDOM {
   losBlocked: boolean;
 }
 
+const _viewMat = new Mat4();
+const _viewProjMat = new Mat4();
+function projectNdc(worldPos: Vec3, camera: Entity, out: Vec3): Vec3 {
+  _viewMat.copy(camera.getWorldTransform()).invert();
+  _viewProjMat.mul2(camera.camera!.projectionMatrix, _viewMat);
+  return applyMat4Projective(worldPos, _viewProjMat, out);
+}
+
 function projectWorldToScreen(
-  worldPos: THREE.Vector3,
-  camera: THREE.PerspectiveCamera,
+  worldPos: Vec3,
+  camera: Entity,
   width: number,
   height: number,
   out: ScreenReticlePos,
-  scratch: THREE.Vector3
+  scratch: Vec3
 ): void {
-  scratch.copy(worldPos).project(camera);
+  projectNdc(worldPos, camera, scratch);
   out.visible = scratch.z >= -1 && scratch.z <= 1.0;
   out.x = (scratch.x * 0.5 + 0.5) * width;
   out.y = (-scratch.y * 0.5 + 0.5) * height;
@@ -138,29 +174,60 @@ async function bootstrap(): Promise<void> {
   const canvas = document.getElementById('viewport') as HTMLCanvasElement;
   const hudRoot = document.getElementById('hud-root') as HTMLElement;
 
-  // Render directly to native WebGL2 backbuffer with Apple Silicon on-chip tile 4x MSAA
-  // (Eliminates offscreen FBO resolves & 13-pass bloom bandwidth -> silent M4 Max fans!)
-  const renderer = new THREE.WebGLRenderer({
-    canvas,
-    antialias: true,
-    powerPreference: 'high-performance',
-    stencil: false,
-    depth: true,
+  // Render directly to the native WebGL2 backbuffer; no offscreen composer.
+  const app = new Application(canvas, {
+    graphicsDeviceOptions: { antialias: true, powerPreference: 'high-performance', stencil: false, depth: true },
   });
+  setApp(app);
+  app.autoRender = false;
+  app.renderNextFrame = false;
+  app.setCanvasFillMode(FILLMODE_FILL_WINDOW);
+  app.setCanvasResolution(RESOLUTION_AUTO);
+  app.scene.exposure = 1.05;
   const getOptimalDpr = () => Math.min(window.devicePixelRatio || 1, 1.35);
+  let sunLight: Entity | null = null;
+  const sceneTriangleEstimate = (): number => {
+    let triangles = 0;
+    for (const layer of app.scene.layers.layerList) {
+      if (!layer.enabled) continue;
+      for (const mi of layer.meshInstances) {
+        if (!mi.visible || !mi.mesh) continue;
+        triangles += (mi.mesh.primitive[0]?.count ?? 0) / 3 * Math.max(1, mi.instancingCount);
+      }
+    }
+    return Math.round(triangles);
+  };
+  const renderer = {
+    shadowMap: { enabled: true, needsUpdate: true },
+    setPixelRatio(value: number) { app.graphicsDevice.maxPixelRatio = value; },
+    getPixelRatio() { return app.graphicsDevice.maxPixelRatio; },
+    setSize(width: number, height: number) { app.resizeCanvas(width, height); },
+    render() {
+      if (sunLight?.light) {
+        sunLight.light.castShadows = renderer.shadowMap.enabled;
+        sunLight.light.shadowUpdateMode = renderer.shadowMap.enabled && renderer.shadowMap.needsUpdate ? SHADOWUPDATE_THISFRAME : SHADOWUPDATE_NONE;
+        renderer.shadowMap.needsUpdate = false;
+      }
+      app.renderNextFrame = true;
+      app.render();
+      app.stats.updateBasic(performance.now(), 0, 0, app.renderer, app.graphicsDevice);
+    },
+    getContext() { return (app.graphicsDevice as unknown as { gl: WebGL2RenderingContext }).gl; },
+    info: {
+      get programs() { return { length: app.stats.shaders.linked }; },
+      get render() { return { calls: app.stats.drawCalls.total, triangles: sceneTriangleEstimate() }; },
+      get memory() { return { geometries: app.stats.scene.meshInstances, textures: app.assets.list().filter((a) => a.type === 'texture').length }; },
+    },
+  };
   renderer.setPixelRatio(getOptimalDpr());
   renderer.setSize(window.innerWidth, window.innerHeight);
   let qualityLevel = 0;
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
-  renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFShadowMap;
-  renderer.shadowMap.autoUpdate = false;
-  renderer.shadowMap.needsUpdate = true;
 
-  const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.3, 1400);
-  const scene = new THREE.Scene();
+  const scene = app.root;
+  const camera = new Entity('player_camera');
+  camera.addComponent('camera', { fov: 58, nearClip: 0.3, farClip: 1400, aspectRatio: window.innerWidth / window.innerHeight });
+  camera.camera!.toneMapping = TONEMAP_ACES;
+  scene.addChild(camera);
 
   let controllerRef: PlayerController | null = null;
   let swapPlayerClassFn: ((cls: VehicleClass) => void) | null = null;
@@ -187,14 +254,15 @@ async function bootstrap(): Promise<void> {
 
   hud.setLoadingProgress(0.04, 'Initializing...');
 
-  const assets = await loadAllGameAssets(renderer, (progress, label) => {
+  const assets = await loadAllGameAssets(app, (progress, label) => {
     hud.setLoadingProgress(progress, label);
   });
 
   const world = new World(scene, assets);
+  sunLight = world.sunLight;
   const effects = new EffectsManager(scene);
   effects.groundProbe = (x, z) => world.getHeightAt(x, z);
-  const collapsePos = new THREE.Vector3();
+  const collapsePos = new Vec3();
   world.onObstacleDestroyed = (o) => {
     collapsePos.set(o.x, o.y + 0.35, o.z);
     effects.spawnTrackDust(collapsePos, 0.9);
@@ -210,7 +278,7 @@ async function bootstrap(): Promise<void> {
   // debris shader program while the loading screen is still up. Runs after
   // Match so the 12 live tanks' programs are covered too.
   hud.setLoadingProgress(0.97, 'Compiling shaders...');
-  await destruction.prewarmWrecksAndVehicles(renderer, scene, camera, assets);
+  await destruction.prewarmWrecksAndVehicles(app, scene, camera, assets);
   hud.setLoadingProgress(1, 'Ready');
 
   // Persistent physical wrecks for every kill (current roster + prebuilt human vehicles)
@@ -273,8 +341,7 @@ async function bootstrap(): Promise<void> {
   window.addEventListener('resize', () => {
     const w = window.innerWidth;
     const h = window.innerHeight;
-    camera.aspect = w / h;
-    camera.updateProjectionMatrix();
+    camera.camera!.aspectRatio = w / h;
     renderer.setPixelRatio(qualityLevel === 0 ? getOptimalDpr() : 1.0);
     renderer.setSize(w, h);
   });
@@ -378,19 +445,19 @@ async function bootstrap(): Promise<void> {
     }
   };
 
-  const _muzzlePos = new THREE.Vector3();
+  const _muzzlePos = new Vec3();
   droneManager.onDamage = handleDamage;
-  const _muzzleDir = new THREE.Vector3();
-  const _boreImpactWorld = new THREE.Vector3();
-  const _projScratch = new THREE.Vector3();
-  const _markerWorldPos = new THREE.Vector3();
-  const _losDir = new THREE.Vector3();
+  const _muzzleDir = new Vec3();
+  const _boreImpactWorld = new Vec3();
+  const _projScratch = new Vec3();
+  const _markerWorldPos = new Vec3();
+  const _losDir = new Vec3();
 
   const commanderAimScreen: ScreenReticlePos = { x: 0, y: 0, visible: true };
   const gunnerBoreScreen = { x: 0, y: 0, visible: true, onTarget: false, rangeMeters: 100 };
   const lockTargetScreen: ScreenReticlePos = { x: 0, y: 0, visible: true };
-  const _qaAimPoint = new THREE.Vector3();
-  const _qaAimOrigin = new THREE.Vector3();
+  const _qaAimPoint = new Vec3();
+  const _qaAimOrigin = new Vec3();
   const _qaIntent: TankIntent = {
     throttle: 0,
     steer: 0,
@@ -411,22 +478,22 @@ async function bootstrap(): Promise<void> {
 
   // --- Bench/QA instrumentation (dev tooling, zero-cost when unused) ---
   interface BenchFx {
-    smokeMesh: THREE.Object3D;
-    fireMesh: THREE.Object3D;
-    sparkMesh: THREE.Object3D;
-    flashMesh: THREE.Object3D;
-    ringMesh: THREE.Object3D;
-    scorchMesh: THREE.Object3D;
-    lightPool: { light: THREE.PointLight }[];
+    smokeMesh: InstancedMesh;
+    fireMesh: InstancedMesh;
+    sparkMesh: InstancedMesh;
+    flashMesh: InstancedMesh;
+    ringMesh: InstancedMesh;
+    scorchMesh: InstancedMesh;
+    lightPool: { light: Entity }[];
   }
   interface BenchDest {
-    debrisMeshes: THREE.Object3D[];
-    wrecks: { group: THREE.Object3D; active: boolean }[];
-    wreckLights: THREE.PointLight[];
+    debrisMeshes: InstancedMesh[];
+    wrecks: { group: Entity; active: boolean }[];
+    wreckLights: Entity[];
     mergeCount: number;
   }
   interface BenchWorld {
-    grassMesh: THREE.Object3D | null;
+    grassMesh: InstancedMesh | null;
   }
   const benchFx = effects as unknown as BenchFx;
   const benchDest = destruction as unknown as BenchDest;
@@ -437,36 +504,36 @@ async function bootstrap(): Promise<void> {
   let xrayFlashCount = 0;
 
   const tankCallbacks = {
-    onFireCannon: (shooter: Tank, pos: THREE.Vector3, dir: THREE.Vector3, shell: ShellSpec, guideTarget?: TankEntity | null) => {
+    onFireCannon: (shooter: Tank, pos: Vec3, dir: Vec3, shell: ShellSpec, guideTarget?: TankEntity | null) => {
       ballistics.fireCannon(shooter, pos, dir, shell, guideTarget);
       if (shooter === match.human) {
         controller.addShake(shooter.stats.vehicleClass === 'heavy' ? 0.52 : 0.34);
       }
     },
-    onFireMG: (shooter: Tank, pos: THREE.Vector3, dir: THREE.Vector3, beltSpec?: ShellSpec) => {
+    onFireMG: (shooter: Tank, pos: Vec3, dir: Vec3, beltSpec?: ShellSpec) => {
       ballistics.fireCoaxMG(shooter, pos, dir, beltSpec);
       if (shooter === match.human && beltSpec) {
         controller.addShake(0.035);
       }
     },
-    onTrackDust: (pos: THREE.Vector3, intensity01: number) => {
+    onTrackDust: (pos: Vec3, intensity01: number) => {
       effects.spawnTrackDust(pos, intensity01);
     },
-    onWaterWake: (pos: THREE.Vector3, intensity01: number) => {
+    onWaterWake: (pos: Vec3, intensity01: number) => {
       effects.spawnWaterWake(pos, intensity01);
     },
-    onWreckSmoke: (pos: THREE.Vector3) => {
+    onWreckSmoke: (pos: Vec3) => {
       effects.spawnWreckSmoke(pos);
     },
   };
 
   let lastFrameTime = performance.now();
-  const _fpvQuat = new THREE.Quaternion();
-  const _fpvLookAt = new THREE.Matrix4();
-  const _fpvPos = new THREE.Vector3();
-  const _fpvDirTmp = new THREE.Vector3();
-  const _lastFpvPos = new THREE.Vector3();
-  const _lastFpvQuat = new THREE.Quaternion();
+  const _fpvQuat = new Quat();
+  const _fpvLookAt = new Mat4();
+  const _fpvPos = new Vec3();
+  const _fpvDirTmp = new Vec3();
+  const _lastFpvPos = new Vec3();
+  const _lastFpvQuat = new Quat();
   let fpvExitT = -1;
   let wasFpv = false;
   let shadowTickToggle = 0;
@@ -500,13 +567,13 @@ async function bootstrap(): Promise<void> {
         continue;
       }
 
-      const dist = (fpv ? camera.position : human.position).distanceTo(e.position);
+      const dist = (fpv ? camera.getPosition() : human.position).distance(e.position);
       _markerWorldPos.set(
         e.position.x,
         e.position.y + (e.stats.vehicleClass === 'ifv' ? 2.9 : 3.35),
         e.position.z
       );
-      _projScratch.copy(_markerWorldPos).project(camera);
+      projectNdc(_markerWorldPos, camera, _projScratch);
       if (_projScratch.z < -1 || _projScratch.z > 1) {
         m.el.style.display = 'none';
         continue;
@@ -537,11 +604,11 @@ async function bootstrap(): Promise<void> {
       if (m.losTimer <= 0) {
         m.losTimer = 0.2;
         m.losBlocked = false;
-        _losDir.subVectors(_markerWorldPos, camera.position);
+        _losDir.sub2(_markerWorldPos, camera.getPosition());
         const losLen = _losDir.length();
         if (losLen > 1) {
-          _losDir.multiplyScalar(1 / losLen);
-          const hit = world.raycastWorld(camera.position, _losDir, losLen - 2.2);
+          _losDir.mulScalar(1 / losLen);
+          const hit = world.raycastWorld(camera.getPosition(), _losDir, losLen - 2.2);
           if (hit && (hit.hitKind === 'terrain' || !hit.obstacle?.lightCover)) {
             m.losBlocked = true;
           }
@@ -570,14 +637,12 @@ async function bootstrap(): Promise<void> {
     const human = match.human;
     const isDeployed = controller.pointerLocked || forceHideBriefing;
 
-    const shakeImpulse = effects.consumeCameraShake(camera.position);
+    const shakeImpulse = effects.consumeCameraShake(camera.getPosition());
     let playerIntent = null;
     if (qaIntentOverride) {
       playerIntent = qaIntentOverride;
     } else if (!cameraOverrideActive) {
       playerIntent = controller.update(dt, human, world, allTanks, shakeImpulse);
-      // Player aim ray originates at the camera (seeker lock cone)
-      if (playerIntent) playerIntent.aimRayOrigin = camera.position;
     }
     if (playerIntent && qaFireCannonOnce) {
       playerIntent.fireCannon = true;
@@ -621,10 +686,10 @@ async function bootstrap(): Promise<void> {
         _fpvQuat.copy(_lastFpvQuat);
         if (droneManager.lastDetonation.shooter?.isHuman) {
           const hit = droneManager.lastDetonation.pos;
-          _fpvDirTmp.set(0, 0, -1).applyQuaternion(_fpvQuat);
-          _fpvPos.copy(hit).addScaledVector(_fpvDirTmp, -6);
+          applyQuat(_fpvDirTmp.set(0, 0, -1), _fpvQuat);
+          _fpvPos.copy(hit).addScaled(_fpvDirTmp, -6);
           _fpvPos.y = Math.max(_fpvPos.y, world.getHeightAt(_fpvPos.x, _fpvPos.z) + 1.4, hit.y + 1.75);
-          _fpvQuat.setFromRotationMatrix(_fpvLookAt.lookAt(_fpvPos, hit, THREE.Object3D.DEFAULT_UP));
+          quatLookAtMinusZ(_fpvQuat, _fpvPos, hit, Vec3.UP);
         }
       }
       if (fpvExitT >= 0) {
@@ -659,9 +724,9 @@ async function bootstrap(): Promise<void> {
 
     ballistics.update(dt, world, allTanks, handleDamage, destruction.getDecoyPoints());
     match.update(dt);
-    world.update(dt, human.position, camera.position);
+    world.update(dt, human.position, camera.getPosition());
     effects.update(dt, camera);
-    destruction.update(dt, camera.position);
+    destruction.update(dt, camera.getPosition());
 
     // Minimap unit telemetry + enemy spotting (red visible only within 220m of a live blue tank)
     activeEnemyCount = 0;
@@ -724,7 +789,7 @@ async function bootstrap(): Promise<void> {
     const rawDt = elapsedMs * 0.001;
     lastFrameTime = now - (elapsedMs % minIntervalMs);
     const dt = Math.min(Math.max(rawDt, 0.001), 0.05);
-    fpsSmooth = THREE.MathUtils.lerp(fpsSmooth, 1 / Math.max(rawDt, 0.001), 0.08);
+    fpsSmooth = lerp(fpsSmooth, 1 / Math.max(rawDt, 0.001), 0.08);
 
     // Hitch instrumentation: snapshot per-frame work counters at frame start
     const marks0 = {
@@ -772,12 +837,10 @@ async function bootstrap(): Promise<void> {
     );
     gunnerBoreScreen.onTarget = reticlePixelGap < 18 && playerTank.cannonCooldown <= 0.01;
 
-    // Seeker lock box: project the locked/acquiring target; drop when it
-    // leaves the viewport. While locked the ballistic pip is hidden — the
-    // lock box replaces it.
+    // Project the seeker box. The seeker itself tracks the aim ray, not the render camera.
     let lockOnTelemetry: HUDTelemetry['lockOn'];
     const seeker = playerTank.seekerLock;
-    if (seeker?.target && seeker.progress > 0 && playerTank.stats.salvoSize) {
+    if (!controller.freeLooking && seeker?.target && seeker.progress > 0 && playerTank.stats.salvoSize) {
       const lt = seeker.target as Tank;
       lt.getCenterMassWorld(_projScratch);
       projectWorldToScreen(_projScratch, camera, vw, vh, lockTargetScreen, _markerWorldPos);
@@ -788,9 +851,7 @@ async function bootstrap(): Promise<void> {
         lockTargetScreen.x > vw + margin ||
         lockTargetScreen.y < -margin ||
         lockTargetScreen.y > vh + margin;
-      if (offScreen) {
-        lt.dropSeekerLock();
-      } else {
+      if (!offScreen) {
         lockOnTelemetry = {
           targetId: lt.id,
           progress: seeker.progress,
@@ -798,11 +859,11 @@ async function bootstrap(): Promise<void> {
           screenX: lockTargetScreen.x,
           screenY: lockTargetScreen.y,
           onScreen: true,
-          rangeMeters: playerTank.position.distanceTo(lt.position),
+          rangeMeters: playerTank.position.distance(lt.position),
         };
       }
     }
-    if (seeker?.locked) {
+    if (lockOnTelemetry?.locked) {
       // Lock box replaces the predicted-impact pip for guided rockets
       gunnerBoreScreen.visible = false;
     }
@@ -813,7 +874,7 @@ async function bootstrap(): Promise<void> {
     incomingDamageTimer = Math.max(0, incomingDamageTimer - dt);
 
     const reloadProg =
-      1 - THREE.MathUtils.clamp(playerTank.cannonCooldown / playerTank.cannonReloadDuration, 0, 1);
+      1 - clamp(playerTank.cannonCooldown / playerTank.cannonReloadDuration, 0, 1);
 
     const telemetry: HUDTelemetry = {
       vehicleClass: playerTank.stats.vehicleClass,
@@ -835,7 +896,7 @@ async function bootstrap(): Promise<void> {
       onFire: playerTank.isBurning,
       fireExtSec: playerTank.fireExtinguisherIn,
       hitResultText,
-      hitResultIntensity: THREE.MathUtils.clamp(hitResultTimer / 1.2, 0, 1),
+      hitResultIntensity: clamp(hitResultTimer / 1.2, 0, 1),
       deathReason: playerTank.alive ? null : playerTank.lastKillReason,
       alive: playerTank.alive,
       respawnRemaining: playerTank.respawnTimer,
@@ -847,11 +908,10 @@ async function bootstrap(): Promise<void> {
       throttle: lastPlayerThrottle,
       hullYaw: playerTank.hullYaw,
       turretWorldYaw: playerTank.turretWorldYaw,
-      cameraYaw: (() => {
-        const pd = droneManager.playerDrone;
-        return pd ? pd.yaw : controller.cameraYaw;
-      })(),
-      cameraFovRad: THREE.MathUtils.degToRad(camera.fov),
+      cameraYaw: controller.droneMode
+        ? Math.atan2(-camera.getWorldTransform().data[8], -camera.getWorldTransform().data[10])
+        : controller.cameraYaw,
+      cameraFovRad: degToRad(camera.camera!.fov),
       cannonReloadProgress: reloadProg,
       cannonCooldownSec: playerTank.cannonCooldown,
       rocketsLeft: playerTank.rocketsLeft,
@@ -870,14 +930,15 @@ async function bootstrap(): Promise<void> {
       fps: Math.round(fpsSmooth),
       hitMarker: {
         kind: hitMarkerKind,
-        intensity: THREE.MathUtils.clamp(hitMarkerTimer * 2.2, 0, 1),
+        intensity: clamp(hitMarkerTimer * 2.2, 0, 1),
       },
       incomingDamageArc: {
         fromWorldYaw: incomingDamageYaw,
-        intensity: THREE.MathUtils.clamp(incomingDamageTimer, 0, 1),
+        intensity: clamp(incomingDamageTimer, 0, 1),
       },
       feedMessages: match.feed,
       pointerLocked: isDeployed,
+      freeLooking: controller.freeLooking,
       sniperZoom: controller.sniperZoom,
       minimap: {
         playerX: (() => { const pd = droneManager.playerDrone; return pd ? pd.pos.x : playerTank.position.x; })(),
@@ -917,15 +978,15 @@ async function bootstrap(): Promise<void> {
     }
 
     const hideOwnTankInOptic = controller.sniperZoom && !cameraOverrideActive && playerTank.alive;
-    if (hideOwnTankInOptic) playerTank.root.visible = false;
+    if (hideOwnTankInOptic) setVisible(playerTank.root, false);
     const _perfR0 = perfProbe.active ? performance.now() : 0;
-    renderer.render(scene, camera);
+    renderer.render();
     if (perfProbe.active) {
       perfProbe.renderMs += performance.now() - _perfR0;
       perfProbe.frames++;
       if (perfProbe.frames >= perfProbe.target) perfProbe.active = false;
     }
-    if (hideOwnTankInOptic) playerTank.root.visible = true;
+    if (hideOwnTankInOptic) setVisible(playerTank.root, true);
 
     // Hitch log: frames whose total wall time exceeds 25 ms, tagged by work done
     const frameMs = performance.now() - frameStart;
@@ -1014,6 +1075,7 @@ async function bootstrap(): Promise<void> {
 
   // Expose QA & GPU render-stats telemetry for programmatic verification
   (window as unknown as Record<string, unknown>).__tankQA = {
+    getAssetsForTest: () => assets,
     engageForTest: () => {
       forceHideBriefing = true;
       controller.setEngaged(true);
@@ -1025,9 +1087,9 @@ async function bootstrap(): Promise<void> {
     },
     setCameraForTest: (px: number, py: number, pz: number, lx: number, ly: number, lz: number) => {
       cameraOverrideActive = true;
-      camera.position.set(px, py, pz);
+      camera.getPosition().set(px, py, pz);
       camera.lookAt(lx, ly, lz);
-      camera.updateMatrixWorld();
+      camera.getWorldTransform();
     },
     clearCameraForTest: () => {
       cameraOverrideActive = false;
@@ -1061,7 +1123,7 @@ async function bootstrap(): Promise<void> {
       const n = bots.length;
       for (let i = 0; i < n; i++) {
         const b = bots[i];
-        const bearing = camYaw + THREE.MathUtils.degToRad(-35 + (70 * i) / Math.max(1, n - 1));
+        const bearing = camYaw + degToRad(-35 + (70 * i) / Math.max(1, n - 1));
         const dist = 50 + ((i * 53) % 91);
         const x = human.position.x + Math.sin(bearing) * dist;
         const z = human.position.z + Math.cos(bearing) * dist;
@@ -1082,7 +1144,7 @@ async function bootstrap(): Promise<void> {
       const t0 = performance.now();
       for (let i = 0; i < frames; i++) {
         renderer.shadowMap.needsUpdate = i % 2 === 0;
-        renderer.render(scene, camera);
+        renderer.render();
       }
       const gl = renderer.getContext();
       gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
@@ -1099,38 +1161,35 @@ async function bootstrap(): Promise<void> {
     setBenchToggle: (name: string, on: boolean) => {
       switch (name) {
         case 'smoke':
-          benchFx.smokeMesh.visible = on;
+          benchFx.smokeMesh.entity.enabled = on;
           break;
         case 'fire':
-          benchFx.fireMesh.visible = on;
+          benchFx.fireMesh.entity.enabled = on;
           break;
         case 'debris':
-          for (const m of benchDest.debrisMeshes) m.visible = on;
+          for (const m of benchDest.debrisMeshes) m.entity.enabled = on;
           break;
         case 'wreckFx':
           effects.wreckFxVisible = on;
           break;
         case 'pointLights':
-          for (const s of benchFx.lightPool) s.light.visible = on;
-          for (const l of benchDest.wreckLights) l.visible = on;
+          for (const s of benchFx.lightPool) s.light.enabled = on;
+          for (const l of benchDest.wreckLights) l.enabled = on;
           break;
         case 'shadows':
           renderer.shadowMap.enabled = on;
-          scene.traverse((o) => {
-            const mat = (o as unknown as { material?: THREE.Material | THREE.Material[] }).material;
-            if (!mat) return;
-            if (Array.isArray(mat)) for (const m of mat) m.needsUpdate = true;
-            else mat.needsUpdate = true;
+          scene.forEach((o) => {
+            for (const mi of (o as Entity).render?.meshInstances ?? []) (mi.material as Material).update();
           });
           break;
         case 'grass':
-          if (benchWorld.grassMesh) benchWorld.grassMesh.visible = on;
+          if (benchWorld.grassMesh) benchWorld.grassMesh.entity.enabled = on;
           break;
         case 'wrecks':
-          for (const w of benchDest.wrecks) w.group.visible = on && w.active;
+          for (const w of benchDest.wrecks) w.group.enabled = on && w.active;
           break;
         case 'vehicles':
-          for (const t of allTanks) t.root.visible = on && t.alive;
+          for (const t of allTanks) t.root.enabled = on && t.alive;
           break;
         case 'markers':
           markerLayer.style.display = on ? '' : 'none';
@@ -1153,11 +1212,7 @@ async function bootstrap(): Promise<void> {
     },
     getHitchLog: () => hitchLog.slice(),
     /** Program cache keys for shader-growth diffing (dev tooling). */
-    getProgramKeys: () =>
-      (renderer.info.programs ?? []).map((p) => {
-        const q = p as unknown as { cacheKey?: string; name?: string };
-        return `${q.name ?? '?'}|${q.cacheKey ?? ''}`;
-      }),
+    getProgramKeys: () => Array.from({ length: renderer.info.programs.length }, (_, i) => `playcanvas_shader_${i}`),
     /** Timestamps (ms) of executed ticks — deltas give true rendered-frame pacing. */
     getFrameTimes: () => frameTimes.slice(),
     /** Mesh counts per rig region for all 5 classes x 2 teams (dev tooling). */
@@ -1168,35 +1223,29 @@ async function bootstrap(): Promise<void> {
       for (const cls of classes) {
         for (const team of teams) {
           const rig = instantiateTankRig(assets, cls, team);
-          const wheelNodes = new Set<THREE.Object3D>(rig.wheels.map((w) => w.node));
+          const wheelNodes = new Set<Entity>(rig.wheels.map((w) => w.node));
           const counts = { total: 0, hull: 0, turret: 0, gun: 0, wheels: 0, physical: 0, glass: 0 };
-          const inSubtree = (root: THREE.Object3D, mesh: THREE.Object3D): boolean => {
-            for (let p: THREE.Object3D | null = mesh; p; p = p.parent) {
+          const inSubtree = (root: Entity, mesh: Entity): boolean => {
+            for (let p: Entity | null = mesh; p; p = p.parent as Entity | null) {
               if (p === root) return true;
               if (p === rig.visualRoot) return false;
             }
             return false;
           };
-          rig.visualRoot.traverse((o) => {
-            if (!(o as THREE.Mesh).isMesh) return;
-            counts.total++;
-            const matProp = (o as THREE.Mesh).material;
-            const mats = (Array.isArray(matProp) ? matProp : [matProp]) as THREE.Material[];
-            for (const mm of mats) {
-              if ((mm as THREE.MeshPhysicalMaterial).isMeshPhysicalMaterial) counts.physical++;
-              const mn = (mm.name || '').toLowerCase();
-              const ms = mm as THREE.MeshStandardMaterial;
-              if (ms.transparent || /glass|window|lens/.test(mn)) counts.glass++;
-            }
-            if (inSubtree(rig.gunRecoilGroup, o)) counts.gun++;
-            else if (inSubtree(rig.turretPivot, o)) counts.turret++;
-            else {
-              let isWheel = false;
-              for (const w of wheelNodes) {
-                if (inSubtree(w, o)) { isWheel = true; break; }
+          rig.visualRoot.forEach((node) => {
+            const o = node as Entity;
+            for (const mi of o.render?.meshInstances ?? []) {
+              counts.total++;
+              const ms = mi.material as StandardMaterial;
+              if (ms.clearCoat > 0) counts.physical++;
+              if (ms.opacity < 1 || ms.blendType !== 0 || /glass|window|lens/.test((ms.name || '').toLowerCase())) counts.glass++;
+              if (inSubtree(rig.gunRecoilGroup, o)) counts.gun++;
+              else if (inSubtree(rig.turretPivot, o)) counts.turret++;
+              else {
+                let isWheel = false;
+                for (const w of wheelNodes) if (inSubtree(w, o)) { isWheel = true; break; }
+                if (isWheel) counts.wheels++; else counts.hull++;
               }
-              if (isWheel) counts.wheels++;
-              else counts.hull++;
             }
           });
           out[`${cls}_${team}`] = counts;
@@ -1249,13 +1298,13 @@ async function bootstrap(): Promise<void> {
         if (t.team === human.team || !t.alive) continue;
         if (kind === 'pen' && t.stats.vehicleClass !== 'humvee') continue;
         if (kind !== 'pen' && t.stats.vehicleClass === 'humvee') continue;
-        const d = t.position.distanceToSquared(human.position);
+        const d = distSq(t.position, human.position);
         if (d < best) { best = d; victim = t; }
       }
       if (!victim) {
         for (const t of allTanks) {
           if (t.team === human.team || !t.alive) continue;
-          const d = t.position.distanceToSquared(human.position);
+          const d = distSq(t.position, human.position);
           if (d < best) { best = d; victim = t; }
         }
       }
@@ -1264,11 +1313,11 @@ async function bootstrap(): Promise<void> {
       (v as unknown as { spawnProtect: number }).spawnProtect = 0;
       const db = v.getDamageBounds();
       const part = v.rig.hullTiltGroup;
-      part.updateWorldMatrix(true, false);
-      const lp = new THREE.Vector3();
-      const A = new THREE.Vector3();
-      const M = new THREE.Vector3();
-      const D = new THREE.Vector3();
+      part.getWorldTransform();
+      const lp = new Vec3();
+      const A = new Vec3();
+      const M = new Vec3();
+      const D = new Vec3();
       const L = 120;
       let spec: ShellSpec | undefined;
       let dmg = 2.8;
@@ -1282,15 +1331,15 @@ async function bootstrap(): Promise<void> {
           db.hullMin.y + db.hullSize.y * 0.55,
           db.hullMin.z + db.hullSize.z - 0.15
         );
-        A.copy(lp).applyMatrix4(part.matrixWorld);
-        D.set(-0.985, 0, -0.173).transformDirection(part.matrixWorld).normalize();
+        applyMat4(lp, part.getWorldTransform(), A);
+        transformDirection(D.set(-0.985, 0, -0.173), part.getWorldTransform()).normalize();
       } else if (kind === 'pen') {
         // .50 cal into the hull side plate of a soft-skin
         spec = TANK_STATS.humvee.shells[0];
         dmg = spec.directDamage; weapon = 'cannon';
         lp.set(db.hullMin.x + db.hullSize.x, db.hullMin.y + db.hullSize.y * 0.5, db.hullMin.z + db.hullSize.z * 0.5);
-        A.copy(lp).applyMatrix4(part.matrixWorld);
-        D.set(-1, 0, 0).transformDirection(part.matrixWorld).normalize();
+        applyMat4(lp, part.getWorldTransform(), A);
+        transformDirection(D.set(-1, 0, 0), part.getWorldTransform()).normalize();
       } else {
         // 7.62 coax vs heavy front: never penetrates
         lp.set(
@@ -1298,10 +1347,10 @@ async function bootstrap(): Promise<void> {
           db.hullMin.y + db.hullSize.y * 0.55,
           db.hullMin.z + db.hullSize.z - 0.15
         );
-        A.copy(lp).applyMatrix4(part.matrixWorld);
-        D.set(0, -0.02, -1).transformDirection(part.matrixWorld).normalize();
+        applyMat4(lp, part.getWorldTransform(), A);
+        transformDirection(D.set(0, -0.02, -1), part.getWorldTransform()).normalize();
       }
-      M.copy(A).addScaledVector(D, -L);
+      M.copy(A).addScaled(D, -L);
       const killed = v.takeDamage(dmg, A, M, D, weapon, spec, { attacker: human });
       // Route through the same DamageEvent path Ballistics uses so the
       // hit marker / hit-result readout / HitCam / scoring all fire.
@@ -1356,8 +1405,8 @@ async function bootstrap(): Promise<void> {
       const lvl = world.getWaterLevelAt(x, z);
       const depth = world.getWaterDepthAt(x, z);
       if (depth <= 0.05) return { ok: false, reason: 'no water', depth };
-      const dir = new THREE.Vector3(0, -1, 0);
-      const pos = new THREE.Vector3(x, lvl + 60, z);
+      const dir = new Vec3(0, -1, 0);
+      const pos = new Vec3(x, lvl + 60, z);
       ballistics.fireCannon(match.human, pos, dir, match.human.activeShell);
       return { ok: true, depth, level: lvl };
     },
@@ -1375,16 +1424,8 @@ async function bootstrap(): Promise<void> {
       rivers: world.riverCount,
       obstacles: world.obstacleCount,
       grass: world.grassStats,
-      waterSamples: [
-        { x: 0, z: -170, depth: world.getWaterDepthAt(0, -170), level: world.getWaterLevelAt(0, -170) },
-        { x: 100, z: -170, depth: world.getWaterDepthAt(100, -170), level: world.getWaterLevelAt(100, -170) },
-        { x: -200, z: -170, depth: world.getWaterDepthAt(-200, -170), level: world.getWaterLevelAt(-200, -170) },
-        { x: 0, z: 170, depth: world.getWaterDepthAt(0, 170), level: world.getWaterLevelAt(0, 170) },
-        { x: 100, z: 170, depth: world.getWaterDepthAt(100, 170), level: world.getWaterLevelAt(100, 170) },
-        { x: 0, z: 0, depth: world.getWaterDepthAt(0, 0), level: world.getWaterLevelAt(0, 0) },
-        { x: 0, z: -420, depth: world.getWaterDepthAt(0, -420) },
-        { x: 0, z: 420, depth: world.getWaterDepthAt(0, 420) },
-      ],
+      waterSamples: radarRivers.flatMap((river) => river.filter(({ x }) => Math.abs(x) <= 200)
+        .map(({ x, z }) => ({ x, z, depth: world.getWaterDepthAt(x, z), level: world.getWaterLevelAt(x, z) }))),
       spawnChecks: (() => {
         const out: { x: number; z: number; ok: boolean; depth: number }[] = [];
         let seed = 1234567;
@@ -1408,12 +1449,14 @@ async function bootstrap(): Promise<void> {
     getCamDebug: () => ({
       yaw: controller.cameraYaw,
       pitch: controller.cameraPitch,
-      fov: camera.fov,
+      fov: camera.camera!.fov,
       droneMode: controller.droneMode,
+      freeLooking: controller.freeLooking,
+      aim: controller.commanderAimWorld.toArray(),
       fpvActive: !!controller.fpvCamPos,
       fpvExitT,
-      camPos: camera.position.toArray().map((v) => Math.round(v * 10) / 10),
-      camDir: camera.getWorldDirection(_fpvDirTmp).toArray().map((v) => Math.round(v * 100) / 100),
+      camPos: camera.getPosition().toArray().map((v) => Math.round(v * 10) / 10),
+      camDir: _fpvDirTmp.copy(camera.forward).toArray().map((v) => Math.round(v * 100) / 100),
       dbgWrite: (controller as unknown as { _dbgCamWrite: string })._dbgCamWrite,
       saved: (() => { const c = controller as unknown as { _savedCamYaw: number; _savedCamPitch: number }; return [Math.round(c._savedCamYaw * 1000) / 1000, Math.round(c._savedCamPitch * 1000) / 1000]; })(),
     }),
@@ -1464,6 +1507,7 @@ async function bootstrap(): Promise<void> {
         x: Math.round(t.position.x * 10) / 10,
         y: Math.round(t.position.y * 10) / 10,
         z: Math.round(t.position.z * 10) / 10,
+        yaw: t.hullYaw,
         seeker: t.seekerLock
           ? {
               target: t.seekerLock.target?.id ?? null,
@@ -1508,10 +1552,10 @@ async function bootstrap(): Promise<void> {
       const home = victim.position.clone();
       const homeYaw = victim.hullYaw;
       const checks: Record<string, unknown> = {};
-      const spot = new THREE.Vector3(0, world.getHeightAt(0, 0), 0);
-      const M = new THREE.Vector3();
-      const A = new THREE.Vector3();
-      const D = new THREE.Vector3();
+      const spot = new Vec3(0, world.getHeightAt(0, 0), 0);
+      const M = new Vec3();
+      const A = new Vec3();
+      const D = new Vec3();
       const fresh = () => {
         victim.respawnAt(spot, 0);
         (victim as unknown as { spawnProtect: number }).spawnProtect = 0;
@@ -1543,15 +1587,15 @@ async function bootstrap(): Promise<void> {
         // Solve the intercept against the real hull AABB: dir ~ (-0.985,0,-0.173) is
         // 80 deg off the +Z face normal; entry picked left-of-centre so the grazing
         // ray crosses the front plane before any side plane.
-        victim.root.updateMatrixWorld(true);
-        const hb = new THREE.Box3().setFromObject(victim.rig.hullTiltGroup);
+        victim.root.getWorldTransform();
+        const hb = worldBounds(victim.rig.hullTiltGroup);
         const ex = hb.min.x + (hb.max.x - hb.min.x) * 0.12;
         const ey = hb.min.y + (hb.max.y - hb.min.y) * 0.55;
         const ez = hb.max.z - 0.15;
         D.set(-0.985, 0, -0.173).normalize();
         const L = 60;
         M.set(ex - D.x * L, ey - D.y * L, ez - D.z * L);
-        A.copy(M).addScaledVector(D, L - 1);
+        A.copy(M).addScaled(D, L - 1);
         victim.takeDamage(apfsds.directDamage, A, M, D, 'cannon', apfsds, { attacker: null });
         const rr = victim.lastXRayReport;
         checks.ricochet80 = !!rr && rr.ricochet === true && rr.penetrated === false;
@@ -1567,7 +1611,7 @@ async function bootstrap(): Promise<void> {
           const ox = (i - 7) * 0.35;
           M.set(spot.x + ox, spot.y + 1.4, spot.z + 60);
           A.set(spot.x + ox * 0.5, spot.y + 1.4 + (i % 3) * 0.3, spot.z + 2.2);
-          D.subVectors(A, M).normalize();
+          D.sub2(A, M).normalize();
           const killed = victim.takeDamage(2.8, A, M, D, 'mg', undefined, { attacker: null });
           void killed;
           const rep = victim.lastXRayReport;
@@ -1654,12 +1698,12 @@ async function bootstrap(): Promise<void> {
         v.onKillEvent = null;
       }
       const rows: DMRow[] = [];
-      const P = new THREE.Vector3();
-      const M = new THREE.Vector3();
-      const A = new THREE.Vector3();
-      const D = new THREE.Vector3();
-      const C = new THREE.Vector3();
-      const _dmLP = new THREE.Vector3();
+      const P = new Vec3();
+      const M = new Vec3();
+      const A = new Vec3();
+      const D = new Vec3();
+      const C = new Vec3();
+      const _dmLP = new Vec3();
       try {
         for (const sh of shellList) {
           for (const vc of victimClasses) {
@@ -1686,22 +1730,22 @@ async function bootstrap(): Promise<void> {
                     const useTurret = false; // face shots always enter the hull box first
                     const mn = useTurret ? db.turretMin : db.hullMin;
                     const sz = useTurret ? db.turretSize : db.hullSize;
-                    const part = useTurret ? (victim.rig.turretPivot as THREE.Object3D) : victim.rig.hullTiltGroup;
-                    part.updateWorldMatrix(true, false);
+                    const part = useTurret ? (victim.rig.turretPivot as Entity) : victim.rig.hullTiltGroup;
+                    part.getWorldTransform();
                     const rx = Math.random(), ry = Math.random();
                     // local face point: front=+Z max, rear=-Z min, side=+/-X, top=+Y max
                     if (aspect === 'front') _dmLP.set(mn.x + sz.x * rx, mn.y + sz.y * ry, mn.z + sz.z);
                     else if (aspect === 'rear') _dmLP.set(mn.x + sz.x * rx, mn.y + sz.y * ry, mn.z);
                     else if (aspect === 'side') _dmLP.set(sideSign > 0 ? mn.x + sz.x : mn.x, mn.y + sz.y * ry, mn.z + sz.z * rx);
                     else _dmLP.set(mn.x + sz.x * rx, mn.y + sz.y, mn.z + sz.z * ry); // top
-                    A.copy(_dmLP).applyMatrix4(part.matrixWorld);
+                    applyMat4(_dmLP, part.getWorldTransform(), A);
                     // 150 m standoff along the aspect direction + small lateral jitter
                     if (aspect === 'front') M.set(A.x + (Math.random() - 0.5) * 2, A.y + (Math.random() - 0.5) * 1.5, A.z + 150);
                     else if (aspect === 'rear') M.set(A.x + (Math.random() - 0.5) * 2, A.y + (Math.random() - 0.5) * 1.5, A.z - 150);
                     else if (aspect === 'side') M.set(A.x + sideSign * 150, A.y + (Math.random() - 0.5) * 1.5, A.z + (Math.random() - 0.5) * 3);
                     else M.set(A.x + (Math.random() - 0.5) * 2, A.y + 150, A.z + (Math.random() - 0.5) * 2);
                   }
-                  D.subVectors(A, M).normalize();
+                  D.sub2(A, M).normalize();
                   victim.takeDamage(sh.dmg, A, M, D, sh.weapon, sh.spec, { attacker: null });
                   if (shot === 1 && victim.lastXRayReport?.penetrated) pens++;
                   if (!victim.alive) { koShots.push(shot); break; }
@@ -1833,7 +1877,7 @@ async function bootstrap(): Promise<void> {
           while (d.alive && steps < 60 * 20) {
             stepSimulation(1 / 30);
             steps++;
-            const dd = d.pos.distanceTo(victim.position);
+            const dd = d.pos.distance(victim.position);
             if (dd < minDist) minDist = dd;
           }
           const ko = !victim.alive || victim.crewAlive < 2;
@@ -1845,7 +1889,7 @@ async function bootstrap(): Promise<void> {
             pen: true,
             ko,
             endPhase: d.phase,
-            endDist: Math.round(d.pos.distanceTo(victim.position) * 10) / 10,
+            endDist: Math.round(d.pos.distance(victim.position) * 10) / 10,
             minDist: Math.round(minDist * 10) / 10,
             endY: Math.round(d.pos.y * 10) / 10,
             terrY: Math.round(world.getHeightAt(d.pos.x, d.pos.z) * 10) / 10,
@@ -1985,7 +2029,7 @@ async function bootstrap(): Promise<void> {
       const results: Record<string, AuditIssue[]> = {};
       const testClasses: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket', 'support', 'littlebird'];
       for (const cls of testClasses) {
-        const tempTank = new Tank(`audit_${cls}`, 'blue', cls, assets, new THREE.Vector3(0, 0, 0), 0, false, 'Audit');
+        const tempTank = new Tank(`audit_${cls}`, 'blue', cls, assets, new Vec3(0, 0, 0), 0, false, 'Audit');
         results[cls] = auditThreeObject(tempTank.root, {
           groundY: 0,
           maxGap: 0.02,

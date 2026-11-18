@@ -1,4 +1,5 @@
-import * as THREE from 'three';
+import type { Entity } from 'playcanvas';
+import type { Vec3 } from './engine/math';
 import { Tank } from './Tank';
 import type { LoadedGameAssets } from './AssetLoader';
 import type { DamageEvent, Team, TerrainQuery, TankEntity, VehicleClass } from './types';
@@ -30,15 +31,15 @@ export class Match {
   readonly tanks: Tank[] = [];
   readonly feed: MatchFeedEntry[] = [];
 
-  private readonly scene: THREE.Scene;
+  private readonly scene: Entity;
   private readonly world: TerrainQuery;
   private readonly humanVehicles: Record<VehicleClass, Tank>;
   private humanClass: VehicleClass = 'normal';
   private pendingClass: VehicleClass | null = null;
   private feedId = 0;
-  private readonly _avoid: THREE.Vector3[] = [];
+  private readonly _avoid: Vec3[] = [];
 
-  constructor(scene: THREE.Scene, world: TerrainQuery, assets: LoadedGameAssets) {
+  constructor(scene: Entity, world: TerrainQuery, assets: LoadedGameAssets) {
     this.scene = scene;
     this.world = world;
 
@@ -56,7 +57,7 @@ export class Match {
     };
 
     this.tanks.push(this.humanVehicles.normal);
-    scene.add(this.humanVehicles.normal.root);
+    scene.addChild(this.humanVehicles.normal.root);
 
     this._spawnTeamBots('blue', BLUE_BOT_CLASSES, 'Anvil', 2, assets);
     this._spawnTeamBots('red', RED_BOT_CLASSES, 'Viper', 1, assets);
@@ -152,7 +153,7 @@ export class Match {
     return Math.atan2(target.x - base.x, target.z - base.z);
   }
 
-  private _spawnPoint(team: Team, avoidExtra: readonly THREE.Vector3[] | null): THREE.Vector3 {
+  private _spawnPoint(team: Team, avoidExtra: readonly Vec3[] | null): Vec3 {
     this._avoid.length = 0;
     for (const t of this.tanks) {
       if (t.alive) this._avoid.push(t.position);
@@ -184,7 +185,7 @@ export class Match {
         false,
         `${callsignPrefix} ${callsignStart + i}`
       );
-      this.scene.add(bot.root);
+      this.scene.addChild(bot.root);
       this.tanks.push(bot);
     }
   }
@@ -205,13 +206,13 @@ export class Match {
     tank.respawnAt(sp, yaw);
   }
 
-  private _swapHumanVehicle(cls: VehicleClass, pos: THREE.Vector3, yaw: number): void {
+  private _swapHumanVehicle(cls: VehicleClass, pos: Vec3, yaw: number): void {
     const prev = this.tanks[0];
-    this.scene.remove(prev.root);
+    this.scene.removeChild(prev.root);
     this.humanClass = cls;
     const next = this.humanVehicles[cls];
     next.respawnAt(pos, yaw);
-    this.scene.add(next.root);
+    this.scene.addChild(next.root);
     this.tanks[0] = next;
   }
 

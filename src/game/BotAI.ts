@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import { clamp, degToRad, Vec3 } from './engine/math';
 import { GRAVITY, solveBallisticAim, solveRocketAim } from './Ballistics';
 import type { TankEntity, TankIntent, Team, TerrainQuery, VehicleClass } from './types';
 
@@ -36,7 +36,7 @@ function hashIdToSeed(id: string): number {
 }
 
 function aimWanderRadians(_cls: VehicleClass): number {
-  return THREE.MathUtils.degToRad(6.8);
+  return degToRad(6.8);
 }
 
 function idealOrbitDistForClass(cls: VehicleClass): number {
@@ -70,8 +70,8 @@ interface BotBrain {
   retargetTimer: number;
   lastAttackerId: string | null;
   lastAttackedAt: number;
-  smoothedTargetVel: THREE.Vector3;
-  lastTargetPos: THREE.Vector3;
+  smoothedTargetVel: Vec3;
+  lastTargetPos: Vec3;
 
   alertTimer: number;
   losLockTimer: number;
@@ -99,15 +99,15 @@ export class BotAIManager {
   // Scratch arrays & vectors (zero per-frame heap allocations)
   private readonly _interest = new Float32Array(NUM_STEER_RAYS);
   private readonly _danger = new Float32Array(NUM_STEER_RAYS);
-  private readonly _muzzlePos = new THREE.Vector3();
-  private readonly _muzzleDir = new THREE.Vector3();
-  private readonly _targetCenter = new THREE.Vector3();
-  private readonly _aimPoint = new THREE.Vector3();
-  private readonly _losDir = new THREE.Vector3();
-  private readonly _desiredBore = new THREE.Vector3();
-  private readonly _wanderRight = new THREE.Vector3();
+  private readonly _muzzlePos = new Vec3();
+  private readonly _muzzleDir = new Vec3();
+  private readonly _targetCenter = new Vec3();
+  private readonly _aimPoint = new Vec3();
+  private readonly _losDir = new Vec3();
+  private readonly _desiredBore = new Vec3();
+  private readonly _wanderRight = new Vec3();
   private readonly _candPool: { t: TankEntity | null; d: number }[] = [];
-  private readonly _scratchPos = new THREE.Vector3();
+  private readonly _scratchPos = new Vec3();
 
   constructor(baseCenters: Record<Team, { x: number; z: number }>) {
     this.baseCenters = baseCenters;
@@ -169,8 +169,8 @@ export class BotAIManager {
         retargetTimer: seed * 0.8,
         lastAttackerId: null,
         lastAttackedAt: -99,
-        smoothedTargetVel: new THREE.Vector3(),
-        lastTargetPos: new THREE.Vector3().copy(bot.position),
+        smoothedTargetVel: new Vec3(),
+        lastTargetPos: new Vec3().copy(bot.position),
         alertTimer: 0,
         losLockTimer: 0,
         losScanTimer: seed * 0.1,
@@ -192,8 +192,8 @@ export class BotAIManager {
         throttle: 0,
         steer: 0,
         brake: false,
-        aimPoint: new THREE.Vector3(0, 0, 0),
-        seekerAimPoint: new THREE.Vector3(0, 0, 0),
+        aimPoint: new Vec3(0, 0, 0),
+        seekerAimPoint: new Vec3(0, 0, 0),
         fireCannon: false,
         fireMG: false,
       });
@@ -213,8 +213,8 @@ export class BotAIManager {
 
     for (let attempt = 0; attempt < 8; attempt++) {
       const t = 0.12 + Math.random() * 0.8;
-      const wx = THREE.MathUtils.clamp((Math.random() * 2 - 1) * limit, -limit, limit);
-      const wz = THREE.MathUtils.clamp(base.z * t, -limit, limit);
+      const wx = clamp((Math.random() * 2 - 1) * limit, -limit, limit);
+      const wz = clamp(base.z * t, -limit, limit);
 
       let clear = true;
       for (let i = 0; i < obstacles.length; i++) {
@@ -251,10 +251,10 @@ export class BotAIManager {
   private _losClearTo(bot: TankEntity, target: TankEntity, world: TerrainQuery): boolean {
     bot.getMuzzleWorld(this._muzzlePos, this._muzzleDir);
     target.getCenterMassWorld(this._scratchPos);
-    this._losDir.subVectors(this._scratchPos, this._muzzlePos);
+    this._losDir.sub2(this._scratchPos, this._muzzlePos);
     const losLen = this._losDir.length();
     if (losLen <= 1.0) return true;
-    this._losDir.multiplyScalar(1 / losLen);
+    this._losDir.mulScalar(1 / losLen);
     const checkDist = Math.max(0.5, losLen - target.stats.hitRadius * 0.85);
     const hit = world.raycastWorld(this._muzzlePos, this._losDir, checkDist);
     if (hit === null) return true;
@@ -485,7 +485,7 @@ export class BotAIManager {
     const warnStart = softBorder - 14;
     if (Math.abs(ex) > warnStart) {
       const outSignX = Math.sign(ex);
-      const pen = THREE.MathUtils.clamp((Math.abs(ex) - warnStart) / 16, 0, 1);
+      const pen = clamp((Math.abs(ex) - warnStart) / 16, 0, 1);
       for (let k = 0; k < NUM_STEER_RAYS; k++) {
         const outward = RAY_SIN[k] * outSignX;
         if (outward > 0) {
@@ -495,7 +495,7 @@ export class BotAIManager {
     }
     if (Math.abs(ez) > warnStart) {
       const outSignZ = Math.sign(ez);
-      const pen = THREE.MathUtils.clamp((Math.abs(ez) - warnStart) / 16, 0, 1);
+      const pen = clamp((Math.abs(ez) - warnStart) / 16, 0, 1);
       for (let k = 0; k < NUM_STEER_RAYS; k++) {
         const outward = RAY_COS[k] * outSignZ;
         if (outward > 0) {
@@ -614,10 +614,10 @@ export class BotAIManager {
       // Per-brain target velocity smoothing for predictive ballistic lead
       // (reset inside _selectTarget on target change or >20m teleport)
       if (target) {
-        if (brain.lastTargetPos.distanceToSquared(target.position) > 400) {
+        if (brain.lastTargetPos.distanceSq(target.position) > 400) {
           brain.smoothedTargetVel.copy(target.velocity);
         } else {
-          brain.smoothedTargetVel.lerp(target.velocity, 1 - Math.exp(-6.5 * safeDt));
+          brain.smoothedTargetVel.lerp(brain.smoothedTargetVel, target.velocity, 1 - Math.exp(-6.5 * safeDt));
         }
         brain.lastTargetPos.copy(target.position);
       }
@@ -689,7 +689,7 @@ export class BotAIManager {
         } else if (distToTarget < idealDist - 18) {
           tangentDeg = 92; // Spiral gently outward
         }
-        const tangentRad = THREE.MathUtils.degToRad(tangentDeg);
+        const tangentRad = degToRad(tangentDeg);
         rawDesiredYaw = wrapAnglePi(yawToTarget + brain.orbitSign * tangentRad);
         const wave = 0.5 + 0.5 * Math.sin(this.clock * 0.92 + brain.seed * Math.PI * 2);
         desiredThrottle = 0.42 + 0.26 * wave;
@@ -740,7 +740,7 @@ export class BotAIManager {
         const yawErr = wrapAnglePi(brain.smoothedMoveYaw - bot.hullYaw);
         // Match Tank.ts reverse steering flip (`this.speed < -0.6 ? -1 : 1`)
         const reverseSteerSign = bot.speed < -0.6 ? -1 : 1;
-        intent.steer = THREE.MathUtils.clamp(yawErr / 0.42, -1, 1) * reverseSteerSign;
+        intent.steer = clamp(yawErr / 0.42, -1, 1) * reverseSteerSign;
         intent.brake = false;
 
         if (!wantsReverseMove && Math.abs(yawErr) > 1.35) {
@@ -806,7 +806,7 @@ export class BotAIManager {
           );
         } else {
           // Keep last solution: aim along current bore toward predicted point
-          this._aimPoint.copy(this._muzzlePos).addScaledVector(this._muzzleDir, 160);
+          this._aimPoint.copy(this._muzzlePos).addScaled(this._muzzleDir, 160);
         }
       } else {
         // Iterative lead + gravity drop solver
@@ -841,7 +841,7 @@ export class BotAIManager {
       const lateralSpread = distToTarget * totalWanderRad * noiseAz;
       const verticalSpread = distToTarget * totalWanderRad * 0.55 * noiseEl;
 
-      this._aimPoint.addScaledVector(this._wanderRight, lateralSpread);
+      this._aimPoint.addScaled(this._wanderRight, lateralSpread);
       this._aimPoint.y += verticalSpread;
       intent.aimPoint.copy(this._aimPoint);
 
@@ -849,11 +849,11 @@ export class BotAIManager {
       brain.losScanTimer -= safeDt;
       if (brain.losScanTimer <= 0) {
         brain.losScanTimer = 0.1;
-        this._losDir.subVectors(this._targetCenter, this._muzzlePos);
+        this._losDir.sub2(this._targetCenter, this._muzzlePos);
         const losLen = this._losDir.length();
         let scanned = true;
         if (losLen > 1.0) {
-          this._losDir.multiplyScalar(1 / losLen);
+          this._losDir.mulScalar(1 / losLen);
           const checkDist = Math.max(0.5, losLen - target.stats.hitRadius * 0.85);
           const losHit = world.raycastWorld(this._muzzlePos, this._losDir, checkDist);
           if (losHit !== null) {
@@ -878,8 +878,8 @@ export class BotAIManager {
       }
 
       // Compute bore alignment angle between actual gun barrel direction and predicted aimPoint
-      this._desiredBore.subVectors(this._aimPoint, this._muzzlePos).normalize();
-      const boreDot = THREE.MathUtils.clamp(this._muzzleDir.dot(this._desiredBore), -1, 1);
+      this._desiredBore.sub2(this._aimPoint, this._muzzlePos).normalize();
+      const boreDot = clamp(this._muzzleDir.dot(this._desiredBore), -1, 1);
       const boreAngle = Math.acos(boreDot);
 
       // Periodic AI shell type variation (switches between AP & HE occasionally)

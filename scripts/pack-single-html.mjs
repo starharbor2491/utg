@@ -8,8 +8,8 @@ const PUBLIC_DIR = path.join(ROOT, 'public');
 const OUT_HTML = path.join(ROOT, 'untitled-tank-game.html');
 
 const EMBED_FILES = [
-  ['./decoders/basis/basis_transcoder.js', 'decoders/basis/basis_transcoder.js'],
-  ['./decoders/basis/basis_transcoder.wasm', 'decoders/basis/basis_transcoder.wasm'],
+  ['./decoders/pc-basis/basis.wasm.js', 'decoders/pc-basis/basis.wasm.js'],
+  ['./decoders/pc-basis/basis.wasm.wasm', 'decoders/pc-basis/basis.wasm.wasm'],
   ['./assets/models/player_mbt_lod1.glb', 'assets/models/player_mbt_lod1.glb'],
   ['./assets/models/humvee.glb', 'assets/models/humvee.glb'],
   ['./assets/models/ifv.glb', 'assets/models/ifv.glb'],

@@ -1,72 +1,73 @@
-import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
-import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
-import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
-import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import {
+  ADDRESS_REPEAT,
+  AppBase,
+  Asset,
+  CULLFACE_BACK,
+  CULLFACE_NONE,
+  ContainerResource,
+  Entity,
+  EnvLighting,
+  Material,
+  PIXELFORMAT_RGBA8,
+  PIXELFORMAT_SRGBA8,
+  StandardMaterial,
+  Texture,
+  basisInitialize,
+  meshoptInitialize,
+} from 'playcanvas';
+import { MeshoptDecoder } from 'meshoptimizer';
 import { buildRocketLauncherRig } from './models/RocketLauncher';
 import { buildSupportVehicleRig } from './models/SupportVehicle';
 import { buildLittleBirdRig } from './models/LittleBird';
 import { addMovingTracks, removeBakedTracks } from './models/Tracks';
+import { setApp } from './engine/app';
+import { box, cylinder, extrude, Geo, lathe, roundedBox, Shape, torus } from './engine/geometry';
+import { createHdrTexture } from './engine/hdr';
+import { addShaderHooks, applyRealisticArmorShader, standard } from './engine/materials';
+import { Box3, Mat4, Vec2, Vec3, applyMat4, degToRad } from './engine/math';
+import { findByName, group, meshNode, userData, worldBounds } from './engine/scene';
 import type { Team, VehicleClass } from './types';
 
 export type ModelKey =
-  | 'player_mbt_lod1'
-  | 'humvee'
-  | 'ifv'
-  | 'ruined_building'
-  | 'guard_tower'
-  | 'fuel_station'
-  | 'boulder_large'
-  | 'boulder_medium'
-  | 'tree'
-  | 'barrier_wall'
-  | 'supply_crates';
+  | 'player_mbt_lod1' | 'humvee' | 'ifv' | 'ruined_building' | 'guard_tower'
+  | 'fuel_station' | 'boulder_large' | 'boulder_medium' | 'tree' | 'barrier_wall' | 'supply_crates';
 
-export interface WheelNodeBinding {
-  node: THREE.Object3D;
-  side: 'L' | 'R';
-  radius: number;
-}
+export interface WheelNodeBinding { node: Entity; side: 'L' | 'R'; radius: number }
 
 export interface InstantiatedTankRig {
-  root: THREE.Group;
-  hullTiltGroup: THREE.Group;
-  visualRoot: THREE.Object3D;
-  turretPivot: THREE.Object3D;
-  turretRestPos: THREE.Vector3;
-  gunPivot: THREE.Object3D;
-  gunRecoilGroup: THREE.Object3D;
-  muzzleNode: THREE.Object3D;
-  coaxNode: THREE.Object3D;
-  rwsNode: THREE.Object3D | null;
+  root: Entity;
+  hullTiltGroup: Entity;
+  visualRoot: Entity;
+  turretPivot: Entity;
+  turretRestPos: Vec3;
+  gunPivot: Entity;
+  gunRecoilGroup: Entity;
+  muzzleNode: Entity;
+  coaxNode: Entity;
+  rwsNode: Entity | null;
   wheels: WheelNodeBinding[];
-  /** Wheeled vehicles: front-axle steer pivots (empty for tracked) */
-  steerNodes: THREE.Object3D[];
-  /** Rocket launcher: one mesh per pod tube, hidden as rockets launch */
-  rocketMeshes: THREE.Object3D[];
-  /** Optional per-frame pose hook (e.g. rocket launcher elevation rams) */
+  steerNodes: Entity[];
+  rocketMeshes: Entity[];
   articulate?: (gunPitch: number) => void;
   tracks?: { side: 'L' | 'R'; advance: (meters: number) => void }[];
   spinRotors?: (dt: number) => void;
-  hullMeshes: THREE.Mesh[];
+  hullMeshes: Entity[];
 }
 
 export interface TerrainTextures {
-  grassColor: THREE.Texture;
-  grassNormal: THREE.Texture;
-  grassRoughness: THREE.Texture;
-  dirtColor: THREE.Texture;
-  dirtNormal: THREE.Texture;
-  dirtRoughness: THREE.Texture;
+  grassColor: Texture;
+  grassNormal: Texture;
+  grassRoughness: Texture;
+  dirtColor: Texture;
+  dirtNormal: Texture;
+  dirtRoughness: Texture;
 }
 
 export interface LoadedGameAssets {
-  models: Record<ModelKey, THREE.Group>;
+  models: Record<ModelKey, Entity>;
   terrainTextures: TerrainTextures;
-  skyEnvMap: THREE.Texture;
-  skyBackground: THREE.DataTexture;
+  skyEnvAtlas: Texture;
+  skyBox: Texture;
 }
 
 const MODEL_PATHS: Record<ModelKey, string> = {
@@ -84,254 +85,116 @@ const MODEL_PATHS: Record<ModelKey, string> = {
 };
 
 declare global {
-  interface Window {
-    __EMBEDDED_VFS__?: Record<string, string>;
-  }
+  interface Window { __EMBEDDED_VFS__?: Record<string, string> }
 }
 
 function base64ToUint8(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const len = bin.length;
-  const out = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    out[i] = bin.charCodeAt(i);
-  }
+  const bin = atob(b64), out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
 }
 
 async function decodeEmbeddedGzipAsset(b64Gzip: string): Promise<Uint8Array> {
-  const compressed = base64ToUint8(b64Gzip);
-  const ds = new DecompressionStream('gzip');
-  const blob = new Blob([compressed as unknown as BlobPart]);
-  const decompressedStream = blob.stream().pipeThrough(ds);
-  const ab = await new Response(decompressedStream).arrayBuffer();
-  return new Uint8Array(ab);
+  const blob = new Blob([base64ToUint8(b64Gzip) as unknown as BlobPart]);
+  return new Uint8Array(await new Response(blob.stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
 }
 
 function uint8ToBase64(bytes: Uint8Array): string {
   let binary = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(binary);
 }
 
-function configureEmbeddedKTX2Loader(
-  ktx2Loader: KTX2Loader,
-  jsText: string,
-  wasmBuffer: ArrayBuffer
-): void {
-  const ktxAny = ktx2Loader as unknown as {
-    workerConfig: unknown;
-    transcoderBinary: ArrayBuffer;
-    transcoderPending: Promise<void>;
-    workerPool: { setWorkerCreator: (fn: () => Worker) => void };
-  };
-  const ktxStatic = KTX2Loader as unknown as {
-    BasisWorker: () => void;
-    EngineFormat: unknown;
-    EngineType: unknown;
-    TranscoderFormat: unknown;
-    BasisFormat: unknown;
-  };
+async function embeddedUrl(path: string, mime: string): Promise<string | null> {
+  const encoded = window.__EMBEDDED_VFS__?.[path];
+  if (!encoded) return null;
+  const bytes = await decodeEmbeddedGzipAsset(encoded);
+  return URL.createObjectURL(new Blob([bytes as unknown as BlobPart], { type: mime }));
+}
 
-  const fn = ktxStatic.BasisWorker.toString();
-  const body = [
-    '/* constants */',
-    'let _EngineFormat = ' + JSON.stringify(ktxStatic.EngineFormat),
-    'let _EngineType = ' + JSON.stringify(ktxStatic.EngineType),
-    'let _TranscoderFormat = ' + JSON.stringify(ktxStatic.TranscoderFormat),
-    'let _BasisFormat = ' + JSON.stringify(ktxStatic.BasisFormat),
-    '/* basis_transcoder.js */',
-    jsText,
-    '/* worker */',
-    fn.substring(fn.indexOf('{') + 1, fn.lastIndexOf('}')),
-  ].join('\n');
+async function assetUrl(path: string, mime: string): Promise<string> {
+  return await embeddedUrl(path, mime) ?? path;
+}
 
-  // Use a data: URL worker so even strict `file://` (null opaque origin) never blocks Worker creation!
-  const workerBytes = new TextEncoder().encode(body);
-  const dataWorkerUrl = 'data:text/javascript;base64,' + uint8ToBase64(workerBytes);
+let decodersReady: Promise<void> | null = null;
+async function initializeDecoders(): Promise<void> {
+  if (decodersReady) return decodersReady;
+  decodersReady = (async () => {
+    meshoptInitialize({ decoder: MeshoptDecoder });
+    await MeshoptDecoder.ready;
+    const js = await embeddedUrl('./decoders/pc-basis/basis.wasm.js', 'text/javascript');
+    const wasm = await embeddedUrl('./decoders/pc-basis/basis.wasm.wasm', 'application/wasm');
+    basisInitialize(js && wasm
+      ? { glueUrl: js, wasmUrl: wasm }
+      : { glueUrl: './decoders/pc-basis/basis.wasm.js', wasmUrl: './decoders/pc-basis/basis.wasm.wasm' });
+  })();
+  return decodersReady;
+}
 
-  ktxAny.transcoderBinary = wasmBuffer;
-  ktxAny.transcoderPending = Promise.resolve().then(() => {
-    ktxAny.workerPool.setWorkerCreator(() => {
-      const worker = new Worker(dataWorkerUrl);
-      const binCopy = ktxAny.transcoderBinary.slice(0);
-      worker.postMessage({ type: 'init', config: ktxAny.workerConfig, transcoderBinary: binCopy }, [
-        binCopy,
-      ]);
-      return worker;
-    });
+function loadContainer(app: AppBase, url: string, name: string): Promise<ContainerResource> {
+  return new Promise((resolve, reject) => {
+    const asset = new Asset(name, 'container', { url });
+    app.assets.add(asset);
+    asset.ready((a) => resolve(a.resource as ContainerResource));
+    asset.once('error', (err) => reject(new Error(`${name}: ${err}`)));
+    app.assets.load(asset);
   });
 }
 
-/**
- * Lightweight single-pass Rolled-Homogeneous-Armor (RHA) micro-grain, dust edge-sheen,
- * mud skirt weathering & contact ambient-occlusion shader (zero extra render passes!).
- */
-export function applyRealisticArmorShader(
-  mat: THREE.MeshStandardMaterial,
-  cacheTag = 'rha-v1',
-  opts?: { grain?: number; heightRef?: number }
-): void {
-  const grain = opts?.grain ?? 1;
-  const heightRef = opts?.heightRef ?? 0;
-  const key = `${cacheTag}-${mat.map ? 'tex' : 'notex'}-${mat.normalMap ? 'nrm' : 'nonrm'}-g${grain}-h${heightRef}`;
-  mat.customProgramCacheKey = () => key;
-  mat.onBeforeCompile = (shader) => {
-    shader.vertexShader = shader.vertexShader
-      .replace(
-        '#include <common>',
-        `#include <common>
-        varying vec3 vArmorLocalPos;
-        varying vec3 vArmorWorldNormal;`
-      )
-      .replace(
-        '#include <begin_vertex>',
-        `#include <begin_vertex>
-        vArmorLocalPos = position;
-        vArmorWorldNormal = normalize(mat3(modelMatrix) * objectNormal);`
-      );
-
-    shader.fragmentShader = shader.fragmentShader
-      .replace(
-        '#include <common>',
-        `#include <common>
-        varying vec3 vArmorLocalPos;
-        varying vec3 vArmorWorldNormal;
-        float rhaHash(vec3 p) {
-          p = fract(p * 0.3183099 + 0.1);
-          p *= 17.0;
-          return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
-        }`
-      )
-      .replace(
-        '#include <map_fragment>',
-        `#include <map_fragment>
-        // Micro-scale cast/rolled steel grain + lower-skirt mud splatter + sun-kissed top dust
-        // heightRef shifts the mud/AO datum into vehicle space for parts merged
-        // under articulated nodes (pod, turntable) whose local y is not vehicle y.
-        float armorH = vArmorLocalPos.y + ${heightRef.toFixed(3)};
-        float steelGrain = rhaHash(floor(vArmorLocalPos * 46.0)) * ${(0.08 * grain).toFixed(4)} - ${(0.04 * grain).toFixed(4)};
-        float mudHeight = 1.0 - smoothstep(0.05, 0.72, armorH);
-        vec3 mudTint = vec3(0.34, 0.29, 0.21);
-        diffuseColor.rgb = mix(diffuseColor.rgb * (1.0 + steelGrain), mudTint, mudHeight * 0.34);
-        float topDust = smoothstep(0.55, 0.98, vArmorWorldNormal.y) * 0.07;
-        diffuseColor.rgb += vec3(topDust * 0.95, topDust * 0.90, topDust * 0.74);`
-      )
-      .replace(
-        '#include <roughnessmap_fragment>',
-        `#include <roughnessmap_fragment>
-        float grainR = rhaHash(floor(vArmorLocalPos * 32.0)) * ${(0.12 * grain).toFixed(4)} - ${(0.06 * grain).toFixed(4)};
-        roughnessFactor = clamp(roughnessFactor + grainR, 0.18, 0.96);`
-      )
-      .replace(
-        '#include <aomap_fragment>',
-        `#include <aomap_fragment>
-        // Analytical undercarriage & road-wheel contact ambient occlusion (replaces expensive GTAO!)
-        float contactAO = mix(0.44, 1.0, smoothstep(-0.05, 0.95, armorH));
-        reflectedLight.indirectDiffuse *= contactAO;
-        reflectedLight.indirectSpecular *= contactAO;
-        reflectedLight.directDiffuse *= mix(0.76, 1.0, contactAO);`
-      );
-  };
-}
-
 export async function loadAllGameAssets(
-  renderer: THREE.WebGLRenderer,
+  app: AppBase,
   onProgress?: (progress01: number, label: string) => void
 ): Promise<LoadedGameAssets> {
-  if ('ready' in MeshoptDecoder && MeshoptDecoder.ready) {
-    await MeshoptDecoder.ready;
-  }
-
-  const vfs = window.__EMBEDDED_VFS__;
-
-  const ktx2Loader = new KTX2Loader();
-  ktx2Loader.detectSupport(renderer);
-
-  if (vfs && vfs['./decoders/basis/basis_transcoder.js'] && vfs['./decoders/basis/basis_transcoder.wasm']) {
-    const [basisJsBytes, basisWasmBytes] = await Promise.all([
-      decodeEmbeddedGzipAsset(vfs['./decoders/basis/basis_transcoder.js']),
-      decodeEmbeddedGzipAsset(vfs['./decoders/basis/basis_transcoder.wasm']),
-    ]);
-    const basisJsText = new TextDecoder().decode(basisJsBytes);
-    configureEmbeddedKTX2Loader(ktx2Loader, basisJsText, basisWasmBytes.buffer as ArrayBuffer);
-  } else {
-    ktx2Loader.setTranscoderPath('./decoders/basis/');
-  }
-
-  const gltfLoader = new GLTFLoader();
-  gltfLoader.setMeshoptDecoder(MeshoptDecoder);
-  gltfLoader.setKTX2Loader(ktx2Loader);
-
-  const texLoader = new THREE.TextureLoader();
-  const hdrLoader = new HDRLoader();
-
+  setApp(app);
+  await initializeDecoders();
   const modelKeys = Object.keys(MODEL_PATHS) as ModelKey[];
   const totalTasks = modelKeys.length + 5;
   let completed = 0;
+  const bump = (label: string) => onProgress?.(Math.min(0.98, ++completed / totalTasks), label);
+  const models = {} as Record<ModelKey, Entity>;
 
-  const bump = (label: string) => {
-    completed++;
-    onProgress?.(Math.min(0.98, completed / totalTasks), label);
-  };
+  await Promise.all(modelKeys.map(async (key) => {
+    const url = await assetUrl(MODEL_PATHS[key], 'model/gltf-binary');
+    const container = await loadContainer(app, url, key);
+    const root = container.instantiateRenderEntity();
+    root.name = key;
+    prepareModelMaterialsAndShadows(root, key);
+    models[key] = root;
+    bump(`Loaded ${key.replace(/_/g, ' ')}`);
+  }));
 
-  const models = {} as Record<ModelKey, THREE.Group>;
-
-  await Promise.all(
-    modelKeys.map(async (key) => {
-      const relPath = MODEL_PATHS[key];
-      let sceneRoot: THREE.Group;
-      if (vfs && vfs[relPath]) {
-        const bytes = await decodeEmbeddedGzipAsset(vfs[relPath]);
-        const gltf = await gltfLoader.parseAsync(bytes.buffer as ArrayBuffer, '');
-        sceneRoot = gltf.scene;
-      } else {
-        const gltf = await gltfLoader.loadAsync(relPath);
-        sceneRoot = gltf.scene;
-      }
-      prepareModelMaterialsAndShadows(sceneRoot, key);
-      models[key] = sceneRoot;
-      bump(`Loaded ${key.replace(/_/g, ' ')}`);
-    })
-  );
-
-  const maxAniso = Math.min(4, renderer.capabilities.getMaxAnisotropy());
-  const loadTiledTex = async (url: string, isSRGB: boolean, label: string): Promise<THREE.Texture> => {
-    let tex: THREE.Texture;
-    if (vfs && vfs[url]) {
-      const bytes = await decodeEmbeddedGzipAsset(vfs[url]);
-      const dataUrl = 'data:image/jpeg;base64,' + uint8ToBase64(bytes);
-      const img = new Image();
-      img.src = dataUrl;
-      await img.decode();
-      tex = new THREE.Texture(img);
-    } else {
-      tex = await texLoader.loadAsync(url);
-    }
-    tex.wrapS = THREE.RepeatWrapping;
-    tex.wrapT = THREE.RepeatWrapping;
-    tex.colorSpace = isSRGB ? THREE.SRGBColorSpace : THREE.NoColorSpace;
-    tex.anisotropy = maxAniso;
-    tex.needsUpdate = true;
+  const maxAniso = Math.min(4, app.graphicsDevice.maxAnisotropy);
+  const loadTiledTex = async (url: string, isSRGB: boolean, label: string): Promise<Texture> => {
+    const src = await assetUrl(url, 'image/jpeg');
+    const img = new Image();
+    img.src = src;
+    await img.decode();
+    const tex = new Texture(app.graphicsDevice, {
+      width: img.width,
+      height: img.height,
+      format: isSRGB ? PIXELFORMAT_SRGBA8 : PIXELFORMAT_RGBA8,
+      mipmaps: true,
+      addressU: ADDRESS_REPEAT,
+      addressV: ADDRESS_REPEAT,
+      anisotropy: maxAniso,
+    });
+    tex.setSource(img);
     bump(label);
     return tex;
   };
 
-  const loadHdrSky = async (url: string): Promise<THREE.DataTexture> => {
-    let t: THREE.DataTexture;
-    if (vfs && vfs[url]) {
-      const bytes = await decodeEmbeddedGzipAsset(vfs[url]);
-      t = (
-        hdrLoader as unknown as { createDataTexture: (buf: ArrayBuffer) => THREE.DataTexture }
-      ).createDataTexture(bytes.buffer as ArrayBuffer);
+  const loadHdrSky = async (url: string): Promise<Texture> => {
+    let buffer: ArrayBuffer;
+    if (window.__EMBEDDED_VFS__?.[url]) {
+      const bytes = await decodeEmbeddedGzipAsset(window.__EMBEDDED_VFS__[url]);
+      buffer = bytes.buffer as ArrayBuffer;
     } else {
-      t = await hdrLoader.loadAsync(url);
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HDR ${url}: ${response.status}`);
+      buffer = await response.arrayBuffer();
     }
     bump('Atmospheric HDRI sky');
-    return t;
+    return createHdrTexture(app.graphicsDevice, buffer, 'sky');
   };
 
   const [grassColor, grassNormal, dirtColor, dirtNormal, hdrTex] = await Promise.all([
@@ -341,840 +204,318 @@ export async function loadAllGameAssets(
     loadTiledTex('./assets/textures/terrain/dirt_normal.jpg', false, 'Terrain dirt normal'),
     loadHdrSky('./assets/hdri/sky.hdr'),
   ]);
-
-  hdrTex.mapping = THREE.EquirectangularReflectionMapping;
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  pmrem.compileEquirectangularShader();
-  const skyEnvMap = pmrem.fromEquirectangular(hdrTex).texture;
-  pmrem.dispose();
-
-  ktx2Loader.dispose();
-
+  const skyBox = EnvLighting.generateSkyboxCubemap(hdrTex);
+  const lightingSource = EnvLighting.generateLightingSource(hdrTex);
+  const skyEnvAtlas = EnvLighting.generateAtlas(lightingSource);
+  lightingSource.destroy();
+  hdrTex.destroy();
   onProgress?.(1, 'Ready');
-
   return {
     models,
-    terrainTextures: {
-      grassColor,
-      grassNormal,
-      grassRoughness: grassNormal,
-      dirtColor,
-      dirtNormal,
-      dirtRoughness: dirtNormal,
-    },
-    skyEnvMap,
-    skyBackground: hdrTex,
+    terrainTextures: { grassColor, grassNormal, grassRoughness: grassNormal, dirtColor, dirtNormal, dirtRoughness: dirtNormal },
+    skyEnvAtlas,
+    skyBox,
   };
 }
 
-function prepareModelMaterialsAndShadows(root: THREE.Object3D, key: ModelKey): void {
+function prepareModelMaterialsAndShadows(root: Entity, key: ModelKey): void {
   const isFoliage = key === 'tree';
   const isVehicle = key === 'player_mbt_lod1' || key === 'humvee' || key === 'ifv';
-  const isSmallProp =
-    key === 'boulder_medium' || key === 'barrier_wall' || key === 'supply_crates';
-
-  // Remove high-poly sub-twig `branches_lod1` on Aspen trees (saves ~2,400 tris & 1 draw call per tree!)
+  const isSmallProp = key === 'boulder_medium' || key === 'barrier_wall' || key === 'supply_crates';
   if (isFoliage) {
-    const toRemove: THREE.Object3D[] = [];
-    root.traverse((o) => {
-      if ((o.name || '').toLowerCase().includes('branches')) toRemove.push(o);
-    });
-    for (const r of toRemove) r.parent?.remove(r);
+    const remove: Entity[] = [];
+    root.forEach((n) => { if ((n.name || '').toLowerCase().includes('branches')) remove.push(n as Entity); });
+    for (const entity of remove) entity.parent?.removeChild(entity);
   }
-
-  root.traverse((obj) => {
-    if (!(obj as THREE.Mesh).isMesh) return;
-    const mesh = obj as THREE.Mesh;
-    const mName = (mesh.name || '').toLowerCase();
-    const pName = (mesh.parent?.name || '').toLowerCase();
-
-    if (isVehicle) {
-      // Only main hull body & turret shell need to cast shadow (saves 24 wheel/hatch/fitting shadow draw calls per tank!)
-      const isMinorPart =
-        mName.includes('wheel') ||
-        pName.includes('wheel') ||
-        mName.includes('idler') ||
-        pName.includes('idler') ||
-        mName.includes('sprocket') ||
-        pName.includes('sprocket') ||
-        mName.includes('hatch') ||
-        pName.includes('hatch') ||
-        mName.includes('fitting');
-      mesh.castShadow = !isMinorPart;
-      mesh.receiveShadow = !isMinorPart;
-    } else {
-      mesh.castShadow = !isSmallProp;
-      mesh.receiveShadow = !isFoliage;
-    }
-
-    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-    for (const m of mats) {
-      if (!m) continue;
-      const std = m as THREE.MeshStandardMaterial;
-      if (std.isMeshStandardMaterial) {
-        std.envMapIntensity = isFoliage ? 0.8 : 1.08;
-        if (isFoliage && (std.alphaTest > 0 || mName.includes('leaves'))) {
-          std.side = THREE.DoubleSide;
-          std.alphaTest = Math.max(std.alphaTest, 0.42);
-        } else {
-          std.side = THREE.FrontSide;
-        }
-        if (!std.map && !std.roughnessMap) {
-          const matName = (std.name || '').toLowerCase();
-          if (matName.includes('steel')) {
-            std.metalness = 0.56;
-            std.roughness = 0.44;
-          } else if (matName.includes('track')) {
-            std.metalness = 0.22;
-            std.roughness = 0.85;
-          } else if (matName.includes('glass')) {
-            std.metalness = 0.88;
-            std.roughness = 0.14;
-          } else {
-            std.metalness = 0.24;
-            std.roughness = 0.64;
-          }
-        }
-        std.needsUpdate = true;
+  root.forEach((node) => {
+    const obj = node as Entity;
+    const mName = obj.name.toLowerCase(), pName = (obj.parent?.name || '').toLowerCase();
+    if (obj.render) {
+      if (isVehicle) {
+        const minor = mName.includes('wheel') || pName.includes('wheel') || mName.includes('idler') || pName.includes('idler') ||
+          mName.includes('sprocket') || pName.includes('sprocket') || mName.includes('hatch') || pName.includes('hatch') || mName.includes('fitting');
+        obj.render.castShadows = !minor;
+        obj.render.receiveShadows = !minor;
+      } else {
+        obj.render.castShadows = !isSmallProp;
+        obj.render.receiveShadows = !isFoliage;
       }
+    }
+    for (const mi of obj.render?.meshInstances ?? []) {
+      const mat = mi.material as StandardMaterial;
+      if (!(mat instanceof StandardMaterial)) continue;
+      mat.reflectivity = isFoliage ? 0.8 : 1.08;
+      mat.useDynamicRefraction = false;
+      if (isFoliage && (mat.alphaTest > 0 || mName.includes('leaves'))) {
+        mat.cull = CULLFACE_NONE;
+        mat.twoSidedLighting = true;
+        mat.alphaTest = Math.max(mat.alphaTest, 0.42);
+      } else {
+        mat.cull = CULLFACE_BACK;
+      }
+      if (!mat.diffuseMap && !mat.glossMap) {
+        const name = mat.name.toLowerCase();
+        mat.useMetalness = true;
+        if (name.includes('steel')) { mat.metalness = 0.56; mat.gloss = 0.56; }
+        else if (name.includes('track')) { mat.metalness = 0.22; mat.gloss = 0.15; }
+        else if (name.includes('glass')) { mat.metalness = 0.88; mat.gloss = 0.86; }
+        else { mat.metalness = 0.24; mat.gloss = 0.36; }
+      }
+      mat.update();
     }
   });
 }
 
-/**
- * Builds grounded (`min.y === 0`), articulated rigs for all 3 vehicle classes:
- * - Normal MBT (`normal`)
- * - Heavy Tank (`heavy` — ERA reactive armor wedges, 152mm heavy barrel & muzzle brake, twin rear fuel drums)
- * - Infantry Fighting Vehicle (`ifv` — agile tracked IFV chassis + rapid-fire 30mm chain-gun unmanned turret)
- */
-export function instantiateTankRig(
-  assets: LoadedGameAssets,
-  vehicleClass: VehicleClass,
-  team: Team
-): InstantiatedTankRig {
+export function instantiateTankRig(assets: LoadedGameAssets, vehicleClass: VehicleClass, team: Team): InstantiatedTankRig {
   const rig = buildVehicleRig(assets, vehicleClass, team);
   const tracked = vehicleClass === 'normal' || vehicleClass === 'heavy' || vehicleClass === 'ifv';
-  const replaceTracks = tracked && removeBakedTracks(rig, vehicleClass === 'ifv');
-  mergeStaticVehicleMeshes(rig, `${vehicleClass}:${team}`);
-  if (replaceTracks) addMovingTracks(rig);
+  if (tracked && removeBakedTracks(rig, vehicleClass === 'ifv')) addMovingTracks(rig);
   return rig;
 }
 
-function buildVehicleRig(
-  assets: LoadedGameAssets,
-  vehicleClass: VehicleClass,
-  team: Team
-): InstantiatedTankRig {
-  // Rocket artillery is fully procedural (src/game/models/RocketLauncher.ts)
-  if (vehicleClass === 'rocket') {
-    return buildRocketLauncherRig(team);
-  }
-  if (vehicleClass === 'support') {
-    return buildSupportVehicleRig(team);
-  }
+function buildVehicleRig(assets: LoadedGameAssets, vehicleClass: VehicleClass, team: Team): InstantiatedTankRig {
+  if (vehicleClass === 'rocket') return buildRocketLauncherRig(team);
+  if (vehicleClass === 'support') return buildSupportVehicleRig(team);
   if (vehicleClass === 'littlebird') return buildLittleBirdRig(team);
 
-  const root = new THREE.Group();
-  root.name = `tank_${team}_${vehicleClass}`;
-
-  const hullTiltGroup = new THREE.Group();
-  hullTiltGroup.name = 'hull_tilt_group';
-  hullTiltGroup.rotation.order = 'YXZ';
-  root.add(hullTiltGroup);
-
-  const wheels: WheelNodeBinding[] = [];
-  const steerNodes: THREE.Object3D[] = [];
-  const rocketMeshes: THREE.Object3D[] = [];
-  const hullMeshes: THREE.Mesh[] = [];
-
-  const isBlue = team === 'blue';
-  const isHeavy = vehicleClass === 'heavy';
-
-  // Radius of a wheel/road-wheel pivot from its world-space bbox (spin speed only)
-  const measureWheelRadius = (node: THREE.Object3D): number => {
-    const box = new THREE.Box3().setFromObject(node);
-    const pivot = new THREE.Vector3();
-    node.getWorldPosition(pivot);
-    return Math.max(
-      0.2,
-      box.max.y - pivot.y,
-      pivot.y - box.min.y,
-      box.max.z - pivot.z,
-      pivot.z - box.min.z,
-      box.max.x - pivot.x,
-      pivot.x - box.min.x
-    );
+  const root = group(`tank_${team}_${vehicleClass}`);
+  const hullTiltGroup = group('hull_tilt_group', root);
+  const wheels: WheelNodeBinding[] = [], steerNodes: Entity[] = [], rocketMeshes: Entity[] = [], hullMeshes: Entity[] = [];
+  const isBlue = team === 'blue', isHeavy = vehicleClass === 'heavy';
+  const measureWheelRadius = (node: Entity): number => {
+    const bounds = worldBounds(node), pivot = node.getPosition();
+    return Math.max(0.2, bounds.max.y - pivot.y, pivot.y - bounds.min.y, bounds.max.z - pivot.z,
+      pivot.z - bounds.min.z, bounds.max.x - pivot.x, pivot.x - bounds.min.x);
   };
 
-  // -------------------------------------------------------------------------
-  // CLASS 3: INFANTRY FIGHTING VEHICLE (tevy tracked IFV + 30mm chain-gun turret)
-  // -------------------------------------------------------------------------
   if (vehicleClass === 'ifv') {
-    const visualRoot = assets.models.ifv.clone(true);
+    const visualRoot = assets.models.ifv.clone();
     visualRoot.name = 'ifv_visual';
-
     cloneInstanceMaterials(visualRoot, hullMeshes, isBlue ? 'nato_ifv' : 'opfor_ifv');
-
-    visualRoot.updateMatrixWorld(true);
-    const restBox = new THREE.Box3().setFromObject(visualRoot);
-    if (Number.isFinite(restBox.min.y)) {
-      visualRoot.position.y = -restBox.min.y;
-    }
-    hullTiltGroup.add(visualRoot);
-    visualRoot.updateMatrixWorld(true);
-
-    const turretPivot = visualRoot.getObjectByName('turret')!;
-    const turretRestPos = turretPivot.position.clone();
-    const gunPivot = visualRoot.getObjectByName('gun')!;
-
-    const gunRecoilGroup = new THREE.Group();
-    gunRecoilGroup.name = 'ifv_gun_recoil';
-    const existingGunChildren = [...gunPivot.children];
-    gunPivot.add(gunRecoilGroup);
-    for (const ch of existingGunChildren) {
-      gunRecoilGroup.add(ch);
-    }
-
-    // Muzzle/coax datums at the real barrel tip: gun-subtree bbox mapped into gun space
-    const gunBox = new THREE.Box3().setFromObject(gunPivot);
-    gunBox.applyMatrix4(new THREE.Matrix4().copy(gunPivot.matrixWorld).invert());
-    const muzzleZ = gunBox.max.z + 0.06;
-    const boreX = (gunBox.min.x + gunBox.max.x) * 0.5;
-    const boreY = (gunBox.min.y + gunBox.max.y) * 0.5;
-
-    const muzzleNode = new THREE.Object3D();
-    muzzleNode.name = 'muzzle_datum';
-    muzzleNode.position.set(boreX, boreY, muzzleZ);
-    gunRecoilGroup.add(muzzleNode);
-
-    const coaxNode = new THREE.Object3D();
-    coaxNode.name = 'coax_datum';
-    coaxNode.position.set(boreX, boreY, muzzleZ);
-    gunRecoilGroup.add(coaxNode);
-
-    // Road wheels, sprockets & idlers (6 per side on the tevy IFV)
+    const restBox = worldBounds(visualRoot, undefined, true);
+    if (Number.isFinite(restBox.min.y)) visualRoot.setLocalPosition(0, -restBox.min.y, 0);
+    hullTiltGroup.addChild(visualRoot);
+    const turretPivot = findByName(visualRoot, 'turret')!;
+    const turretRestPos = turretPivot.getLocalPosition().clone();
+    const gunPivot = findByName(visualRoot, 'gun')!;
+    const gunRecoilGroup = group('ifv_gun_recoil');
+    const existing = [...gunPivot.children] as Entity[];
+    gunPivot.addChild(gunRecoilGroup);
+    for (const child of existing) gunRecoilGroup.addChild(child);
+    const gunBox = worldBounds(gunPivot).applyMatrix4(new Mat4().copy(gunPivot.getWorldTransform()).invert());
+    const muzzleZ = gunBox.max.z + 0.06, boreX = (gunBox.min.x + gunBox.max.x) * 0.5, boreY = (gunBox.min.y + gunBox.max.y) * 0.5;
+    const muzzleNode = group('muzzle_datum', gunRecoilGroup), coaxNode = group('coax_datum', gunRecoilGroup);
+    muzzleNode.setLocalPosition(boreX, boreY, muzzleZ);
+    coaxNode.setLocalPosition(boreX, boreY, muzzleZ);
     for (let i = 1; i <= 6; i++) {
-      const wl = visualRoot.getObjectByName(`road_wheel_L${i}`);
-      const wr = visualRoot.getObjectByName(`road_wheel_R${i}`);
+      const wl = findByName(visualRoot, `road_wheel_L${i}`), wr = findByName(visualRoot, `road_wheel_R${i}`);
       if (wl) wheels.push({ node: wl, side: 'L', radius: measureWheelRadius(wl) });
       if (wr) wheels.push({ node: wr, side: 'R', radius: measureWheelRadius(wr) });
     }
-    const idlerL = visualRoot.getObjectByName('idler_L');
-    const idlerR = visualRoot.getObjectByName('idler_R');
-    const sprL = visualRoot.getObjectByName('sprocket_L');
-    const sprR = visualRoot.getObjectByName('sprocket_R');
-    if (idlerL) wheels.push({ node: idlerL, side: 'L', radius: measureWheelRadius(idlerL) });
-    if (idlerR) wheels.push({ node: idlerR, side: 'R', radius: measureWheelRadius(idlerR) });
-    if (sprL) wheels.push({ node: sprL, side: 'L', radius: measureWheelRadius(sprL) });
-    if (sprR) wheels.push({ node: sprR, side: 'R', radius: measureWheelRadius(sprR) });
-
-    return {
-      root,
-      hullTiltGroup,
-      visualRoot,
-      turretPivot,
-      turretRestPos,
-      gunPivot,
-      gunRecoilGroup,
-      muzzleNode,
-      coaxNode,
-      rwsNode: null,
-      wheels,
-      steerNodes,
-      rocketMeshes,
-      hullMeshes,
-    };
+    for (const [name, side] of [['idler_L', 'L'], ['idler_R', 'R'], ['sprocket_L', 'L'], ['sprocket_R', 'R']] as const) {
+      const wheel = findByName(visualRoot, name);
+      if (wheel) wheels.push({ node: wheel, side, radius: measureWheelRadius(wheel) });
+    }
+    return { root, hullTiltGroup, visualRoot, turretPivot, turretRestPos, gunPivot, gunRecoilGroup, muzzleNode, coaxNode, rwsNode: null, wheels, steerNodes, rocketMeshes, hullMeshes };
   }
 
-  // -------------------------------------------------------------------------
-  // CLASS 4: HUMVEE GUN TRUCK (tevy 4x4 + procedural M2 .50 cal on roof ring)
-  // -------------------------------------------------------------------------
   if (vehicleClass === 'humvee') {
-    const visualRoot = assets.models.humvee.clone(true);
+    const visualRoot = assets.models.humvee.clone();
     visualRoot.name = 'humvee_visual';
-
     cloneInstanceMaterials(visualRoot, hullMeshes, isBlue ? 'nato_humvee' : 'opfor_humvee');
-
-    visualRoot.updateMatrixWorld(true);
-    const restBox = new THREE.Box3().setFromObject(visualRoot);
-    if (Number.isFinite(restBox.min.y)) {
-      visualRoot.position.y = -restBox.min.y;
-    }
-    hullTiltGroup.add(visualRoot);
-
-    // Roof ring mount centre, measured from the body mesh vertex ring
-    // (circle fit: centre (0, -0.345), r ~0.5, rail top ~2.45-2.54)
-    const turretRestPos = new THREE.Vector3(0, 2.47, -0.345);
-    const turretPivot = new THREE.Group();
-    turretPivot.name = 'humvee_turret_pivot';
-    turretPivot.position.copy(turretRestPos);
-    visualRoot.add(turretPivot);
-
-    const gunPivot = new THREE.Group();
-    gunPivot.name = 'humvee_gun_pivot';
-    gunPivot.position.set(0, 0.09, 0.03);
-    turretPivot.add(gunPivot);
-
-    const gunRecoilGroup = new THREE.Group();
-    gunRecoilGroup.name = 'm2_recoil_group';
-    gunPivot.add(gunRecoilGroup);
-
-    const muzzleNode = new THREE.Object3D();
-    muzzleNode.name = 'muzzle_datum';
-    const coaxNode = new THREE.Object3D();
-    coaxNode.name = 'coax_datum';
+    const restBox = worldBounds(visualRoot, undefined, true);
+    if (Number.isFinite(restBox.min.y)) visualRoot.setLocalPosition(0, -restBox.min.y, 0);
+    hullTiltGroup.addChild(visualRoot);
+    const turretRestPos = new Vec3(0, 2.47, -0.345);
+    const turretPivot = group('humvee_turret_pivot', visualRoot);
+    turretPivot.setLocalPosition(turretRestPos);
+    const gunPivot = group('humvee_gun_pivot', turretPivot);
+    gunPivot.setLocalPosition(0, 0.09, 0.03);
+    const gunRecoilGroup = group('m2_recoil_group', gunPivot);
+    const muzzleNode = group('muzzle_datum'), coaxNode = group('coax_datum');
     buildM2HumveeGun(gunPivot, gunRecoilGroup, muzzleNode, coaxNode, hullMeshes, isBlue);
-
-    // Wheel spin pivots + front steer pivots
-    const wheelNames: [string, 'L' | 'R'][] = [
-      ['wheel_FL', 'L'],
-      ['wheel_FR', 'R'],
-      ['wheel_RL', 'L'],
-      ['wheel_RR', 'R'],
-    ];
-    for (const [name, side] of wheelNames) {
-      const w = visualRoot.getObjectByName(name);
-      if (w) wheels.push({ node: w, side, radius: measureWheelRadius(w) });
+    for (const [name, side] of [['wheel_FL', 'L'], ['wheel_FR', 'R'], ['wheel_RL', 'L'], ['wheel_RR', 'R']] as const) {
+      const wheel = findByName(visualRoot, name);
+      if (wheel) wheels.push({ node: wheel, side, radius: measureWheelRadius(wheel) });
     }
-    const steerFL = visualRoot.getObjectByName('steer_FL');
-    const steerFR = visualRoot.getObjectByName('steer_FR');
-    if (steerFL) steerNodes.push(steerFL);
-    if (steerFR) steerNodes.push(steerFR);
-
-    return {
-      root,
-      hullTiltGroup,
-      visualRoot,
-      turretPivot,
-      turretRestPos,
-      gunPivot,
-      gunRecoilGroup,
-      muzzleNode,
-      coaxNode,
-      rwsNode: null,
-      wheels,
-      steerNodes,
-      rocketMeshes,
-      hullMeshes,
-    };
+    for (const name of ['steer_FL', 'steer_FR']) {
+      const steer = findByName(visualRoot, name);
+      if (steer) steerNodes.push(steer);
+    }
+    // This GLB's outer tire vertices extend 3 cm below its authored ground datum.
+    visualRoot.setLocalPosition(0, visualRoot.getLocalPosition().y + 0.03, 0);
+    return { root, hullTiltGroup, visualRoot, turretPivot, turretRestPos, gunPivot, gunRecoilGroup, muzzleNode, coaxNode, rwsNode: null, wheels, steerNodes, rocketMeshes, hullMeshes };
   }
 
-  // -------------------------------------------------------------------------
-  // CLASS 1 & 2: NORMAL MBT & HEAVY BREAKTHROUGH TANK
-  // Use LOD1 (20.8k tris) for enemies (and even heavy add-on base if enemy) to save 42k tris per tank!
-  // -------------------------------------------------------------------------
-  const visualRoot = assets.models.player_mbt_lod1.clone(true);
+  const visualRoot = assets.models.player_mbt_lod1.clone();
   visualRoot.name = isHeavy ? 'heavy_mbt_visual' : 'normal_mbt_visual';
-
-  const palette = isHeavy
-    ? isBlue
-      ? 'nato_heavy'
-      : 'opfor_heavy'
-    : isBlue
-      ? 'nato_mbt'
-      : 'opfor_mbt';
+  const palette = isHeavy ? (isBlue ? 'nato_heavy' : 'opfor_heavy') : (isBlue ? 'nato_mbt' : 'opfor_mbt');
   cloneInstanceMaterials(visualRoot, hullMeshes, palette);
-
-  visualRoot.updateMatrixWorld(true);
-  const restBox = new THREE.Box3().setFromObject(visualRoot);
-  if (Number.isFinite(restBox.min.y)) {
-    visualRoot.position.y = -restBox.min.y;
-  }
-  hullTiltGroup.add(visualRoot);
-
-  const turretPivot = visualRoot.getObjectByName('turret')!;
-  const turretRestPos = new THREE.Vector3(0, 1.62, -0.5);
-  const gunPivot = visualRoot.getObjectByName('gun')!;
-  const rwsNode = visualRoot.getObjectByName('weapon_station') ?? null;
-
-  const gunRecoilGroup = new THREE.Group();
-  gunRecoilGroup.name = 'gun_recoil_slide';
-  const existingGunChildren = [...gunPivot.children];
-  gunPivot.add(gunRecoilGroup);
-  for (const ch of existingGunChildren) {
-    gunRecoilGroup.add(ch);
-  }
-
+  const restBox = worldBounds(visualRoot, undefined, true);
+  if (Number.isFinite(restBox.min.y)) visualRoot.setLocalPosition(0, -restBox.min.y, 0);
+  hullTiltGroup.addChild(visualRoot);
+  const turretPivot = findByName(visualRoot, 'turret')!;
+  const turretRestPos = new Vec3(0, 1.62, -0.5);
+  const gunPivot = findByName(visualRoot, 'gun')!;
+  const rwsNode = findByName(visualRoot, 'weapon_station');
+  const gunRecoilGroup = group('gun_recoil_slide');
+  const existing = [...gunPivot.children] as Entity[];
+  gunPivot.addChild(gunRecoilGroup);
+  for (const child of existing) gunRecoilGroup.addChild(child);
   let muzzleZ = 5.305;
 
-  // Heavy Tank Add-On Package: Sloped ERA Cheek Wedges + Heavy Side-Skirt ERA + 152mm Gun Collar & Muzzle Brake + Twin Fuel Drums
   if (isHeavy) {
-    const eraMat = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(isBlue ? '#272f29' : '#3a332b'),
-      roughness: 0.58,
-      metalness: 0.34,
-      envMapIntensity: 1.1,
-    });
+    const eraMat = standard({ color: isBlue ? '#272f29' : '#3a332b', roughness: 0.58, metalness: 0.34, envIntensity: 1.1 });
     applyRealisticArmorShader(eraMat, 'heavy-era');
-
-    const barrelMat = new THREE.MeshStandardMaterial({
-      color: new THREE.Color('#1d211f'),
-      roughness: 0.42,
-      metalness: 0.68,
-    });
+    const barrelMat = standard({ color: '#1d211f', roughness: 0.42, metalness: 0.68 });
     applyRealisticArmorShader(barrelMat, 'heavy-gun');
+    // Region-merged ERA arrays: small bevel-edged tiles over a continuous backing plate.
+    for (const sx of [-1, 1]) {
+      const cheekParts: Geo[] = [box(0.30, 0.62, 1.34).translate(sx * 1.22, 0.42, 0.52)];
+      for (let row = 0; row < 3; row++) for (let col = 0; col < 4; col++) {
+        cheekParts.push(box(0.09, 0.17, 0.26).translate(sx * 1.405, 0.20 + row * 0.215, 0.04 + col * 0.32));
+      }
+      for (let row = 0; row < 3; row++) cheekParts.push(box(0.31, 0.17, 0.09).translate(sx * 1.22, 0.20 + row * 0.215, 1.225));
+      const cheek = meshNode(Geo.merge(cheekParts)!, eraMat, turretPivot, { castShadows: true });
+      cheek.setLocalEulerAngles(0, -sx * 12.61, 0);
+      hullMeshes.push(cheek);
 
-    // 1. Heavy Turret ERA Cheek Blocks (socketed into front-side cheeks)
-    const cheekGeo = new THREE.BoxGeometry(0.36, 0.66, 1.38);
-    const cheekL = new THREE.Mesh(cheekGeo, eraMat);
-    cheekL.position.set(1.22, 0.42, 0.52);
-    cheekL.rotation.y = -0.22;
-    cheekL.castShadow = true;
-
-    const cheekR = new THREE.Mesh(cheekGeo, eraMat);
-    cheekR.position.set(-1.22, 0.42, 0.52);
-    cheekR.rotation.y = 0.22;
-    cheekR.castShadow = true;
-    turretPivot.add(cheekL, cheekR);
-
-    // 2. Heavy Side-Skirt ERA Reactive Armor Panels along hull flanks
-    const skirtGeo = new THREE.BoxGeometry(0.18, 0.54, 5.4);
-    const skirtL = new THREE.Mesh(skirtGeo, eraMat);
-    skirtL.position.set(1.88, 1.08, -0.1);
-    const skirtR = new THREE.Mesh(skirtGeo, eraMat);
-    skirtR.position.set(-1.88, 1.08, -0.1);
-    visualRoot.add(skirtL, skirtR);
-
-    // 3. Twin Rear External Cylindrical Fuel Drums
-    const drumGeo = new THREE.CylinderGeometry(0.34, 0.34, 1.25, 14);
-    drumGeo.rotateZ(Math.PI / 2);
-    const drumL = new THREE.Mesh(drumGeo, eraMat);
-    drumL.position.set(0.95, 1.38, -4.08);
-    const drumR = new THREE.Mesh(drumGeo, eraMat);
-    drumR.position.set(-0.95, 1.38, -4.08);
-    visualRoot.add(drumL, drumR);
-
-    // 4. Up-Gunned 152mm Thermal Sleeve + Heavy Double-Baffle Muzzle Brake
-    const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.145, 0.165, 3.6, 14), barrelMat);
-    sleeve.rotation.x = Math.PI / 2;
-    sleeve.position.set(0, 0, 2.75);
-    const brakeBox = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.28, 0.58), barrelMat);
-    brakeBox.position.set(0, 0, 5.38);
-    brakeBox.castShadow = true;
-    gunRecoilGroup.add(sleeve, brakeBox);
+      const skirtParts: Geo[] = [box(0.13, 0.51, 5.35).translate(sx * 1.88, 1.08, -0.1)];
+      for (let row = 0; row < 2; row++) for (let col = 0; col < 12; col++) {
+        skirtParts.push(box(0.085, 0.205, 0.385).translate(sx * 1.98, 0.93 + row * 0.255, -2.59 + col * 0.45));
+      }
+      const skirt = meshNode(Geo.merge(skirtParts)!, eraMat, visualRoot, { castShadows: true });
+      hullMeshes.push(skirt);
+    }
+    const roofParts: Geo[] = [];
+    for (const sx of [-1, 1]) for (let col = 0; col < 3; col++) roofParts.push(box(0.42, 0.065, 0.28).translate(sx * 0.58, 0.79, 0.10 + col * 0.35));
+    hullMeshes.push(meshNode(Geo.merge(roofParts)!, eraMat, turretPivot, { castShadows: true }));
+    const drumGeo = cylinder(0.34, 0.34, 1.25, 14).rotateZ(Math.PI / 2);
+    const drumL = meshNode(drumGeo, eraMat, visualRoot); drumL.setLocalPosition(0.95, 1.38, -4.08);
+    const drumR = meshNode(drumGeo, eraMat, visualRoot); drumR.setLocalPosition(-0.95, 1.38, -4.08);
+    const sleeveParts: Geo[] = [cylinder(0.145, 0.165, 3.6, 18).rotateX(Math.PI / 2).translate(0, 0, 2.75)];
+    for (const z of [1.15, 2.10, 3.05, 4.20]) sleeveParts.push(cylinder(0.177, 0.177, 0.075, 18).rotateX(Math.PI / 2).translate(0, 0, z));
+    const sleeve = meshNode(Geo.merge(sleeveParts)!, barrelMat, gunRecoilGroup);
+    const brakeParts: Geo[] = [cylinder(0.19, 0.19, 0.56, 16).rotateX(Math.PI / 2)];
+    for (const sx of [-1, 1]) for (const z of [-0.15, 0.15]) brakeParts.push(box(0.23, 0.13, 0.10).translate(sx * 0.19, 0, z));
+    const brakeBox = meshNode(Geo.merge(brakeParts)!, barrelMat, gunRecoilGroup, { castShadows: true });
+    brakeBox.setLocalPosition(0, 0, 5.38);
     muzzleZ = 5.68;
-
-    hullMeshes.push(cheekL, cheekR, skirtL, skirtR, drumL, drumR, sleeve, brakeBox);
+    hullMeshes.push(drumL, drumR, sleeve, brakeBox);
   }
-
-  const muzzleNode = new THREE.Object3D();
-  muzzleNode.name = 'muzzle_datum';
-  muzzleNode.position.set(0, 0, muzzleZ);
-  gunRecoilGroup.add(muzzleNode);
-
-  const coaxNode = new THREE.Object3D();
-  coaxNode.name = 'coax_datum';
-  coaxNode.position.set(0.24, 0.03, 1.45);
-  gunRecoilGroup.add(coaxNode);
-
+  const muzzleNode = group('muzzle_datum', gunRecoilGroup), coaxNode = group('coax_datum', gunRecoilGroup);
+  muzzleNode.setLocalPosition(0, 0, muzzleZ);
+  coaxNode.setLocalPosition(0.24, 0.03, 1.45);
   for (let i = 1; i <= 7; i++) {
-    const wl = visualRoot.getObjectByName(`road_wheel_L${i}`);
-    const wr = visualRoot.getObjectByName(`road_wheel_R${i}`);
+    const wl = findByName(visualRoot, `road_wheel_L${i}`), wr = findByName(visualRoot, `road_wheel_R${i}`);
     if (wl) wheels.push({ node: wl, side: 'L', radius: 0.35 });
     if (wr) wheels.push({ node: wr, side: 'R', radius: 0.35 });
   }
-  const idlerL = visualRoot.getObjectByName('idler_L');
-  const idlerR = visualRoot.getObjectByName('idler_R');
-  const sprL = visualRoot.getObjectByName('sprocket_L');
-  const sprR = visualRoot.getObjectByName('sprocket_R');
-  if (idlerL) wheels.push({ node: idlerL, side: 'L', radius: 0.29 });
-  if (idlerR) wheels.push({ node: idlerR, side: 'R', radius: 0.29 });
-  if (sprL) wheels.push({ node: sprL, side: 'L', radius: 0.36 });
-  if (sprR) wheels.push({ node: sprR, side: 'R', radius: 0.36 });
-
-  return {
-    root,
-    hullTiltGroup,
-    visualRoot,
-    turretPivot,
-    turretRestPos,
-    gunPivot,
-    gunRecoilGroup,
-    muzzleNode,
-    coaxNode,
-    rwsNode,
-    wheels,
-    steerNodes,
-    rocketMeshes,
-    hullMeshes,
-  };
+  for (const [name, side, radius] of [['idler_L', 'L', 0.29], ['idler_R', 'R', 0.29], ['sprocket_L', 'L', 0.36], ['sprocket_R', 'R', 0.36]] as const) {
+    const wheel = findByName(visualRoot, name);
+    if (wheel) wheels.push({ node: wheel, side, radius });
+  }
+  // The MBT source hull datum is 2.97 cm above its contact surface.
+  visualRoot.setLocalPosition(0, visualRoot.getLocalPosition().y - 0.0297, 0);
+  return { root, hullTiltGroup, visualRoot, turretPivot, turretRestPos, gunPivot, gunRecoilGroup, muzzleNode, coaxNode, rwsNode, wheels, steerNodes, rocketMeshes, hullMeshes };
 }
 
-/**
- * Procedural M2-style .50 cal on the Humvee roof ring: receiver, lathe-turned
- * barrel with flash hider, spade grips, feed tray, ammo can, pintle cradle and
- * a curved gun shield with sight slot. Recoiling parts live in `recoilGroup`.
- */
 function buildM2HumveeGun(
-  gunPivot: THREE.Object3D,
-  recoilGroup: THREE.Object3D,
-  muzzleNode: THREE.Object3D,
-  coaxNode: THREE.Object3D,
-  hullMeshes: THREE.Mesh[],
+  gunPivot: Entity,
+  recoilGroup: Entity,
+  muzzleNode: Entity,
+  coaxNode: Entity,
+  hullMeshes: Entity[],
   isBlue: boolean
 ): void {
-  const steelMat = new THREE.MeshStandardMaterial({
-    color: new THREE.Color('#23271f'),
-    roughness: 0.42,
-    metalness: 0.7,
-    envMapIntensity: 1.1,
-  });
+  const steelMat = standard({ color: '#23271f', roughness: 0.42, metalness: 0.7, envIntensity: 1.1 });
   applyRealisticArmorShader(steelMat, 'm2-steel');
-
-  const woodMat = new THREE.MeshStandardMaterial({
-    color: new THREE.Color('#4a3826'),
-    roughness: 0.72,
-    metalness: 0.05,
-  });
+  const woodMat = standard({ color: '#4a3826', roughness: 0.72, metalness: 0.05 });
   applyRealisticArmorShader(woodMat, 'm2-wood');
-
-  const shieldMat = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(isBlue ? '#3d4a34' : '#544a38'),
-    roughness: 0.58,
-    metalness: 0.3,
-    envMapIntensity: 1.0,
-    side: THREE.DoubleSide,
-  });
+  const shieldMat = standard({ color: isBlue ? '#3d4a34' : '#544a38', roughness: 0.58, metalness: 0.3, doubleSided: true });
   applyRealisticArmorShader(shieldMat, 'm2-shield');
-
-  const sightGlassMat = new THREE.MeshStandardMaterial({
-    color: new THREE.Color('#16222c'),
-    roughness: 0.15,
-    metalness: 0.6,
-  });
-
-  // --- Recoiling group: receiver + barrel + fittings (real M2 proportions:
-  // ~1.65 m overall, ~1.14 m barrel, receiver ~0.6 m long) ---
-  const receiver = new THREE.Mesh(new RoundedBoxGeometry(0.16, 0.20, 0.62, 3, 0.025), steelMat);
-  receiver.position.set(0, 0.05, 0.15);
-  receiver.castShadow = true;
-
-  // Receiver top cover + rear plate detail
-  const topCover = new THREE.Mesh(new RoundedBoxGeometry(0.14, 0.05, 0.5, 2, 0.015), steelMat);
-  topCover.position.set(0, 0.16, 0.15);
-
-  // Barrel: lathe profile along +Z (receiver ring -> long tube -> flash hider)
-  const barrelProfile = [
-    new THREE.Vector2(0.026, 0.38),
-    new THREE.Vector2(0.022, 0.55),
-    new THREE.Vector2(0.019, 1.28),
-    new THREE.Vector2(0.024, 1.42),
-    new THREE.Vector2(0.028, 1.50),
-    new THREE.Vector2(0.028, 1.58),
-    new THREE.Vector2(0.02, 1.60),
-    new THREE.Vector2(0.0, 1.60),
-  ];
-  const barrelGeo = new THREE.LatheGeometry(barrelProfile, 16);
-  barrelGeo.rotateX(Math.PI / 2);
-  const barrel = new THREE.Mesh(barrelGeo, steelMat);
-  barrel.castShadow = true;
-
-  // Flash hider slots (dark gaps read as openings)
-  const hiderSlotGeo = new THREE.BoxGeometry(0.062, 0.014, 0.05);
-  const hiderSlots = new THREE.Group();
+  const sightGlassMat = standard({ color: '#16222c', roughness: 0.15, metalness: 0.6 });
+  const part = (parent: Entity, geo: Geo, mat: Material, x = 0, y = 0, z = 0, cast = false) => {
+    const node = meshNode(geo, mat, parent, { castShadows: cast, receiveShadows: true });
+    node.setLocalPosition(x, y, z);
+    return node;
+  };
+  const receiver = part(recoilGroup, roundedBox(0.16, 0.20, 0.62, 3, 0.025), steelMat, 0, 0.05, 0.15, true);
+  const topCover = part(recoilGroup, roundedBox(0.14, 0.05, 0.5, 2, 0.015), steelMat, 0, 0.16, 0.15);
+  const barrelProfile = [new Vec2(0.026, 0.38), new Vec2(0.022, 0.55), new Vec2(0.019, 1.28), new Vec2(0.024, 1.42),
+    new Vec2(0.028, 1.50), new Vec2(0.028, 1.58), new Vec2(0.02, 1.60), new Vec2(0, 1.60)];
+  const barrel = part(recoilGroup, lathe(barrelProfile, 16).rotateX(Math.PI / 2), steelMat, 0, 0, 0, true);
+  const hiderSlots = group('flash_hider_slots', recoilGroup);
+  for (let i = 0; i < 3; i++) part(hiderSlots, box(0.062, 0.014, 0.05), steelMat, 0, 0.026 - i * 0.001, 1.46 + i * 0.045);
   for (let i = 0; i < 3; i++) {
-    const slot = new THREE.Mesh(hiderSlotGeo, woodMat);
-    slot.position.set(0, 0.026 - i * 0.001, 1.46 + i * 0.045);
-    hiderSlots.add(slot);
+    part(recoilGroup, cylinder(0.032, 0.032, 0.085, 14, 1, true).rotateX(Math.PI / 2), steelMat, 0, 0, 0.46 + i * 0.115);
+    for (const sx of [-1, 1]) part(recoilGroup, box(0.009, 0.012, 0.038), steelMat, sx * 0.031, 0, 0.46 + i * 0.115);
   }
-
-  // Carry handle: half-torus arch over the receiver
-  const handleGeo = new THREE.TorusGeometry(0.1, 0.011, 8, 14, Math.PI);
-  const carryHandle = new THREE.Mesh(handleGeo, steelMat);
-  carryHandle.rotation.set(0, Math.PI / 2, Math.PI);
-  carryHandle.position.set(0, 0.15, 0.15);
-
-  // Spade grips at the receiver rear, angled down-back
-  const gripGeo = new RoundedBoxGeometry(0.04, 0.13, 0.05, 2, 0.014);
-  const gripL = new THREE.Mesh(gripGeo, woodMat);
-  gripL.position.set(0.07, -0.03, -0.12);
-  gripL.rotation.x = -0.55;
-  const gripR = new THREE.Mesh(gripGeo, woodMat);
-  gripR.position.set(-0.07, -0.03, -0.12);
-  gripR.rotation.x = -0.55;
-
-  // Feed tray on top
-  const feedTray = new THREE.Mesh(new RoundedBoxGeometry(0.19, 0.02, 0.26, 2, 0.008), steelMat);
-  feedTray.position.set(0, 0.165, 0.12);
-
-  recoilGroup.add(receiver, topCover, barrel, hiderSlots, carryHandle, gripL, gripR, feedTray);
+  part(recoilGroup, roundedBox(0.19, 0.018, 0.23, 2, 0.005), steelMat, 0, 0.12, 0.06);
+  part(recoilGroup, box(0.12, 0.025, 0.035), steelMat, -0.13, 0.04, -0.08);
+  const carryHandle = part(recoilGroup, torus(0.1, 0.011, 8, 14, Math.PI), steelMat, 0, 0.15, 0.15);
+  carryHandle.setLocalEulerAngles(0, 90, 180);
+  const gripGeo = roundedBox(0.04, 0.13, 0.05, 2, 0.014);
+  const gripL = part(recoilGroup, gripGeo, woodMat, 0.07, -0.03, -0.12); gripL.setLocalEulerAngles(-31.52, 0, 0);
+  const gripR = part(recoilGroup, gripGeo, woodMat, -0.07, -0.03, -0.12); gripR.setLocalEulerAngles(-31.52, 0, 0);
+  part(recoilGroup, cylinder(0.018, 0.018, 0.22, 10).rotateZ(Math.PI / 2), steelMat, 0, 0.015, -0.16);
+  for (const sx of [-1, 1]) part(recoilGroup, roundedBox(0.035, 0.055, 0.14, 2, 0.012), woodMat, sx * 0.105, 0.015, -0.19);
+  part(recoilGroup, roundedBox(0.19, 0.02, 0.26, 2, 0.008), steelMat, 0, 0.165, 0.12);
   hullMeshes.push(receiver, barrel, topCover);
-
-  // --- Non-recoiling (cradle): pintle trunnion, cheeks, ammo can, shield ---
-  const trunnion = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.34, 10), steelMat);
-  trunnion.rotation.z = Math.PI / 2;
-  trunnion.position.set(0, 0, -0.02);
-
-  const cheekGeo = new RoundedBoxGeometry(0.035, 0.26, 0.4, 2, 0.012);
-  const cheekL = new THREE.Mesh(cheekGeo, shieldMat);
-  cheekL.position.set(0.09, -0.03, -0.12);
-  const cheekR = new THREE.Mesh(cheekGeo, shieldMat);
-  cheekR.position.set(-0.09, -0.03, -0.12);
-
-  // Ammo can on a bracket under the left receiver (cradle-mounted, non-recoil)
-  const ammoCan = new THREE.Mesh(new RoundedBoxGeometry(0.17, 0.24, 0.4, 3, 0.025), steelMat);
-  ammoCan.position.set(-0.17, -0.1, 0.15);
-  ammoCan.castShadow = true;
-  const ammoBracket = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.07, 0.34), steelMat);
-  ammoBracket.position.set(-0.1, -0.04, 0.15);
-
-  // Curved gun shield: annular-sector plate (~0.9 m wide x 0.55 m tall,
-  // 12 mm thick) wrapped around the gunner position, convex toward +Z.
-  // Two arc segments leave a centre slot for the barrel (real shield notch).
-  // Shape arc in (x, -z) space, extruded upward -> rotateX(-90 deg).
-  const sRo = 0.55, sRi = 0.538;
-  const sHalf = THREE.MathUtils.degToRad(56);
-  const sCtr = -Math.PI / 2; // centred on shape -Y == world +Z
-  const sGap = THREE.MathUtils.degToRad(8);
-  const shieldGeos: THREE.BufferGeometry[] = [];
-  for (const [a0, a1] of [
-    [sCtr - sHalf, sCtr - sGap],
-    [sCtr + sGap, sCtr + sHalf],
-  ] as const) {
-    const shieldShape = new THREE.Shape();
-    shieldShape.absarc(0, 0, sRo, a0, a1, false);
-    shieldShape.absarc(0, 0, sRi, a1, a0, true);
-    shieldShape.closePath();
-    const g = new THREE.ExtrudeGeometry(shieldShape, { depth: 0.55, bevelEnabled: false, steps: 1 });
-    g.rotateX(-Math.PI / 2);
-    g.translate(0, -0.275, 0); // centre the plate vertically on the arc
-    shieldGeos.push(g);
+  const trunnion = part(gunPivot, cylinder(0.04, 0.04, 0.34, 10), steelMat, 0, 0, -0.02); trunnion.setLocalEulerAngles(0, 0, 90);
+  const cheekGeo = roundedBox(0.035, 0.26, 0.4, 2, 0.012);
+  const cheekL = part(gunPivot, cheekGeo, shieldMat, 0.09, -0.03, -0.12);
+  const cheekR = part(gunPivot, cheekGeo, shieldMat, -0.09, -0.03, -0.12);
+  const ammoCan = part(gunPivot, roundedBox(0.17, 0.24, 0.4, 3, 0.025), steelMat, -0.17, -0.1, 0.15, true);
+  part(gunPivot, box(0.035, 0.07, 0.34), steelMat, -0.1, -0.04, 0.15);
+  for (let i = 0; i < 6; i++) part(gunPivot, box(0.018, 0.024, 0.065), steelMat, -0.12 + i * 0.021, 0.025, 0.12 + Math.sin(i * 0.6) * 0.012);
+  const sRo = 0.43, sRi = 0.416, sHalf = degToRad(54), sCtr = -Math.PI / 2, sGap = degToRad(12);
+  const shieldGeos: Geo[] = [];
+  for (const [a0, a1] of [[sCtr - sHalf, sCtr - sGap], [sCtr + sGap, sCtr + sHalf]] as const) {
+    const shape = new Shape();
+    shape.absarc(0, 0, sRo, a0, a1, false).absarc(0, 0, sRi, a1, a0, true).closePath();
+    shieldGeos.push(extrude(shape, { depth: 0.38, bevelEnabled: false, steps: 1 }).rotateX(-Math.PI / 2).translate(0, -0.19, 0));
   }
-  const shield = new THREE.Mesh(mergeGeometries(shieldGeos, false)!, shieldMat);
-  shield.position.set(0, 0.0, 0.1);
-  shield.castShadow = true;
-
-  // Sight housing + glass window on the shield crown (shield face ~z 0.65)
-  const sightBase = new THREE.Mesh(new RoundedBoxGeometry(0.11, 0.1, 0.14, 2, 0.015), steelMat);
-  sightBase.position.set(0, 0.16, 0.58);
-  const sightGlass = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.05, 0.02), sightGlassMat);
-  sightGlass.position.set(0, 0.17, 0.65);
-  const sightBezel = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.065, 0.015), steelMat);
-  sightBezel.position.set(0, 0.17, 0.66);
-
-  gunPivot.add(trunnion, cheekL, cheekR, ammoCan, ammoBracket, shield, sightBase, sightGlass, sightBezel);
+  const shield = part(gunPivot, Geo.merge(shieldGeos)!, shieldMat, 0, 0, 0.1, true);
+  part(gunPivot, roundedBox(0.11, 0.1, 0.14, 2, 0.015), steelMat, 0, 0.16, 0.58);
+  part(gunPivot, box(0.085, 0.05, 0.02), sightGlassMat, 0, 0.17, 0.65);
+  part(gunPivot, box(0.1, 0.065, 0.015), steelMat, 0, 0.17, 0.66);
   hullMeshes.push(cheekL, cheekR, shield, ammoCan);
-
-  muzzleNode.position.set(0, 0.05, 1.62);
-  coaxNode.position.set(0, 0.05, 1.62);
-  recoilGroup.add(muzzleNode, coaxNode);
+  muzzleNode.setLocalPosition(0, 0.05, 1.62);
+  coaxNode.setLocalPosition(0, 0.05, 1.62);
+  recoilGroup.addChild(muzzleNode);
+  recoilGroup.addChild(coaxNode);
 }
 
-function cloneInstanceMaterials(
-  root: THREE.Object3D,
-  outMeshes: THREE.Mesh[],
-  palette:
-    | 'nato_mbt'
-    | 'opfor_mbt'
-    | 'nato_heavy'
-    | 'opfor_heavy'
-    | 'nato_ifv'
-    | 'opfor_ifv'
-    | 'nato_humvee'
-    | 'opfor_humvee'
-): void {
-  root.traverse((obj) => {
-    if (!(obj as THREE.Mesh).isMesh) return;
-    const mesh = obj as THREE.Mesh;
-    outMeshes.push(mesh);
-
-    const cloneMat = (m: THREE.Material): THREE.Material => {
-      const c = m.clone() as THREE.MeshStandardMaterial;
-      if (c.isMeshStandardMaterial) {
-        const mName = (c.name || '').toLowerCase();
-        if (palette === 'opfor_mbt') {
-          c.color.multiply(new THREE.Color(0.94, 0.84, 0.68));
-        } else if (palette === 'nato_heavy') {
-          c.color.multiply(new THREE.Color(0.66, 0.72, 0.68));
-        } else if (palette === 'opfor_heavy') {
-          c.color.multiply(new THREE.Color(0.72, 0.64, 0.56));
-        } else if (palette === 'nato_ifv') {
-          c.color.multiply(new THREE.Color(0.84, 0.94, 0.78));
-        } else if (palette === 'opfor_ifv') {
-          c.color.multiply(new THREE.Color(0.95, 0.85, 0.70));
-        } else if (palette === 'nato_humvee') {
-          c.color.multiply(new THREE.Color(0.88, 0.93, 0.80));
-        } else if (palette === 'opfor_humvee') {
-          c.color.multiply(new THREE.Color(0.96, 0.86, 0.68));
-        }
-        if (!mName.includes('glass')) {
-          applyRealisticArmorShader(c, 'vehicle-armor');
+type Palette = 'nato_mbt' | 'opfor_mbt' | 'nato_heavy' | 'opfor_heavy' | 'nato_ifv' | 'opfor_ifv' | 'nato_humvee' | 'opfor_humvee';
+function cloneInstanceMaterials(root: Entity, outMeshes: Entity[], palette: Palette): void {
+  const clones = new Map<Material, Material>();
+  const tint: [number, number, number] = palette === 'opfor_mbt' ? [0.94, 0.84, 0.68]
+    : palette === 'nato_heavy' ? [0.66, 0.72, 0.68]
+    : palette === 'opfor_heavy' ? [0.72, 0.64, 0.56]
+    : palette === 'nato_ifv' ? [0.84, 0.94, 0.78]
+    : palette === 'opfor_ifv' ? [0.95, 0.85, 0.70]
+    : palette === 'nato_humvee' ? [0.88, 0.93, 0.80]
+    : palette === 'opfor_humvee' ? [0.96, 0.86, 0.68] : [1, 1, 1];
+  root.forEach((node) => {
+    const entity = node as Entity;
+    if (entity.render) outMeshes.push(entity);
+    for (const mi of entity.render?.meshInstances ?? []) {
+      const source = mi.material;
+      if (!source) continue;
+      let clone = clones.get(source);
+      if (!clone) {
+        clone = source.clone();
+        clones.set(source, clone);
+        if (clone instanceof StandardMaterial) {
+          const c = clone.diffuse.linear();
+          c.r *= tint[0]; c.g *= tint[1]; c.b *= tint[2];
+          clone.diffuse.copy(c.gamma());
+          if (!clone.name.toLowerCase().includes('glass')) applyRealisticArmorShader(clone, 'vehicle-armor');
+          clone.update();
         }
       }
-      return c;
-    };
-
-    if (Array.isArray(mesh.material)) {
-      mesh.material = mesh.material.map(cloneMat);
-    } else if (mesh.material) {
-      mesh.material = cloneMat(mesh.material);
+      mi.material = clone;
     }
   });
-}
-
-// ---------------------------------------------------------------------------
-// Static-geometry merging
-//
-// Every non-articulated mesh under each articulated node (hull body, turret,
-// gun/mantlet, launcher pod surround, etc.) is collapsed into one mesh per
-// material, baked into that node's local space. Articulated pieces — wheels,
-// road wheels, sprockets, steer pivots, the gun recoil group, the RWS yaw
-// node, and rocket pod tubes (hidden individually on launch) — keep their own
-// nodes. Merged BufferGeometry is cached per class×team so all vehicles of a
-// variant share GPU buffers; each vehicle still gets its own material clones.
-// ---------------------------------------------------------------------------
-
-
-// GLB assets use KHR_mesh_quantization: position/normal arrive as normalized
-// integer attributes. BufferGeometry.applyMatrix4 writes plain floats back via
-// setXYZ, which truncates them into the integer buffer and collapses every
-// vertex to the mesh origin. De-normalize to float32 before transforming.
-export function denormalizeGeo(geo: THREE.BufferGeometry): void {
-  for (const name of ['position', 'normal', 'tangent', 'color'] as const) {
-    const attr = geo.attributes[name] as THREE.BufferAttribute | undefined;
-    if (!attr || !attr.normalized) continue;
-    const arr = new Float32Array(attr.count * attr.itemSize);
-    for (let i = 0; i < attr.count; i++) {
-      for (let c = 0; c < attr.itemSize; c++) {
-        arr[i * attr.itemSize + c] = attr.getComponent(i, c);
-      }
-    }
-    geo.setAttribute(name, new THREE.BufferAttribute(arr, attr.itemSize));
-  }
-}
-
-const vehicleMergeGeoCache = new Map<string, Map<string, THREE.BufferGeometry>>();
-
-function materialMergeSignature(mat: THREE.Material): string {
-  const m = mat as THREE.MeshStandardMaterial;
-  const std = m.isMeshStandardMaterial ? m : null;
-  return [
-    mat.name,
-    std ? std.color.getHexString() : '',
-    std ? std.metalness.toFixed(3) : '',
-    std ? std.roughness.toFixed(3) : '',
-    std ? (std.map?.uuid ?? '') : '',
-    std ? (std.normalMap?.uuid ?? '') : '',
-    std ? std.emissive.getHexString() : '',
-    std ? std.emissiveIntensity.toFixed(3) : '',
-    std ? (std.vertexColors ? 1 : 0) : 0,
-    mat.side,
-    mat.transparent ? 1 : 0,
-    m.alphaTest > 0 ? 1 : 0,
-    mat.customProgramCacheKey(),
-  ].join('|');
-}
-
-function attributeMergeSignature(geo: THREE.BufferGeometry): string {
-  const attrs = Object.keys(geo.attributes).sort().join(',');
-  return `${geo.index ? 'i' : 'n'}:${attrs}`;
-}
-
-function regionNodeId(node: THREE.Object3D, stop: THREE.Object3D): string {
-  if (node.name) return node.name;
-  const parts: string[] = [];
-  for (let p: THREE.Object3D | null = node; p && p !== stop; p = p.parent) {
-    parts.unshift(p.name || p.type);
-  }
-  return parts.join('/');
-}
-
-function mergeStaticVehicleMeshes(rig: InstantiatedTankRig, cacheKey: string): void {
-  rig.root.updateMatrixWorld(true);
-  const visualRoot = rig.visualRoot;
-
-  const dynamic = new Set<THREE.Object3D>([
-    rig.turretPivot,
-    rig.gunPivot,
-    rig.gunRecoilGroup,
-  ]);
-  if (rig.rwsNode) dynamic.add(rig.rwsNode);
-  visualRoot.traverse((o) => { if (o.userData.noStaticMerge) dynamic.add(o); });
-  for (const w of rig.wheels) dynamic.add(w.node);
-  for (const st of rig.steerNodes) dynamic.add(st);
-  const podMeshes = new Set<THREE.Object3D>(rig.rocketMeshes);
-
-  interface MergeGroup {
-    mat: THREE.Material;
-    cast: boolean;
-    recv: boolean;
-    meshes: THREE.Mesh[];
-  }
-  const regions = new Map<THREE.Object3D, { id: string; groups: Map<string, MergeGroup> }>();
-
-  visualRoot.traverse((obj) => {
-    const mesh = obj as THREE.Mesh;
-    if (!mesh.isMesh || Array.isArray(mesh.material)) return;
-    if (podMeshes.has(mesh) || dynamic.has(mesh)) return;
-    for (let p = mesh.parent; p && p !== visualRoot; p = p.parent) {
-      if (podMeshes.has(p) || p.userData.keepMeshChildren) return;
-    }
-    const morphKeys = Object.keys(mesh.geometry.morphAttributes ?? {});
-    if (morphKeys.length > 0) return;
-
-    // Deepest dynamic ancestor wins; meshes with none merge into visualRoot.
-    let region: THREE.Object3D = visualRoot;
-    for (let p = mesh.parent; p && p !== visualRoot; p = p.parent) {
-      if (dynamic.has(p)) {
-        region = p;
-        break;
-      }
-    }
-
-    let r = regions.get(region);
-    if (!r) {
-      r = { id: regionNodeId(region, visualRoot), groups: new Map() };
-      regions.set(region, r);
-    }
-    const sig =
-      `${materialMergeSignature(mesh.material)}|${attributeMergeSignature(mesh.geometry)}` +
-      `|${mesh.castShadow ? 1 : 0}${mesh.receiveShadow ? 1 : 0}`;
-    let g = r.groups.get(sig);
-    if (!g) {
-      g = { mat: mesh.material, cast: mesh.castShadow, recv: mesh.receiveShadow, meshes: [] };
-      r.groups.set(sig, g);
-    }
-    g.meshes.push(mesh);
-  });
-
-  let cache = vehicleMergeGeoCache.get(cacheKey);
-  if (!cache) {
-    cache = new Map();
-    vehicleMergeGeoCache.set(cacheKey, cache);
-  }
-
-  const regionInv = new THREE.Matrix4();
-  const relMat = new THREE.Matrix4();
-
-  for (const [region, r] of regions) {
-    if (r.groups.size === 0) continue;
-    regionInv.copy(region.matrixWorld).invert();
-    for (const [sig, g] of r.groups) {
-      if (g.meshes.length < 2) continue;
-      const key = `${r.id}|${sig}`;
-      let geo = cache.get(key);
-      if (!geo) {
-        const geos: THREE.BufferGeometry[] = [];
-        for (const m of g.meshes) {
-          const baked = m.geometry.clone();
-          denormalizeGeo(baked);
-          relMat.multiplyMatrices(regionInv, m.matrixWorld);
-          baked.applyMatrix4(relMat);
-          geos.push(baked);
-        }
-        const merged = mergeGeometries(geos, false);
-        if (!merged) continue; // incompatible attributes — leave meshes as-is
-        geo = merged;
-        cache.set(key, geo);
-      }
-      const mergedMesh = new THREE.Mesh(geo, g.mat);
-      mergedMesh.castShadow = g.cast;
-      mergedMesh.receiveShadow = g.recv;
-      mergedMesh.name = g.meshes[0].name || `${r.id}_merged`;
-      region.add(mergedMesh);
-      for (const m of g.meshes) {
-        m.parent?.remove(m);
-      }
-    }
-  }
 }

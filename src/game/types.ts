@@ -1,9 +1,10 @@
-import * as THREE from 'three';
+import type { Entity } from 'playcanvas';
+import type { Vec3 } from './engine/math';
 
 /**
  * Shared coordinate & angle conventions across ALL game modules:
- * - World is Y-up right-handed Three.js space, spanning [-worldHalfSize, +worldHalfSize] on X and Z.
- * - Yaw angle `yaw` (radians) follows Three.js `rotation.y = yaw`:
+ * - World is Y-up right-handed space (PlayCanvas and Three agree), spanning [-worldHalfSize, +worldHalfSize] on X and Z.
+ * - Yaw angle `yaw` (radians) is a rotation about +Y (setLocalEulerRad(node, 0, yaw, 0)):
  *     forwardXZ(yaw) = (Math.sin(yaw), 0, Math.cos(yaw))
  *     rightXZ(yaw)   = (-Math.cos(yaw), 0, Math.sin(yaw))  [right-hand ground tangent when looking along +forward]
  *   Note: `Math.atan2(dx, dz)` recovers `yaw` directly!
@@ -38,12 +39,12 @@ export interface ObstacleCollider {
   lightCover?: boolean;
   damage?: number;
   destroyed: boolean;
-  mesh?: THREE.Object3D;
+  mesh?: Entity;
 }
 
 export interface WorldRayHit {
-  point: THREE.Vector3;
-  normal: THREE.Vector3;
+  point: Vec3;
+  normal: Vec3;
   distance: number;
   hitKind: 'terrain' | 'obstacle';
   obstacle?: ObstacleCollider;
@@ -52,18 +53,18 @@ export interface WorldRayHit {
 export interface TerrainQuery {
   readonly worldHalfSize: number;
   getHeightAt(x: number, z: number): number;
-  getNormalAt(x: number, z: number, out?: THREE.Vector3): THREE.Vector3;
+  getNormalAt(x: number, z: number, out?: Vec3): Vec3;
   getRoadFactorAt(x: number, z: number): number;
   getObstacles(): readonly ObstacleCollider[];
   damageObstacle(obstacle: ObstacleCollider, amount: number, dirX?: number, dirZ?: number): boolean;
   blastObstacles(x: number, y: number, z: number, radius: number, amount: number): void;
-  raycastWorld(origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number): WorldRayHit | null;
+  raycastWorld(origin: Vec3, dir: Vec3, maxDist: number): WorldRayHit | null;
   getSafeSpawnPoint(
     preferRadiusMin: number,
     preferRadiusMax: number,
-    avoidPoints: readonly THREE.Vector3[],
+    avoidPoints: readonly Vec3[],
     center?: { x: number; z: number }
-  ): THREE.Vector3;
+  ): Vec3;
   /** Water depth in meters at (x,z); 0 outside river corridors. Optional: dry worlds omit it. */
   getWaterDepthAt?(x: number, z: number): number;
   /** River surface level at (x,z); 0 outside river corridors. */
@@ -72,19 +73,19 @@ export interface TerrainQuery {
 
 export interface NormalizedTankTemplate {
   /** Cloned per vehicle rig instance */
-  sceneRoot: THREE.Group;
+  sceneRoot: Entity;
   /** Approximate dimensions in meters after normalization */
   length: number;
   width: number;
   height: number;
   /** Local turret pivot height & Z offset inside normalized hull */
-  turretPivotLocal: THREE.Vector3;
+  turretPivotLocal: Vec3;
   /** Local gun pivot offset relative to turret pivot */
-  gunPivotInTurret: THREE.Vector3;
+  gunPivotInTurret: Vec3;
   /** Local muzzle tip offset relative to gun pivot (along +Z forward) */
-  muzzleOffsetInGun: THREE.Vector3;
+  muzzleOffsetInGun: Vec3;
   /** Coaxial MG offset relative to gun pivot */
-  coaxOffsetInGun: THREE.Vector3;
+  coaxOffsetInGun: Vec3;
 }
 
 export interface ShellSpec {
@@ -178,14 +179,14 @@ export interface TankIntent {
   /** Handbrake / emergency track lock */
   brake: boolean;
   /** Desired world-space aim target for turret + main gun */
-  aimPoint: THREE.Vector3;
+  aimPoint: Vec3;
   /** World-space origin of the player's aim ray (camera); bots omit it and
    *  the seeker falls back to the tank's own position. */
-  aimRayOrigin?: THREE.Vector3;
+  aimRayOrigin?: Vec3;
   /** Optional seeker aim reference: bots set this to their current target so
    *  the lock cone measures bearing-to-target rather than the elevated
    *  ballistic solution point in `aimPoint`. */
-  seekerAimPoint?: THREE.Vector3;
+  seekerAimPoint?: Vec3;
   /** Pull main cannon trigger */
   fireCannon: boolean;
   /** Hold coaxial MG / IFV autocannon trigger */
@@ -258,10 +259,10 @@ export interface TankEntity {
   readonly isHuman: boolean;
   readonly callsign: string;
   readonly stats: TankStats;
-  readonly root: THREE.Group;
+  readonly root: Entity;
 
-  position: THREE.Vector3;
-  velocity: THREE.Vector3;
+  position: Vec3;
+  velocity: Vec3;
   /** Forward hull heading in radians: forward = (sin(hullYaw), 0, cos(hullYaw)) */
   hullYaw: number;
   /** Turret relative yaw from hullYaw in radians */
@@ -298,31 +299,31 @@ export interface TankEntity {
     readonly locked: boolean;
   };
 
-  getMuzzleWorld(outPos: THREE.Vector3, outDir: THREE.Vector3): void;
-  getCoaxWorld(outPos: THREE.Vector3, outDir: THREE.Vector3): void;
-  getCenterMassWorld(outPos: THREE.Vector3): THREE.Vector3;
+  getMuzzleWorld(outPos: Vec3, outDir: Vec3): void;
+  getCoaxWorld(outPos: Vec3, outDir: Vec3): void;
+  getCenterMassWorld(outPos: Vec3): Vec3;
   applyRecoil(): void;
   takeDamage(
     amount: number,
-    hitWorldPos: THREE.Vector3,
-    attackerPos?: THREE.Vector3,
-    shellDirWorld?: THREE.Vector3,
+    hitWorldPos: Vec3,
+    attackerPos?: Vec3,
+    shellDirWorld?: Vec3,
     weapon?: 'cannon' | 'mg',
     shellSpec?: ShellSpec,
     opts?: {
       attacker?: TankEntity | null;
       /** HE blast: world centre + radius; per-module falloff computed internally. */
-      blastCenter?: THREE.Vector3;
+      blastCenter?: Vec3;
       blastRadius?: number;
     }
   ): boolean;
-  respawnAt(pos: THREE.Vector3, yaw: number): void;
+  respawnAt(pos: Vec3, yaw: number): void;
 }
 
 export interface WreckKillInfo {
   tank: TankEntity;
-  hitPoint: THREE.Vector3;
-  shellDir: THREE.Vector3 | null;
+  hitPoint: Vec3;
+  shellDir: Vec3 | null;
   weapon: 'cannon' | 'mg';
   damage: number;
   /** Ammo detonation / heavy catastrophic kill: turret launches, cook-off chain */
@@ -334,7 +335,7 @@ export interface DamageEvent {
   attacker: TankEntity | null;
   amount: number;
   killed: boolean;
-  hitPoint: THREE.Vector3;
+  hitPoint: Vec3;
   weapon: 'cannon' | 'mg';
   xrayReport?: ShellHitXRayReport | null;
   /** KO reason for histogram/feed (falls back to xrayReport.killReason). */
@@ -478,6 +479,7 @@ export interface HUDTelemetry {
   feedMessages: readonly { id: number; text: string; age: number; accent: 'kill' | 'death' | 'info'; actorName?: string; actorTeam?: Team; targetName?: string; targetTeam?: Team }[];
 
   pointerLocked: boolean;
+  freeLooking: boolean;
   sniperZoom: boolean;
 
   minimap: {

@@ -1,5 +1,7 @@
-import * as THREE from 'three';
+import type { Entity } from 'playcanvas';
 import { instantiateTankRig, type InstantiatedTankRig, type LoadedGameAssets } from './AssetLoader';
+import { applyMat4, applyQuat, Box3, clamp, damp, degToRad, lerp, Mat4, negate, Quat, quatFromEuler, setLocalEulerRad, transformDirection, Vec3, worldToLocal } from './engine/math';
+import { setVisible, userData } from './engine/scene';
 import {
   DAMAGE_LAYOUTS,
   FIRE_COOKOFF_PER_S,
@@ -584,35 +586,35 @@ function createModuleStates(cls: VehicleClass): Map<ModuleId, import('./DamageMo
   return map;
 }
 
-const _tmpVecA = new THREE.Vector3();
-const _tmpVecB = new THREE.Vector3();
-const _tmpQuat = new THREE.Quaternion();
-const _seekOrigin = new THREE.Vector3();
-const _seekDir = new THREE.Vector3();
-const _seekTo = new THREE.Vector3();
-const _seekLos = new THREE.Vector3();
+const _tmpVecA = new Vec3();
+const _tmpVecB = new Vec3();
+const _tmpQuat = new Quat();
+const _seekOrigin = new Vec3();
+const _seekDir = new Vec3();
+const _seekTo = new Vec3();
+const _seekLos = new Vec3();
 
 // Damage-model scratch (never stored)
-const _partInvM4 = new THREE.Matrix4();
-const _hO = new THREE.Vector3();
-const _hD = new THREE.Vector3();
-const _tO = new THREE.Vector3();
-const _tD = new THREE.Vector3();
-const _rayOrigin = new THREE.Vector3();
-const _entryW = new THREE.Vector3();
-const _v3b = new THREE.Vector3();
-const _slugO = new THREE.Vector3();
-const _spallOrg = new THREE.Vector3();
-const _spallDir = new THREE.Vector3();
-const _upRef = new THREE.Vector3();
-const _basisA = new THREE.Vector3();
-const _basisB = new THREE.Vector3();
-const _sO = new THREE.Vector3();
-const _sD = new THREE.Vector3();
-const _sO2 = new THREE.Vector3();
-const _sD2 = new THREE.Vector3();
-const _blastO = new THREE.Vector3();
-const _blastD = new THREE.Vector3();
+const _partInvM4 = new Mat4();
+const _hO = new Vec3();
+const _hD = new Vec3();
+const _tO = new Vec3();
+const _tD = new Vec3();
+const _rayOrigin = new Vec3();
+const _entryW = new Vec3();
+const _v3b = new Vec3();
+const _slugO = new Vec3();
+const _spallOrg = new Vec3();
+const _spallDir = new Vec3();
+const _upRef = new Vec3();
+const _basisA = new Vec3();
+const _basisB = new Vec3();
+const _sO = new Vec3();
+const _sD = new Vec3();
+const _sO2 = new Vec3();
+const _sD2 = new Vec3();
+const _blastO = new Vec3();
+const _blastD = new Vec3();
 
 export class Tank implements TankEntity {
   public readonly id: string;
@@ -620,14 +622,17 @@ export class Tank implements TankEntity {
   public readonly isHuman: boolean;
   public readonly callsign: string;
   public readonly stats: TankStats;
-  public readonly root: THREE.Group;
+  public readonly root: Entity;
 
-  public position = new THREE.Vector3();
-  public velocity = new THREE.Vector3();
+  public position = new Vec3();
+  public velocity = new Vec3();
   public hullYaw = 0;
   public turretRelYaw = 0;
   public gunPitch = 0;
   public speed = 0;
+  /** Radian pose state written to the rig each step (never read back from quaternions). */
+  public readonly hullTilt = { x: 0, y: 0, z: 0 };
+  public rotorAngle = 0;
 
   public hitCounter = 0;
   /** QA: last takeDamage internals (entry face, pen, modules hit). */
@@ -654,10 +659,10 @@ export class Tank implements TankEntity {
   /** Per-class module integrity map (only modules in the class layout exist). */
   public readonly modules: Map<ModuleId, ModuleRuntime> = new Map();
   /** Part bounding boxes in part-local metres, measured at rig build. */
-  private hullBoundsMin = new THREE.Vector3();
-  private hullBoundsSize = new THREE.Vector3();
-  private turretBoundsMin = new THREE.Vector3();
-  private turretBoundsSize = new THREE.Vector3();
+  private hullBoundsMin = new Vec3();
+  private hullBoundsSize = new Vec3();
+  private turretBoundsMin = new Vec3();
+  private turretBoundsSize = new Vec3();
   private layout = DAMAGE_LAYOUTS.normal;
   /** Module repair countdowns (destroyed -> damaged). */
   private repairTimers = new Map<ModuleId, number>();
@@ -688,8 +693,8 @@ export class Tank implements TankEntity {
   private dustAccum = 0;
 
   // Last-hit context captured in takeDamage for the destruction manager
-  private readonly _dkHitPoint = new THREE.Vector3();
-  private readonly _dkShellDir = new THREE.Vector3();
+  private readonly _dkHitPoint = new Vec3();
+  private readonly _dkShellDir = new Vec3();
   private _dkHasDir = false;
   private _dkWeapon: 'cannon' | 'mg' = 'cannon';
   private _dkDamage = 0;
@@ -704,13 +709,14 @@ export class Tank implements TankEntity {
   /** Per-class module boxes (part-local metres) for the X-Ray hit cam. */
   private _xrayBoxes: NonNullable<ShellHitXRayReport['moduleBoxes']> = [];
   /** Wired by main.ts — internal kills (fire cook-off, ammo/fuel detonation) report here for scoring/feed. */
-  public onKillEvent: ((ev: { victim: TankEntity; attacker: TankEntity | null; killed: boolean; hitPoint: THREE.Vector3; weapon: 'cannon' | 'mg'; amount: number; killReason: string | null }) => void) | null = null;
+  public onKillEvent: ((ev: { victim: TankEntity; attacker: TankEntity | null; killed: boolean; hitPoint: Vec3; weapon: 'cannon' | 'mg'; amount: number; killReason: string | null }) => void) | null = null;
   /** Wired by main.ts — spawns the persistent physical wreck on kill */
   public onDestroyed: ((info: WreckKillInfo) => void) | null = null;
 
   // Wheeled drive state
   private steerAngle = 0;
   private wheelDistAccum = 0;
+  private readonly wheelSpin = new Map<Entity, number>();
 
   // Rocket pod salvo state
   private salvoActive = false;
@@ -739,7 +745,7 @@ export class Tank implements TankEntity {
     team: Team,
     vehicleClass: VehicleClass,
     assets: LoadedGameAssets,
-    spawnPos: THREE.Vector3,
+    spawnPos: Vec3,
     spawnYaw: number,
     isHuman: boolean,
     callsign: string
@@ -805,11 +811,11 @@ export class Tank implements TankEntity {
     world: TerrainQuery,
     allTanks: readonly Tank[],
     callbacks?: {
-      onFireCannon?: (tank: Tank, pos: THREE.Vector3, dir: THREE.Vector3, shell: ShellSpec, guideTarget?: TankEntity | null) => void;
-      onFireMG?: (tank: Tank, pos: THREE.Vector3, dir: THREE.Vector3, beltSpec?: ShellSpec) => void;
-      onTrackDust?: (pos: THREE.Vector3, intensity01: number) => void;
-      onWaterWake?: (pos: THREE.Vector3, intensity01: number) => void;
-      onWreckSmoke?: (pos: THREE.Vector3) => void;
+      onFireCannon?: (tank: Tank, pos: Vec3, dir: Vec3, shell: ShellSpec, guideTarget?: TankEntity | null) => void;
+      onFireMG?: (tank: Tank, pos: Vec3, dir: Vec3, beltSpec?: ShellSpec) => void;
+      onTrackDust?: (pos: Vec3, intensity01: number) => void;
+      onWaterWake?: (pos: Vec3, intensity01: number) => void;
+      onWreckSmoke?: (pos: Vec3) => void;
     },
     seekerExtras?: readonly TankEntity[]
   ): void {
@@ -1023,8 +1029,8 @@ export class Tank implements TankEntity {
     const driveScale = this.isHuman ? playerDriveScale(this.stats.vehicleClass) : 0.6;
     const accelMul = (fordT > 0 ? 0.72 : 1) * driveScale;
 
-    const rawThrottle = intent ? THREE.MathUtils.clamp(intent.throttle, -1, 1) : 0;
-    const rawSteer = intent ? THREE.MathUtils.clamp(intent.steer, -1, 1) : 0;
+    const rawThrottle = intent ? clamp(intent.throttle, -1, 1) : 0;
+    const rawSteer = intent ? clamp(intent.steer, -1, 1) : 0;
     const throttle = rawThrottle * mobilityMult;
     const steer = rawSteer * turnMult + wheelPull * Math.min(1, Math.abs(this.speed) / 4);
     const brake = Boolean(intent?.brake) || tracksSevered || driverOut;
@@ -1060,7 +1066,7 @@ export class Tank implements TankEntity {
     if (isWheeled) {
       // Bicycle model: smoothed steer angle, speed-dependent max steer, no turn-on-spot
       const speedFrac = Math.min(1, Math.abs(this.speed) / Math.max(1, this.stats.maxForwardSpeed * driveScale));
-      const maxSteer = THREE.MathUtils.lerp(0.6, 0.25, speedFrac);
+      const maxSteer = lerp(0.6, 0.25, speedFrac);
       const steerTarget = steer * maxSteer;
       this.steerAngle += (steerTarget - this.steerAngle) * (1 - Math.exp(-10 * safeDt));
       const wheelbase = this.stats.wheelbase ?? 3.0;
@@ -1069,7 +1075,7 @@ export class Tank implements TankEntity {
       this.hullYaw = wrapAnglePi(this.hullYaw + angularVel * safeDt);
 
       // Body roll from lateral acceleration (consumed by alignHullToTerrain's spring)
-      this.suspRollTarget = THREE.MathUtils.clamp(-lateralAccel * 0.0065, -0.07, 0.07);
+      this.suspRollTarget = clamp(-lateralAccel * 0.0065, -0.07, 0.07);
     } else {
       const reverseSteerSign = this.speed < -0.6 ? -1 : 1;
       angularVel = steer * reverseSteerSign * this.stats.hullTurnRate;
@@ -1084,7 +1090,7 @@ export class Tank implements TankEntity {
       const oldSlip = -cosH * this.velocity.x + sinH * this.velocity.z;
       const grip = brake ? 2.8 : isWheeled ? 4 : 6;
       const maxSlip = Math.abs(effectiveSpeed) * (brake ? 0.46 : 0.35);
-      slip = THREE.MathUtils.clamp(oldSlip * Math.exp(-grip * safeDt), -maxSlip, maxSlip);
+      slip = clamp(oldSlip * Math.exp(-grip * safeDt), -maxSlip, maxSlip);
     }
     this.velocity.set(sinH * effectiveSpeed - cosH * slip, 0, cosH * effectiveSpeed + sinH * slip);
 
@@ -1103,7 +1109,7 @@ export class Tank implements TankEntity {
 
     this.resolveCollisions(world, allTanks);
     if (Math.abs(this.speed * roadBoost) < Math.abs(effectiveSpeed)) {
-      this.velocity.multiplyScalar(Math.abs(this.speed * roadBoost / effectiveSpeed));
+      this.velocity.mulScalar(Math.abs(this.speed * roadBoost / effectiveSpeed));
     }
 
     const longitudinalAccel = (this.speed - this.prevSpeed) / Math.max(safeDt, 0.001);
@@ -1114,10 +1120,10 @@ export class Tank implements TankEntity {
         // Wheel spin = distance travelled / radius; front steer nodes yaw with steerAngle
         this.wheelDistAccum += effectiveSpeed * safeDt;
         for (const w of this.rig.wheels) {
-          w.node.rotation.x = this.wheelDistAccum / w.radius;
+          setLocalEulerRad(w.node, this.wheelDistAccum / w.radius, 0, 0);
         }
         for (const s of this.rig.steerNodes) {
-          s.rotation.y = this.steerAngle;
+          setLocalEulerRad(s, 0, this.steerAngle, 0);
         }
       } else if (Math.abs(effectiveSpeed) > 0.01 || Math.abs(angularVel) > 0.01) {
         const halfTrack = 1.45;
@@ -1130,7 +1136,9 @@ export class Tank implements TankEntity {
         }
         for (const w of this.rig.wheels) {
           const trackV = w.side === 'L' ? vLeft : vRight;
-          w.node.rotation.x += (trackV * safeDt) / w.radius;
+          const angle = (this.wheelSpin.get(w.node) ?? 0) + trackV * safeDt / w.radius;
+          this.wheelSpin.set(w.node, angle);
+          setLocalEulerRad(w.node, angle, 0, 0);
         }
       }
     }
@@ -1141,7 +1149,7 @@ export class Tank implements TankEntity {
       this.dustAccum += safeDt * (0.4 + absSpd * 0.45);
       if (this.dustAccum >= 0.16) {
         this.dustAccum = 0;
-        const intensity = THREE.MathUtils.clamp(absSpd / this.stats.maxForwardSpeed, 0.2, 0.9);
+        const intensity = clamp(absSpd / this.stats.maxForwardSpeed, 0.2, 0.9);
         const rightX = -cosH;
         const rightZ = sinH;
         const rearDist = isWheeled
@@ -1179,10 +1187,8 @@ export class Tank implements TankEntity {
     this.barrelRecoilVel += recoilAcc * safeDt;
     this.barrelRecoilZ += this.barrelRecoilVel * safeDt;
     if (this.barrelRecoilZ > 0.01) this.barrelRecoilZ = 0.01;
-    this.rig.gunRecoilGroup.position.z = this.barrelRecoilZ;
-
-    // Lightweight ancestor-only world matrix sync on muzzleNode instead of 35-mesh full subtree traversal!
-    this.rig.muzzleNode.updateWorldMatrix(true, false);
+    const recoilPos = this.rig.gunRecoilGroup.getLocalPosition();
+    this.rig.gunRecoilGroup.setLocalPosition(recoilPos.x, recoilPos.y, this.barrelRecoilZ);
 
     // Guided-munition seeker: scan/track while the rocket class is active and
     // no salvo is in flight. Frozen during a salvo (each rocket already carries
@@ -1265,12 +1271,14 @@ export class Tank implements TankEntity {
 
   private stepFlight(dt: number, intent: TankIntent | null, world: TerrainQuery, mobility: number, pilotOut: boolean, engineOut: boolean): void {
     const lift = pilotOut ? 0 : intent?.lift ?? 0;
-    this.rig.spinRotors?.(dt * (engineOut ? 0.32 : 1 + lift * 0.065));
+    const rotorDt = dt * (engineOut ? 0.32 : 1 + lift * 0.065);
+    this.rig.spinRotors?.(rotorDt);
+    this.rotorAngle += 35 * rotorDt;
     const yaw = intent?.flightYaw;
     if (yaw !== undefined && !pilotOut) {
       const maxStep = this.stats.hullTurnRate * dt;
       const movement = wrapAnglePi(yaw - this.hullYaw) * (1 - Math.exp(-3.7 * dt));
-      this.hullYaw = wrapAnglePi(this.hullYaw + THREE.MathUtils.clamp(movement, -maxStep, maxStep));
+      this.hullYaw = wrapAnglePi(this.hullYaw + clamp(movement, -maxStep, maxStep));
     }
     const p = this.position;
     const ground = world.getHeightAt(p.x, p.z) + (world.getWaterDepthAt?.(p.x, p.z) ?? 0);
@@ -1279,20 +1287,21 @@ export class Tank implements TankEntity {
     const v = this.velocity;
     const forwardSpeed = v.x * sin + v.z * cos;
     const sideSpeed = v.x * cos - v.z * sin;
-    const pose = this.rig.hullTiltGroup.rotation;
+    const pose = this.hullTilt;
     const pitchCmd = intent?.brake ? -0.045 * forwardSpeed
       : (intent?.flightPitch ?? 0) * 0.86 + (intent?.throttle ?? 0) * 0.52;
     const rollCmd = intent?.brake ? 0.055 * sideSpeed : -(intent?.steer ?? 0) * 0.47;
     const control = pilotOut || engineOut || (grounded && lift <= 0) ? 0 : Math.sqrt(mobility);
-    pose.x = THREE.MathUtils.damp(pose.x, THREE.MathUtils.clamp(pitchCmd, -0.52, 0.61) * control, 4.6, dt);
-    pose.z = THREE.MathUtils.damp(pose.z, THREE.MathUtils.clamp(rollCmd, -0.5, 0.5) * control, 5.2, dt);
+    pose.x = damp(pose.x, clamp(pitchCmd, -0.52, 0.61) * control, 4.6, dt);
+    pose.z = damp(pose.z, clamp(rollCmd, -0.5, 0.5) * control, 5.2, dt);
 
     // The rotor pushes along the aircraft's tilted up vector. Drag and thrust,
     // not key state, determine velocity. Collective includes a light hover assist.
-    const rotor = _tmpVecA.set(0, 1, 0).applyEuler(pose);
+    const rotor = applyQuat(_tmpVecA.set(0, 1, 0), quatFromEuler(_tmpQuat, pose.x, pose.y, pose.z, 'YXZ'));
+    setLocalEulerRad(this.rig.hullTiltGroup, pose.x, pose.y, pose.z, 'YXZ');
     const gravity = 9.81;
     const trim = gravity * (0.45 + 0.55 / rotor.y);
-    const collective = engineOut ? 0 : THREE.MathUtils.clamp(trim + lift * (lift > 0 ? 8.9 * mobility : 4.6) - v.y * 1.1, 1, 22);
+    const collective = engineOut ? 0 : clamp(trim + lift * (lift > 0 ? 8.9 * mobility : 4.6) - v.y * 1.1, 1, 22);
     const dragF = forwardSpeed * (0.09 + Math.abs(forwardSpeed) * (forwardSpeed < 0 ? 0.006 : 0.0018));
     const dragS = sideSpeed * (0.16 + Math.abs(sideSpeed) * 0.004);
     const f = rotor.z * collective - dragF;
@@ -1312,10 +1321,10 @@ export class Tank implements TankEntity {
       const hit = world.raycastWorld(center, _tmpVecB.copy(v).normalize(), distance + 0.75);
       if (hit?.hitKind === 'obstacle') {
         const inward = v.dot(hit.normal);
-        if (inward < 0) v.addScaledVector(hit.normal, -inward).multiplyScalar(0.72);
+        if (inward < 0) v.addScaled(hit.normal, -inward).mulScalar(0.72);
       }
     }
-    p.addScaledVector(v, dt);
+    p.addScaled(v, dt);
     const limit = world.worldHalfSize - 8;
     if (Math.abs(p.x) > limit) { p.x = Math.sign(p.x) * limit; v.x = 0; }
     if (Math.abs(p.z) > limit) { p.z = Math.sign(p.z) * limit; v.z = 0; }
@@ -1327,11 +1336,11 @@ export class Tank implements TankEntity {
     }
     else if (p.y >= floor + 150) { p.y = floor + 150; v.y = Math.min(0, v.y); }
     this.speed = Math.hypot(v.x, v.z);
-    this.root.position.copy(p);
-    this.root.rotation.y = this.hullYaw;
+    this.root.setLocalPosition(p);
+    setLocalEulerRad(this.root, 0, this.hullYaw, 0);
   }
 
-  private updateTurretAndGunAim(worldAimPoint: THREE.Vector3, dt: number): void {
+  private updateTurretAndGunAim(worldAimPoint: Vec3, dt: number): void {
     const rtGunner = this.modules.get('gunner');
     if (rtGunner && rtGunner.integrity <= 0) return; // gunner out: no aiming
 
@@ -1340,49 +1349,46 @@ export class Tank implements TankEntity {
       (rtRing && rtRing.integrity <= 0 ? 0 : rtRing && rtRing.integrity <= 0.6 ? 0.5 : 1) *
       (rtGunner && rtGunner.integrity > 0 && rtGunner.integrity <= 0.6 ? 0.7 : 1);
 
-    // Ancestor-only matrix update (root -> hullTiltGroup: 2 matrices instead of 35!)
-    this.rig.hullTiltGroup.updateWorldMatrix(true, false);
     _tmpVecA.copy(worldAimPoint);
-    this.rig.hullTiltGroup.worldToLocal(_tmpVecA);
+    worldToLocal(this.rig.hullTiltGroup, _tmpVecA);
 
-    const tp = this.rig.turretPivot.position;
+    const tp = this.rig.turretPivot.getLocalPosition();
     const dx = _tmpVecA.x - tp.x;
     const dz = _tmpVecA.z - tp.z;
     const desiredRelYaw = Math.atan2(dx, dz);
     const yawDiff = wrapAnglePi(desiredRelYaw - this.turretRelYaw);
     const maxYawStep = this.stats.turretTurnRate * ringFactor * dt;
     this.turretRelYaw = wrapAnglePi(
-      this.turretRelYaw + THREE.MathUtils.clamp(yawDiff, -maxYawStep, maxYawStep)
+      this.turretRelYaw + clamp(yawDiff, -maxYawStep, maxYawStep)
     );
-    this.rig.turretPivot.rotation.y = this.turretRelYaw;
+    setLocalEulerRad(this.rig.turretPivot, 0, this.turretRelYaw, 0);
 
     if (this.rig.rwsNode) {
-      this.rig.rwsNode.rotation.y = this.turretRelYaw * 0.25;
+      setLocalEulerRad(this.rig.rwsNode, 0, this.turretRelYaw * 0.25, 0);
     }
 
-    this.rig.turretPivot.updateWorldMatrix(false, false);
     _tmpVecB.copy(worldAimPoint);
-    this.rig.turretPivot.worldToLocal(_tmpVecB);
+    worldToLocal(this.rig.turretPivot, _tmpVecB);
 
-    const gp = this.rig.gunPivot.position;
+    const gp = this.rig.gunPivot.getLocalPosition();
     const gdx = _tmpVecB.x - gp.x;
     const gdy = _tmpVecB.y - gp.y;
     const gdz = _tmpVecB.z - gp.z;
     const horizDist = Math.max(0.5, Math.hypot(gdx, gdz));
-    const desiredPitch = THREE.MathUtils.clamp(
+    const desiredPitch = clamp(
       Math.atan2(gdy, horizDist),
       this.stats.gunMinPitch,
       this.stats.gunMaxPitch
     );
     const pitchDiff = desiredPitch - this.gunPitch;
     const maxPitchStep = this.stats.gunElevateRate * dt;
-    this.gunPitch = THREE.MathUtils.clamp(
-      this.gunPitch + THREE.MathUtils.clamp(pitchDiff, -maxPitchStep, maxPitchStep),
+    this.gunPitch = clamp(
+      this.gunPitch + clamp(pitchDiff, -maxPitchStep, maxPitchStep),
       this.stats.gunMinPitch,
       this.stats.gunMaxPitch
     );
 
-    this.rig.gunPivot.rotation.x = -this.gunPitch;
+    setLocalEulerRad(this.rig.gunPivot, -this.gunPitch, 0, 0);
   }
 
   private alignHullToTerrain(world: TerrainQuery, dt: number, longitudinalAccel: number): void {
@@ -1423,7 +1429,7 @@ export class Tank implements TankEntity {
     const terrainPitch = Math.atan2(frontAvg - rearAvg, hl * 2);
     const terrainRoll = Math.atan2(leftAvg - rightAvg, hw * 2);
 
-    const targetSuspPitch = THREE.MathUtils.clamp(longitudinalAccel * 0.0045, -0.055, 0.055);
+    const targetSuspPitch = clamp(longitudinalAccel * 0.0045, -0.055, 0.055);
     const k = 42;
     const d = 9.5;
     this.suspPitchVel += (k * (targetSuspPitch - this.suspPitch) - d * this.suspPitchVel) * dt;
@@ -1432,14 +1438,12 @@ export class Tank implements TankEntity {
     this.suspRollVel += (-k * (this.suspRoll - this.suspRollTarget) - d * this.suspRollVel) * dt;
     this.suspRoll += this.suspRollVel * dt;
 
-    this.root.position.copy(this.position);
-    this.root.rotation.set(0, this.hullYaw, 0);
-    this.rig.hullTiltGroup.rotation.set(
-      -(terrainPitch + this.suspPitch),
-      0,
-      -(terrainRoll + this.suspRoll),
-      'YXZ'
-    );
+    this.root.setLocalPosition(this.position);
+    setLocalEulerRad(this.root, 0, this.hullYaw, 0);
+    this.hullTilt.x = -(terrainPitch + this.suspPitch);
+    this.hullTilt.y = 0;
+    this.hullTilt.z = -(terrainRoll + this.suspRoll);
+    setLocalEulerRad(this.rig.hullTiltGroup, this.hullTilt.x, 0, this.hullTilt.z, 'YXZ');
   }
 
   private resolveCollisions(world: TerrainQuery, allTanks: readonly Tank[]): void {
@@ -1504,21 +1508,19 @@ export class Tank implements TankEntity {
     }
   }
 
-  public getMuzzleWorld(outPos: THREE.Vector3, outDir: THREE.Vector3): void {
-    this.rig.muzzleNode.updateWorldMatrix(true, false);
-    this.rig.muzzleNode.getWorldPosition(outPos);
-    this.rig.gunPivot.getWorldQuaternion(_tmpQuat);
-    outDir.set(0, 0, 1).applyQuaternion(_tmpQuat).normalize();
+  public getMuzzleWorld(outPos: Vec3, outDir: Vec3): void {
+    outPos.copy(this.rig.muzzleNode.getPosition());
+    _tmpQuat.copy(this.rig.gunPivot.getRotation());
+    applyQuat(outDir.set(0, 0, 1), _tmpQuat).normalize();
   }
 
-  public getCoaxWorld(outPos: THREE.Vector3, outDir: THREE.Vector3): void {
-    this.rig.coaxNode.updateWorldMatrix(true, false);
-    this.rig.coaxNode.getWorldPosition(outPos);
-    this.rig.gunPivot.getWorldQuaternion(_tmpQuat);
-    outDir.set(0, 0, 1).applyQuaternion(_tmpQuat).normalize();
+  public getCoaxWorld(outPos: Vec3, outDir: Vec3): void {
+    outPos.copy(this.rig.coaxNode.getPosition());
+    _tmpQuat.copy(this.rig.gunPivot.getRotation());
+    applyQuat(outDir.set(0, 0, 1), _tmpQuat).normalize();
   }
 
-  public getCenterMassWorld(outPos: THREE.Vector3): THREE.Vector3 {
+  public getCenterMassWorld(outPos: Vec3): Vec3 {
     return outPos.set(this.position.x, this.position.y + 1.35, this.position.z);
   }
 
@@ -1547,7 +1549,7 @@ export class Tank implements TankEntity {
     // Seeker aim reference: bots pass their target bearing explicitly (their
     // aimPoint is an elevated ballistic solution, not a bearing); the player
     // uses the crosshair aim point.
-    _seekDir.subVectors(intent.seekerAimPoint ?? intent.aimPoint, _seekOrigin);
+    _seekDir.sub2(intent.seekerAimPoint ?? intent.aimPoint, _seekOrigin);
     if (_seekDir.lengthSq() < 0.04) {
       _seekDir.set(Math.sin(this.hullYaw), 0, Math.cos(this.hullYaw));
     } else {
@@ -1555,7 +1557,7 @@ export class Tank implements TankEntity {
     }
     // Lock-on acquisition/hold cone is a fixed 6° (guidance.seekerConeDeg is
     // the wider in-flight retention cone used by Ballistics)
-    const coneCos = Math.cos(THREE.MathUtils.degToRad(6));
+    const coneCos = Math.cos(degToRad(6));
 
     // Instant drop on target death
     if (this.seekerTarget && !this.seekerTarget.alive) {
@@ -1611,7 +1613,7 @@ export class Tank implements TankEntity {
     _seekTo.set(t.position.x, t.position.y + 1.5, t.position.z).sub(_seekOrigin);
     const dist = _seekTo.length();
     if (dist < 60 || dist > g.maxRange) return false;
-    _seekTo.multiplyScalar(1 / dist);
+    _seekTo.mulScalar(1 / dist);
     return _seekTo.dot(_seekDir) >= coneCos;
   }
 
@@ -1656,7 +1658,7 @@ export class Tank implements TankEntity {
       _seekTo.set(cand.position.x, cand.position.y + 1.5, cand.position.z).sub(_seekOrigin);
       const dist = _seekTo.length();
       if (dist < 1) continue;
-      _seekLos.copy(_seekTo).multiplyScalar(1 / dist);
+      _seekLos.copy(_seekTo).mulScalar(1 / dist);
       const checkDist = Math.max(0.5, dist - (cand.stats?.hitRadius ?? 1.2) * 0.5 - 1);
       const hit = world.raycastWorld(_seekOrigin, _seekLos, checkDist);
       if (!hit) return cand;
@@ -1670,16 +1672,16 @@ export class Tank implements TankEntity {
 
   /** Launches the next rocket from its own pod tube; that tube's mesh stays hidden until reload. */
   private _fireNextRocket(callbacks?: {
-    onFireCannon?: (tank: Tank, pos: THREE.Vector3, dir: THREE.Vector3, shell: ShellSpec, guideTarget?: TankEntity | null) => void;
+    onFireCannon?: (tank: Tank, pos: Vec3, dir: Vec3, shell: ShellSpec, guideTarget?: TankEntity | null) => void;
   }): void {
     const meshes = this.rig.rocketMeshes;
     const mesh = meshes[this.salvoFired % meshes.length];
     this.salvoFired++;
     if (mesh) {
-      mesh.getWorldPosition(_tmpVecA);
-      this.rig.gunPivot.getWorldQuaternion(_tmpQuat);
-      _tmpVecB.set(0, 0, 1).applyQuaternion(_tmpQuat).normalize();
-      mesh.visible = false;
+      _tmpVecA.copy(mesh.getPosition());
+      _tmpQuat.copy(this.rig.gunPivot.getRotation());
+      applyQuat(_tmpVecB.set(0, 0, 1), _tmpQuat).normalize();
+      setVisible(mesh, false);
     } else this.getMuzzleWorld(_tmpVecA, _tmpVecB);
     this._rocketsLeft = Math.max(0, this._rocketsLeft - 1);
     // SAM ripple: each missile snapshots the CURRENT lock at launch so the
@@ -1701,7 +1703,7 @@ export class Tank implements TankEntity {
 
   private _setRocketMeshesVisible(visible: boolean): void {
     for (const m of this.rig.rocketMeshes) {
-      m.visible = visible;
+      setVisible(m, visible);
     }
   }
 
@@ -1722,9 +1724,8 @@ export class Tank implements TankEntity {
   private _initDamageModel(cls: VehicleClass): void {
     this.layout = DAMAGE_LAYOUTS[cls];
     for (const [id, rt] of createModuleStates(cls)) this.modules.set(id, rt);
-    this.root.updateMatrixWorld(true);
-    this._measurePartBounds(this.rig.hullTiltGroup, this.rig.turretPivot as THREE.Object3D, this.hullBoundsMin, this.hullBoundsSize);
-    this._measurePartBounds(this.rig.turretPivot as THREE.Object3D, null, this.turretBoundsMin, this.turretBoundsSize);
+    this._measurePartBounds(this.rig.hullTiltGroup, this.rig.turretPivot as Entity, this.hullBoundsMin, this.hullBoundsSize);
+    this._measurePartBounds(this.rig.turretPivot as Entity, null, this.turretBoundsMin, this.turretBoundsSize);
     if (this.turretBoundsSize.lengthSq() < 1e-4) {
       this.turretBoundsMin.copy(this.hullBoundsMin);
       this.turretBoundsSize.copy(this.hullBoundsSize);
@@ -1762,31 +1763,23 @@ export class Tank implements TankEntity {
 
   /** Union of mesh geometry bounds expressed in `space`'s local frame, skipping `skip` subtree. */
   private _measurePartBounds(
-    space: THREE.Object3D,
-    skip: THREE.Object3D | null,
-    outMin: THREE.Vector3,
-    outSize: THREE.Vector3
+    space: Entity,
+    skip: Entity | null,
+    outMin: Vec3,
+    outSize: Vec3
   ): void {
-    space.updateWorldMatrix(true, true);
-    const inv = new THREE.Matrix4().copy(space.matrixWorld).invert();
-    const box = new THREE.Box3();
-    box.makeEmpty();
-    const tmpM = new THREE.Matrix4();
-    const tmpV = new THREE.Vector3();
-    const cb = new THREE.Box3();
-    space.traverse((o) => {
-      for (let p: THREE.Object3D | null = o; p && p !== space; p = p.parent) {
-        if (p === skip || p.userData.noDamageBounds) return;
+    const inv = new Mat4().copy(space.getWorldTransform()).invert();
+    const box = new Box3(), cb = new Box3();
+    space.forEach((node) => {
+      for (let p: Entity | null = node as Entity; p && p !== space; p = p.parent as Entity | null) {
+        if (p === skip || userData(p).noDamageBounds) return;
       }
-      const mesh = o as THREE.Mesh;
-      if (!mesh.isMesh || !mesh.geometry || (mesh as THREE.InstancedMesh).isInstancedMesh) return;
-      if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
-      const gb = mesh.geometry.boundingBox;
-      if (!gb || gb.isEmpty()) return;
-      tmpM.multiplyMatrices(inv, mesh.matrixWorld);
-      cb.copy(gb).applyMatrix4(tmpM);
-      box.union(cb);
-      void tmpV;
+      for (const mi of (node as Entity).render?.meshInstances ?? []) {
+        if (mi.instancingData) continue;
+        const aabb = mi.aabb;
+        cb.set(aabb.getMin(), aabb.getMax()).applyMatrix4(inv);
+        box.union(cb);
+      }
     });
     if (box.isEmpty()) {
       outMin.set(-2, 0, -3);
@@ -1798,16 +1791,15 @@ export class Tank implements TankEntity {
   }
 
   private _rayToPartLocal(
-    part: THREE.Object3D,
-    o: THREE.Vector3,
-    d: THREE.Vector3,
-    outO: THREE.Vector3,
-    outD: THREE.Vector3
+    part: Entity,
+    o: Vec3,
+    d: Vec3,
+    outO: Vec3,
+    outD: Vec3
   ): void {
-    part.updateWorldMatrix(true, false);
-    _partInvM4.copy(part.matrixWorld).invert();
-    outO.copy(o).applyMatrix4(_partInvM4);
-    outD.copy(d).transformDirection(_partInvM4);
+    _partInvM4.copy(part.getWorldTransform()).invert();
+    applyMat4(outO.copy(o), _partInvM4);
+    transformDirection(outD.copy(d), _partInvM4);
   }
 
   /** Entry face of an AABB for a ray already in that box's local space. */
@@ -1851,9 +1843,9 @@ export class Tank implements TankEntity {
     face: 'front' | 'side' | 'rear' | 'top' | 'bottom',
     slopeDeg: number,
     lx: number, ly: number, lz: number,
-    ld: THREE.Vector3,
-    bMin: THREE.Vector3,
-    bMax: THREE.Vector3
+    ld: Vec3,
+    bMin: Vec3,
+    bMax: Vec3
   ): number {
     // outward unit normal of the entered face
     let nx = 0, ny = 0, nz = 0;
@@ -1873,8 +1865,8 @@ export class Tank implements TankEntity {
 
   /** Part-space bounds used by the damage model (references, no alloc). */
   public getDamageBounds(): {
-    hullMin: THREE.Vector3; hullSize: THREE.Vector3;
-    turretMin: THREE.Vector3; turretSize: THREE.Vector3;
+    hullMin: Vec3; hullSize: Vec3;
+    turretMin: Vec3; turretSize: Vec3;
   } {
     return {
       hullMin: this.hullBoundsMin, hullSize: this.hullBoundsSize,
@@ -1971,13 +1963,13 @@ export class Tank implements TankEntity {
   }
 
   /** HE blast: per-module falloff; interior gated by armour on the face toward the blast. */
-  private _applyBlast(center: THREE.Vector3, radius: number, spec: ShellSpec): void {
+  private _applyBlast(center: Vec3, radius: number, spec: ShellSpec): void {
     if (radius <= 0) return;
     const splashFactor = (spec.splashDamage > 0 ? spec.splashDamage : 60) / 400;
     const penGate = (spec.penMm ?? 0) * 0.5;
-    const anchor = new THREE.Vector3();
-    const toBlast = new THREE.Vector3();
-    const dirLocal = new THREE.Vector3();
+    const anchor = new Vec3();
+    const toBlast = new Vec3();
+    const dirLocal = new Vec3();
     const partObj = (p: 'hull' | 'turret') => (p === 'hull' ? this.rig.hullTiltGroup : this.rig.turretPivot);
     for (const rt of this.modules.values()) {
       if (rt.integrity <= 0) continue;
@@ -1985,14 +1977,13 @@ export class Tank implements TankEntity {
       const bx = rt.boxes[0];
       if (!bx) continue;
       const part = partObj(bx.part);
-      part.updateWorldMatrix(true, false);
       anchor.set(
         (bx.min[0] + bx.max[0]) * 0.5,
         (bx.min[1] + bx.max[1]) * 0.5,
         (bx.min[2] + bx.max[2]) * 0.5
       );
-      part.localToWorld(anchor);
-      const d = anchor.distanceTo(center);
+      applyMat4(anchor, part.getWorldTransform());
+      const d = anchor.distance(center);
       if (d >= radius) continue;
       const fall = 1 - d / radius;
       const dmg = splashFactor * fall * fall;
@@ -2002,7 +1993,7 @@ export class Tank implements TankEntity {
         continue;
       }
       // interior: armour on the face toward the blast must be < penMm*0.5
-      toBlast.subVectors(center, anchor);
+      toBlast.sub2(center, anchor);
       this._rayToPartLocal(part, anchor, toBlast.normalize(), _blastO, _blastD);
       const ax = Math.abs(_blastD.x), ay = Math.abs(_blastD.y), az = Math.abs(_blastD.z);
       let face: 'front' | 'side' | 'rear' | 'top' | 'bottom';
@@ -2018,14 +2009,14 @@ export class Tank implements TankEntity {
 
   public takeDamage(
     amount: number,
-    hitWorldPos: THREE.Vector3,
-    attackerPos?: THREE.Vector3,
-    shellDirWorld?: THREE.Vector3,
+    hitWorldPos: Vec3,
+    attackerPos?: Vec3,
+    shellDirWorld?: Vec3,
     weapon: 'cannon' | 'mg' = 'cannon',
     shellSpec?: ShellSpec,
     opts?: {
       attacker?: TankEntity | null;
-      blastCenter?: THREE.Vector3;
+      blastCenter?: Vec3;
       blastRadius?: number;
     }
   ): boolean {
@@ -2078,10 +2069,10 @@ export class Tank implements TankEntity {
     if (shellDirWorld) {
       const dir = _tmpVecB.copy(shellDirWorld).normalize();
       // ray origin: 6 m behind the impact point
-      const ro = _rayOrigin.copy(hitWorldPos).addScaledVector(dir, -6);
+      const ro = _rayOrigin.copy(hitWorldPos).addScaled(dir, -6);
       // transform into both part spaces
       this._rayToPartLocal(this.rig.hullTiltGroup, ro, dir, _hO, _hD);
-      this._rayToPartLocal(this.rig.turretPivot as THREE.Object3D, ro, dir, _tO, _tD);
+      this._rayToPartLocal(this.rig.turretPivot as Entity, ro, dir, _tO, _tD);
 
       const tHull = rayBox(_hO.x, _hO.y, _hO.z, _hD.x, _hD.y, _hD.z,
         this.hullBoundsMin.x, this.hullBoundsMin.y, this.hullBoundsMin.z,
@@ -2095,16 +2086,15 @@ export class Tank implements TankEntity {
       if (tTurret !== null && tTurret < entryT) { entryT = tTurret; entryPart = 'turret'; }
 
       // entry point in world space
-      const entryWorld = _entryW.copy(ro).addScaledVector(dir, Number.isFinite(entryT) ? entryT : 0);
+      const entryWorld = _entryW.copy(ro).addScaled(dir, Number.isFinite(entryT) ? entryT : 0);
       ex = entryWorld.x; ey = entryWorld.y; ez = entryWorld.z;
 
       // local coords of entry for the XRay report
       if (entryPart === 'turret') {
-        this.rig.turretPivot.updateWorldMatrix(true, false);
         _tmpVecA.copy(entryWorld);
-        (this.rig.turretPivot as THREE.Object3D).worldToLocal(_tmpVecA);
+        worldToLocal(this.rig.turretPivot, _tmpVecA);
       } else {
-        this.rig.hullTiltGroup.worldToLocal(_tmpVecA.copy(entryWorld));
+        worldToLocal(this.rig.hullTiltGroup, _tmpVecA.copy(entryWorld));
       }
       const lx = _tmpVecA.x, ly = _tmpVecA.y, lz = _tmpVecA.z;
 
@@ -2172,23 +2162,23 @@ export class Tank implements TankEntity {
         if (penetrated && md) {
           const pathLen = postPenPathMm(penMm, effMm);
           // slug: damages internal modules along the path in BOTH part spaces
-          const slugOriginWorld = _slugO.copy(entryWorld).addScaledVector(dir, 0.15);
+          const slugOriginWorld = _slugO.copy(entryWorld).addScaled(dir, 0.15);
           this._rayDamageModules(hitModules, slugOriginWorld, dir, pathLen, md.slug, null);
           // spall cone
           const numSpall = md.spallCount;
           if (numSpall > 0 && md.spall > 0) {
-            const spallOrigin = _spallOrg.copy(entryWorld).addScaledVector(dir, 0.25);
+            const spallOrigin = _spallOrg.copy(entryWorld).addScaled(dir, 0.25);
             const upRef = Math.abs(dir.y) < 0.9 ? _upRef.set(0, 1, 0) : _upRef.set(1, 0, 0);
-            const basisA = _basisA.crossVectors(dir, upRef).normalize();
-            const basisB = _basisB.crossVectors(basisA, dir).normalize();
+            const basisA = _basisA.cross(dir, upRef).normalize();
+            const basisB = _basisB.cross(basisA, dir).normalize();
             const spread = 0.42;
             const spallLen = 2.4;
             for (let i = 0; i < numSpall; i++) {
               const ang = (i / numSpall) * Math.PI * 2 + (i % 2) * 0.3;
               _spallDir
                 .copy(dir)
-                .addScaledVector(basisA, Math.cos(ang) * spread)
-                .addScaledVector(basisB, Math.sin(ang) * spread)
+                .addScaled(basisA, Math.cos(ang) * spread)
+                .addScaled(basisB, Math.sin(ang) * spread)
                 .normalize();
               const before = hitModules.size;
               void before;
@@ -2260,14 +2250,14 @@ export class Tank implements TankEntity {
   /** Ray vs all internal module boxes (both part spaces); accumulates damage. */
   private _rayDamageModules(
     hitModules: Map<ModuleId, { dmg: number; dist: number }>,
-    worldOrigin: THREE.Vector3,
-    worldDir: THREE.Vector3,
+    worldOrigin: Vec3,
+    worldDir: Vec3,
     len: number,
     dmgPer: number,
     spallRay: XRaySpallRay | null
   ): void {
     this._rayToPartLocal(this.rig.hullTiltGroup, worldOrigin, worldDir, _sO, _sD);
-    this._rayToPartLocal(this.rig.turretPivot as THREE.Object3D, worldOrigin, worldDir, _sO2, _sD2);
+    this._rayToPartLocal(this.rig.turretPivot as Entity, worldOrigin, worldDir, _sO2, _sD2);
     let anyHit = false;
     for (const rt of this.modules.values()) {
       if (rt.integrity <= 0) continue;
@@ -2315,7 +2305,7 @@ export class Tank implements TankEntity {
         label: meta.label,
         effectText: st === 'destroyed' ? meta.destroyedEffect : meta.damagedEffect,
         newState: st,
-        hitTime01: THREE.MathUtils.clamp(rec.dist / 4, 0.05, 0.95),
+        hitTime01: clamp(rec.dist / 4, 0.05, 0.95),
       });
     }
     this.lastXRayReport = {
@@ -2352,19 +2342,18 @@ export class Tank implements TankEntity {
   }
 
   /** World position of the burning module (fuel > ammo > engine > hull centre). */
-  private _fireAnchorPos(out: THREE.Vector3): THREE.Vector3 {
+  private _fireAnchorPos(out: Vec3): Vec3 {
     for (const id of ['fuel', 'ammo', 'engine'] as ModuleId[]) {
       const rt = this.modules.get(id);
       const bx = rt?.boxes[0];
       if (rt && rt.integrity <= 0 && bx) {
-        const part = bx.part === 'hull' ? this.rig.hullTiltGroup : (this.rig.turretPivot as THREE.Object3D);
-        part.updateWorldMatrix(true, false);
+        const part = bx.part === 'hull' ? this.rig.hullTiltGroup : (this.rig.turretPivot as Entity);
         out.set(
           (bx.min[0] + bx.max[0]) * 0.5,
           (bx.min[1] + bx.max[1]) * 0.5,
           (bx.min[2] + bx.max[2]) * 0.5
         );
-        part.localToWorld(out);
+        applyMat4(out, part.getWorldTransform());
         return out;
       }
     }
@@ -2443,10 +2432,10 @@ export class Tank implements TankEntity {
         killReason: this._dkKillReason,
       });
     }
-    this.root.visible = false;
+    setVisible(this.root, false);
   }
 
-  public respawnAt(pos: THREE.Vector3, yaw: number): void {
+  public respawnAt(pos: Vec3, yaw: number): void {
     this.position.copy(pos);
     this.velocity.set(0, 0, 0);
     this.hullYaw = wrapAnglePi(yaw);
@@ -2490,16 +2479,18 @@ export class Tank implements TankEntity {
     this._rocketsLeft = this.stats.salvoSize ?? 0;
     this._setRocketMeshesVisible(true);
 
-    this.root.visible = true;
-    this.rig.hullTiltGroup.rotation.set(0, 0, 0);
-    this.rig.turretPivot.rotation.set(0, 0, 0);
-    this.rig.turretPivot.position.copy(this.rig.turretRestPos);
-    this.rig.gunPivot.rotation.set(0, 0, 0);
-    this.rig.gunRecoilGroup.position.set(0, 0, 0);
+    setVisible(this.root, true);
+    this.hullTilt.x = this.hullTilt.y = this.hullTilt.z = 0;
+    this.rotorAngle = 0;
+    this.wheelSpin.clear();
+    setLocalEulerRad(this.rig.hullTiltGroup, 0, 0, 0, 'YXZ');
+    setLocalEulerRad(this.rig.turretPivot, 0, 0, 0);
+    this.rig.turretPivot.setLocalPosition(this.rig.turretRestPos);
+    setLocalEulerRad(this.rig.gunPivot, 0, 0, 0);
+    this.rig.gunRecoilGroup.setLocalPosition(0, 0, 0);
 
-    this.root.position.copy(pos);
-    this.root.rotation.set(0, this.hullYaw, 0);
-    this.root.updateMatrixWorld(true);
+    this.root.setLocalPosition(pos);
+    setLocalEulerRad(this.root, 0, this.hullYaw, 0);
   }
 
   /** QA hook: kill as if hit by a cannon round from the vehicle's front. */
@@ -2511,7 +2502,7 @@ export class Tank implements TankEntity {
       this.position.y + 1.4,
       this.position.z + fwd.z * this.stats.collisionRadius
     );
-    this._dkShellDir.copy(fwd).negate();
+    negate(this._dkShellDir.copy(fwd));
     this._dkHasDir = true;
     this._dkWeapon = 'cannon';
     this._dkDamage = 9999;

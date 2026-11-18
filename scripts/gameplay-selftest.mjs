@@ -5,17 +5,74 @@ const browser = await chromium.launch({ args: ['--use-angle=metal', '--enable-gp
 try {
   const page = await browser.newPage({ viewport: { width: 1152, height: 720 } });
   const errors = [];
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Runtime.enable');
+  const consoleStacks = [];
+  cdp.on('Runtime.consoleAPICalled', (event) => {
+    if (event.type === 'error') consoleStacks.push(event.stackTrace);
+  });
+  const cam = () => page.evaluate(() => window.__tankQA.getCamDebug());
+  const player = () => page.evaluate(() => window.__tankQA.getMatchState().tanks[0]);
+  const angleDelta = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('console', (msg) => {
     if (msg.type() === 'error' && !msg.text().includes('favicon')) errors.push(msg.text());
   });
   await page.goto(process.env.TANK_GAME_URL ?? 'http://127.0.0.1:5173/');
   await page.waitForFunction(() => window.__tankQA);
+  const audits = await page.evaluate(() => window.__tankQA.runThreeAudit());
+  for (const [cls, issues] of Object.entries(audits)) assert.deepEqual(issues, [], `${cls} rig audit`);
+  const wreck = await page.evaluate(() => window.__tankQA.physicsSelfTest());
+  assert.ok(wreck.drop.ok && wreck.edge.ok, 'wreck settles on flat ground and over an edge');
   await page.getByRole('button', { name: 'Little Bird Air' }).click();
   await page.getByRole('heading', { name: 'Little Bird' }).waitFor();
   assert.equal(await page.evaluate(() => window.__tankQA.getMatchState().tanks.filter((t) => t.cls === 'littlebird').length), 1);
   await page.locator('.fcs-engage-btn').click();
-  const birdBefore = await page.evaluate(() => window.__tankQA.getMatchState().tanks[0]);
+
+  // Sweep the pointer across 900 px in measured steps, wrapping through 360°.
+  // Heading and aim are sampled after rendered frames, not just input events.
+  async function orbit(drone = false) {
+    await page.keyboard.down('Alt');
+    await page.mouse.move(120, 350);
+    await page.keyboard.up('Alt');
+    await page.evaluate(() => window.__tankQA.fastForward(0.25));
+    const before = await cam();
+    const heading = (await player()).yaw;
+    await page.keyboard.down('Alt');
+    await page.waitForFunction(() => window.__tankQA.getCamDebug().freeLooking);
+    let last = drone ? Math.atan2(before.camDir[0], before.camDir[2]) : before.yaw;
+    let sweep = 0;
+    for (let i = 1; i <= 8; i++) {
+      await page.mouse.move(120 + i * 112, 350);
+      await page.evaluate(() => window.__tankQA.fastForward(0.035));
+      const next = await cam();
+      const angle = drone ? Math.atan2(next.camDir[0], next.camDir[2]) : next.yaw;
+      sweep += angleDelta(angle, last);
+      last = angle;
+      assert.deepEqual(next.aim, before.aim);
+    }
+    assert.ok(Math.abs(Math.abs(sweep) - 2 * Math.PI) < 0.3, `camera sweeps 360° (${sweep.toFixed(2)} rad)`);
+    // A click while looking around must not turn into a shot, launch or FPV abort.
+    await page.mouse.down();
+    await page.mouse.up();
+    await page.mouse.down({ button: 'right' });
+    await page.mouse.up({ button: 'right' });
+    await page.evaluate(() => window.__tankQA.fastForward(0.12));
+    if (!drone) assert.ok(Math.abs(angleDelta((await player()).yaw, heading)) < 0.2, 'orbit does not steer the vehicle');
+    await page.mouse.move(560, 350);
+    await page.keyboard.up('Alt');
+    await page.evaluate(() => window.__tankQA.fastForward(0.1));
+    const after = await cam();
+    assert.equal(after.freeLooking, false);
+    if (drone) assert.ok(Math.abs(angleDelta(Math.atan2(after.camDir[0], after.camDir[2]), Math.atan2(before.camDir[0], before.camDir[2]))) < 0.08, 'orbit does not steer the FPV');
+    else assert.deepEqual([after.yaw, after.pitch], [before.yaw, before.pitch], 'view restores on release');
+  }
+
+  await orbit();
+  assert.equal(await page.evaluate(() => window.__tankQA.getRenderStats().rocketsLeft), 2, 'free-look clicks do not fire missiles');
+  // Reset aim after moving to the edge of the viewport in the pointer test.
+  await page.evaluate(() => window.__tankQA.teleportForTest(0, -420, 0));
+  const birdBefore = await player();
   await page.keyboard.down('Shift');
   await page.keyboard.down('w');
   await page.evaluate(() => window.__tankQA.fastForward(2));
@@ -31,20 +88,69 @@ try {
   await page.mouse.click(560, 350, { button: 'right' });
   for (let i = 0; i < 11; i++) await page.mouse.wheel(0, -100);
   await page.waitForFunction(() => window.__tankQA.getCamDebug().fov < 4.2);
+  await page.keyboard.down('Alt');
+  await page.waitForFunction(() => window.__tankQA.getCamDebug().fov > 55);
+  await page.keyboard.up('Alt');
+  await page.waitForFunction(() => window.__tankQA.getCamDebug().fov < 4.2);
   await page.keyboard.press('p');
   await page.getByRole('heading', { name: 'Battle paused' }).waitFor();
+  const paused = await page.evaluate(() => window.__tankQA.getMatchState());
+  await page.waitForTimeout(250);
+  assert.deepEqual(await page.evaluate(() => window.__tankQA.getMatchState()), paused, 'briefing pauses simulation');
   await page.evaluate(() => window.__tankQA.teleportForTest(0, -420, 0));
   await page.getByRole('button', { name: 'Support Wheeled' }).click();
   assert.equal((await page.locator('.fcs-engage-main').textContent()).trim(), 'Resume battle');
   await page.locator('.fcs-engage-btn').click();
+  await orbit();
+  await page.evaluate(() => {
+    const qa = window.__tankQA;
+    const river = qa.probeWorld().waterSamples.find(point => point.depth > 0.8);
+    if (!river) throw new Error('No wet camera test point');
+    qa.teleportForTest(river.x, river.z, 0);
+    qa.fastForward(0.1);
+  });
+  await page.keyboard.down('Alt');
+  await page.mouse.move(560, 28);
+  await page.evaluate(() => window.__tankQA.fastForward(0.1));
+  const { camPos: [cx, cy, cz], pitch } = await cam();
+  const riverSurface = await page.evaluate(([x, z]) => window.__tankQA.waterAtForTest(x, z), [cx, cz]);
+  assert.ok(pitch > 1.4 && riverSurface.depth > 0.6 && cy > riverSurface.level + 0.9, 'low orbit stays above river surface');
+  await page.mouse.move(560, 350);
+  await page.keyboard.up('Alt');
+  await page.evaluate(() => {
+    window.__tankQA.teleportForTest(0, -420, 0);
+    window.__tankQA.fastForward(0.1);
+  });
+  const qaShell = () => page.evaluate(() => window.__tankQA.getRenderStats().activeShell);
+  // Hold the controller update, not the keyboard: both Q edges arrive before the next simulation step.
+  await page.evaluate(() => window.__tankQA.setCameraForTest(0, 10, -430, 0, 2, -420));
+  await page.keyboard.press('q');
+  await page.evaluate(() => window.__tankQA.clearCameraForTest());
+  await page.waitForFunction(() => window.__tankQA.getRenderStats().activeShell === 'FPV');
+  await page.keyboard.press('1');
+  await page.waitForFunction(() => window.__tankQA.getRenderStats().activeShell !== 'FPV');
+  const primarySlot = await qaShell();
   await page.keyboard.press('2');
   await page.waitForFunction(() => window.__tankQA.getRenderStats().activeShell === 'FPV');
+  await page.evaluate(() => window.__tankQA.setCameraForTest(0, 10, -430, 0, 2, -420));
+  await page.keyboard.press('q');
+  await page.evaluate(() => window.__tankQA.clearCameraForTest());
+  await page.waitForFunction((slot) => window.__tankQA.getRenderStats().activeShell === slot, primarySlot);
+  await page.keyboard.press('2');
+  await page.waitForFunction(() => window.__tankQA.getRenderStats().activeShell === 'FPV');
+  await page.keyboard.down('Alt');
+  await page.mouse.click(560, 350);
+  await page.keyboard.up('Alt');
+  await page.evaluate(() => window.__tankQA.fastForward(0.1));
+  assert.equal(await page.evaluate(() => window.__tankQA.getMatchState().drones.active), 0, 'free-look clicks do not launch the FPV');
   await page.mouse.click(560, 350);
   await page.locator('.fcs-fpv.is-active').waitFor();
   await page.locator('.fcs-marker-layer.is-fpv').waitFor({ state: 'attached' });
   await page.evaluate(() => window.__tankQA.fastForward(2.5));
   assert.ok(parseInt(await page.locator('.fcs-fpv-cooldown').innerText(), 10) < 9, 'FPV cooldown ticks while flying');
   await page.waitForFunction(() => window.__tankQA.getCamDebug().fov === 95);
+  await orbit(true);
+  console.log('360° free-look, optic restoration, input isolation, pause, and quick-Q switching passed');
   const yawBefore = await page.evaluate(() => window.__tankQA.getCamDebug().camDir[0]);
   await page.keyboard.down('a');
   await page.waitForFunction((x) => Math.abs(window.__tankQA.getCamDebug().camDir[0] - x) > 0.15, yawBefore);
@@ -66,43 +172,60 @@ try {
   console.log('FPV controls, operator KO, detonation, and camera return passed');
 
   const results = await page.evaluate(async () => {
-    const THREE = await import('/node_modules/.vite/deps/three.js');
-    const { loadAllGameAssets } = await import('/src/game/AssetLoader.ts');
     const { DroneEntity, DroneManager, FPV_WARHEAD_SPEC } = await import('/src/game/Drone.ts');
     const { Tank, TANK_STATS } = await import('/src/game/Tank.ts');
     const { World } = await import('/src/game/World.ts');
     const { EffectsManager } = await import('/src/game/Effects.ts');
     const { BallisticsManager } = await import('/src/game/Ballistics.ts');
+    const { getApp } = await import('/src/game/engine/app.ts');
+    const { geoFromMesh } = await import('/src/game/engine/geometry.ts');
+    const { applyQuat, Mat4, Quat, Vec3 } = await import('/src/game/engine/math.ts');
+    const { findByName, group, userData } = await import('/src/game/engine/scene.ts');
     const check = (condition, name) => { if (!condition) throw new Error(name); };
     const near = (a, b) => Math.abs(a - b) < 1e-6;
-    const v = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
+    const v = (x = 0, y = 0, z = 0) => new Vec3(x, y, z);
     const flat = {
       worldHalfSize: 520, getHeightAt: () => 0, getWaterDepthAt: () => 0,
       getNormalAt: (_x, _z, out = v()) => out.set(0, 1, 0), getRoadFactorAt: () => 0,
       getObstacles: () => [], raycastWorld: () => null, damageObstacle: () => false, blastObstacles: () => {},
     };
-    const renderer = new THREE.WebGLRenderer();
-    const assets = await loadAllGameAssets(renderer);
-    const scene = new THREE.Scene();
-    const mkTank = (cls, human, pos = v()) => new Tank(human ? 'player' : 'bot', human ? 'blue' : 'red', cls, assets, pos, 0, human, '');
+    const assets = window.__tankQA.getAssetsForTest();
+    const scene = group('gameplay_selftest_scene');
+    scene.enabled = false;
+    const mkTank = (cls, human, pos = v()) => {
+      const tank = new Tank(human ? 'player' : 'bot', human ? 'blue' : 'red', cls, assets, pos, 0, human, '');
+      scene.addChild(tank.root);
+      return tank;
+    };
     const intent = { throttle: 1, steer: 0, brake: false, aimPoint: v(0, 1, 100), fireCannon: false, fireMG: false };
     const dt = 1 / 60;
+    const assertNoEmpty = (stage) => {
+      const invalid = [];
+      for (const layer of getApp().scene.layers.layerList) for (const mi of layer.meshInstances) {
+        if (!mi.mesh?.vertexBuffer) invalid.push({ layer: layer.name, node: mi.node.name, parent: mi.node.parent?.name, mesh: mi.mesh?.id, color: mi.material?.diffuse?.toString?.(), positions: mi.mesh?.getPositions?.([]) });
+      }
+      if (invalid.length) throw new Error(`${stage}: ${JSON.stringify(invalid.slice(0, 8))}`);
+    };
     for (const [cls, stats] of Object.entries(TANK_STATS)) {
       if (stats.drive === 'air') continue;
       for (const human of [true, false]) {
         const tank = mkTank(cls, human);
-        const track = tank.root.getObjectByName('moving_track_L');
-        const trackBefore = new THREE.Matrix4(), trackAfter = new THREE.Matrix4();
-        if (track) track.getMatrixAt(0, trackBefore);
+        assertNoEmpty(`${cls} ${human ? 'player' : 'npc'}`);
+        const track = findByName(tank.root, 'moving_track_L');
+        const trackBatch = track ? track.instancedMesh : null;
+        const trackBefore = new Mat4(), trackAfter = new Mat4();
+        if (trackBatch) trackBatch.getMatrixAt(0, trackBefore);
         for (let i = 0; i < 480; i++) tank.stepKinematics(dt, intent, flat, []);
         if (stats.drive === 'tracked') {
           check(track, `${cls} track rig exists`);
-          const raw = (cls === 'ifv' ? assets.models.ifv : assets.models.player_mbt_lod1).getObjectByName('body').geometry;
-          const hull = tank.rig.visualRoot.getObjectByName('body');
-          check(hull.userData.bakedTracksRemoved && hull.geometry.getAttribute('position').count < raw.index.count * 0.9,
+          const rawBody = findByName(cls === 'ifv' ? assets.models.ifv : assets.models.player_mbt_lod1, 'body');
+          const raw = geoFromMesh(rawBody.render.meshInstances[0].mesh);
+          const hull = findByName(tank.rig.visualRoot, 'body');
+          const trimmed = geoFromMesh(hull.render.meshInstances[0].mesh);
+          check(hull.bakedTracksRemoved && trimmed.vertexCount < raw.indices.length * 0.9,
             `${cls} replaces rather than overlays baked tread triangles`);
-          track.getMatrixAt(0, trackAfter);
-          check(!trackBefore.equals(trackAfter), `${cls} track links move`);
+          trackBatch.getMatrixAt(0, trackAfter);
+          check(!trackBefore.data.every((value, i) => value === trackAfter.data[i]), `${cls} track links move`);
         }
         const scale = human ? (cls === 'humvee' ? 1 : 1.25) : 0.6;
         check(near(tank.speed, stats.maxForwardSpeed * scale), `${cls} ${human ? 'player' : 'NPC'} top speed`);
@@ -120,24 +243,25 @@ try {
       }
     }
 
+    assertNoEmpty('after ground vehicles');
     const shooter = mkTank('normal', true);
     const bird = mkTank('littlebird', true);
-    const mainRotor = bird.root.getObjectByName('littlebird_main_rotor');
+    findByName(bird.root, 'littlebird_main_rotor');
     const flight = { ...intent, flightYaw: 0, lift: 1, steer: 0 };
     let missiles = 0, burst = 0;
     for (let i = 0; i < 150; i++) bird.stepKinematics(dt, { ...flight, fireCannon: i === 84, fireMG: true }, flat, [], {
       onFireCannon: (_t, pos, _dir, shell) => { if (pos.y > 3 && shell.id === 'littlebird_missile') missiles++; },
       onFireMG: () => burst++,
     });
-    check(bird.position.y > 8 && bird.position.z > 12 && mainRotor.rotation.y > 0, 'aircraft climbs, moves, and spins its rotor');
+    check(bird.position.y > 8 && bird.position.z > 12 && bird.rotorAngle > 0, 'aircraft climbs, moves, and spins its rotor');
     check(missiles === 2 && burst > 8, 'aircraft fires missiles and its machine gun');
-    check(bird.rig.hullTiltGroup.rotation.x > 0.4 && bird.velocity.z > 9, 'forward cyclic pitches the aircraft and accelerates it');
+    check(bird.hullTilt.x > 0.4 && bird.velocity.z > 9, 'forward cyclic pitches the aircraft and accelerates it');
     const inertia = bird.velocity.z;
     bird.stepKinematics(dt, { ...flight, throttle: 0, flightYaw: Math.PI / 2, lift: 0 }, flat, []);
     check(bird.velocity.z > inertia * 0.95, 'releasing cyclic and turning does not snap the aircraft velocity');
     const bank = mkTank('littlebird', true, v(0, 30));
     for (let i = 0; i < 120; i++) bank.stepKinematics(dt, { ...flight, throttle: 0, steer: -1, lift: 0 }, flat, []);
-    check(bank.rig.hullTiltGroup.rotation.z > 0.4 && bank.velocity.x < -4, 'left cyclic banks and accelerates the aircraft to the left');
+    check(bank.hullTilt.z > 0.4 && bank.velocity.x < -4, 'left cyclic banks and accelerates the aircraft to the left');
     const altitude = bank.position.y;
     for (let i = 0; i < 120; i++) bank.stepKinematics(dt, { ...flight, throttle: 0, lift: -1 }, flat, []);
     check(bank.position.y < altitude - 3, 'reducing collective descends without requiring a tilt');
@@ -149,6 +273,7 @@ try {
     for (let i = 0; i < 75; i++) pointerBird.stepKinematics(dt,
       { ...flight, throttle: 0, lift: 0, flightYaw: Math.PI / 2, brake: true }, flat, []);
     check(pointerBird.velocity.x < xVel * 0.8, 'brake counter-tilts to reduce momentum');
+    assertNoEmpty('after aircraft');
     const victim = mkTank('heavy', false, v(0, 0, 10));
     const effects = new EffectsManager(scene);
     const ballistics = new BallisticsManager(scene, effects);
@@ -171,9 +296,9 @@ try {
     for (let i = 0; i < 3000; i++) manual.step(dt, input, manager);
     check(manual.phase === 'fly', 'FPV remains piloted past 450 m, 40 seconds, and operator death');
     manual.step(dt, { ...input, dmy: -70 }, manager);
-    const q = new THREE.Quaternion();
+    const q = new Quat();
     manual.getCameraPose(v(), q);
-    check(v(0, 0, -1).applyQuaternion(q).dot(manual.forward(v())) > 0.999, 'nose camera matches flight direction');
+    check(applyQuat(v(0, 0, -1), q).dot(manual.forward(v())) > 0.999, 'nose camera matches flight direction');
     for (let i = 0; i < 8; i++) ballistics.fireCoaxMG(victim, v(manual.pos.x, manual.pos.y, manual.pos.z - 5), v(0, 0, 1));
     for (let i = 0; i < 3; i++) ballistics.update(dt, flat, [], () => {});
     check(manual.phase === 'fly', 'FPV is not damaged by projectiles');
@@ -210,7 +335,9 @@ try {
     waterLanding.step(dt, null, manager);
     check(!waterLanding.alive && manager.stats.lost === 1 && manager.lastDetonation.pos.y === -1, 'water impact detonates even below sea level');
 
+    assertNoEmpty('after drones');
     const world = new World(scene, assets);
+    assertNoEmpty('after second world');
     for (const kind of ['building', 'rock', 'tree']) {
       const prop = world.getObstacles().find((o) => o.kind === kind);
       const p = v(prop.x, prop.y + prop.height + 12, prop.z);
@@ -228,7 +355,8 @@ try {
     ram.stepKinematics(dt, intent, { ...flat, getObstacles: () => [prop], damageObstacle: world.damageObstacle.bind(world) }, []);
     check(prop.destroyed, 'ram breaks a rock');
     for (let i = 0; i < 30; i++) world.update(dt, ram.position);
-    check(world.root.getObjectByName('scenery_rubble')?.count > 0, 'collapsed cover leaves visible rubble');
+    const rubbleNode = findByName(world.root, 'scenery_rubble');
+    check(rubbleNode && rubbleNode.instancedMesh.count > 0, 'collapsed cover leaves visible rubble');
 
     for (const river of world.getRiverRadarSamples()) {
       for (const { x, z, halfWidth } of river) {
@@ -239,10 +367,25 @@ try {
       }
     }
     function nowDry(x, z) { return world.getWaterDepthAt(x, z) === 0; }
-    renderer.dispose();
+    // The detached test rigs share GPU meshes with the live game; the page owns their cleanup.
     return 'All vehicle speed/drift/timer, chip damage, FPV durability and damage, destruction, and river checks passed';
   });
   console.log(results);
+  if (errors.length) {
+    const invalidMeshes = await page.evaluate(async () => {
+      const { getApp } = await import('/src/game/engine/app.ts');
+      const app = getApp();
+      const out = [];
+      for (const layer of app.scene.layers.layerList) {
+        for (const mi of layer.meshInstances) {
+          if (!mi.mesh?.vertexBuffer) out.push({ layer: layer.name, node: mi.node.name, enabled: mi.node.enabled, visible: mi.visible, material: mi.material?.name, mesh: !!mi.mesh, vertices: mi.mesh?.vertexBuffer?.numVertices });
+        }
+      }
+      return out.slice(0, 30);
+    });
+    console.log('Invalid meshes:', JSON.stringify(invalidMeshes, null, 2));
+    console.log('Console stacks:', JSON.stringify(consoleStacks.slice(0, 4), null, 2));
+  }
   assert.deepEqual(errors, []);
 } finally {
   await browser.close();

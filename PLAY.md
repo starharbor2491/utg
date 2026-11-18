@@ -1,6 +1,6 @@
 # untitled tank game
 
-Offline 3D browser tank game built with Three.js, Vite, and TypeScript. All 3D models, KTX2/Basis & Meshopt WASM decoders, PBR terrain textures, and HDRI sky are bundled locally in `dist/` for 100% offline play.
+Offline 3D browser tank game built with PlayCanvas, Vite, and TypeScript. All 3D models, PlayCanvas Basis & Meshopt decoders, PBR terrain textures, and HDRI sky are bundled locally in `dist/` for 100% offline play. Rendering uses WebGL2 and GLSL.
 
 Play online at [starharbor2491.github.io/utg](https://starharbor2491.github.io/utg/).
 
@@ -24,6 +24,7 @@ npm run dev
 | `W / S` or `Up / Down` | Forward throttle / Reverse |
 | `A / D` or `Left / Right` | Hull traverse (neutral & moving steer) |
 | `Mouse` | Aim turret & gun (cursor locked inside window) |
+| Hold `Alt` + move mouse | Look all the way around in ground vehicles, Little Bird, or FPV. Release to return to aiming. |
 | `Left Click` (or `F`) | Fire main cannon (or 30mm chain-gun on IFV) |
 | `Right Click` (or `Shift` / `V`) | 2.8x Gunner Boresight Zoom (tap to toggle or hold to zoom) |
 | `1 / 2` or `Q` | Switch between Shell / Ammo Belt Type 1 & Type 2 |

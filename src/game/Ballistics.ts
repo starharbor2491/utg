@@ -1,5 +1,8 @@
-import * as THREE from 'three';
-import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import type { Entity, StandardMaterial } from 'playcanvas';
+import { cylinder, Geo } from './engine/geometry';
+import { enableInstanceColor, InstancedMesh } from './engine/instancing';
+import { unlit } from './engine/materials';
+import { composeMat, Mat4, negate, Quat, quatFromUnitVectors, Vec3 } from './engine/math';
 import type { DamageEvent, ShellSpec, TankEntity, TerrainQuery } from './types';
 import type { EffectsManager } from './Effects';
 
@@ -12,8 +15,8 @@ export const GRAVITY = 9.81;
  * along the current velocity direction, then advances position.
  */
 export function stepProjectile(
-  pos: THREE.Vector3,
-  vel: THREE.Vector3,
+  pos: Vec3,
+  vel: Vec3,
   spec: ShellSpec | undefined,
   age: number,
   dt: number
@@ -29,14 +32,14 @@ export function stepProjectile(
       vel.z += vel.z * k;
     }
   }
-  pos.addScaledVector(vel, dt);
+  pos.addScaled(vel, dt);
 }
 
 /** Scratch vectors for stepProjectile call sites (module-shared, non-reentrant). */
-const _spPos = new THREE.Vector3();
-const _spVel = new THREE.Vector3();
-const _spDir = new THREE.Vector3();
-const _spLead = new THREE.Vector3();
+const _spPos = new Vec3();
+const _spVel = new Vec3();
+const _spDir = new Vec3();
+const _spLead = new Vec3();
 
 /**
  * Rocket-artillery aim solver: bisects launch pitch (<=12 iterations) on the
@@ -44,16 +47,16 @@ const _spLead = new THREE.Vector3();
  * Writes a far aim point along the solved direction into `outAimPoint`.
  */
 export function solveRocketAim(
-  muzzlePos: THREE.Vector3,
-  targetPos: THREE.Vector3,
-  targetVel: THREE.Vector3,
+  muzzlePos: Vec3,
+  targetPos: Vec3,
+  targetVel: Vec3,
   spec: ShellSpec,
   pitchMin: number,
   pitchMax: number,
-  outAimPoint: THREE.Vector3
+  outAimPoint: Vec3
 ): void {
   // Rough time-of-flight for target lead (rocket averages ~140 m/s)
-  const dist = muzzlePos.distanceTo(targetPos);
+  const dist = muzzlePos.distance(targetPos);
   const tof = Math.min(6, Math.max(0.4, dist / 140));
   _spLead.set(
     targetPos.x + targetVel.x * tof,
@@ -73,7 +76,7 @@ export function solveRocketAim(
   const simRange = (pitch: number): number => {
     _spDir.set(sinY * Math.cos(pitch), Math.sin(pitch), cosY * Math.cos(pitch));
     _spPos.copy(muzzlePos);
-    _spVel.copy(_spDir).multiplyScalar(spec.muzzleSpeed);
+    _spVel.copy(_spDir).mulScalar(spec.muzzleSpeed);
     const dt = 0.05;
     for (let t = 0; t < 6; t += dt) {
       const prevY = _spPos.y;
@@ -101,7 +104,7 @@ export function solveRocketAim(
   }
   const bestPitch = (lo + hi) * 0.5;
   _spDir.set(sinY * Math.cos(bestPitch), Math.sin(bestPitch), cosY * Math.cos(bestPitch));
-  outAimPoint.copy(muzzlePos).addScaledVector(_spDir, 160);
+  outAimPoint.copy(muzzlePos).addScaled(_spDir, 160);
 }
 
 const SHELL_POOL_SIZE = 48;
@@ -110,24 +113,24 @@ const MG_MUZZLE_SPEED = 520;
 const MG_DISPERSION_RAD = 0.012;
 
 // Module-level scratch vectors for zero-allocation ballistic prediction & collision
-const _predPos = new THREE.Vector3();
-const _predPrev = new THREE.Vector3();
-const _predNext = new THREE.Vector3();
-const _predVel = new THREE.Vector3();
-const _segDir = new THREE.Vector3();
-const _tankCenter = new THREE.Vector3();
+const _predPos = new Vec3();
+const _predPrev = new Vec3();
+const _predNext = new Vec3();
+const _predVel = new Vec3();
+const _segDir = new Vec3();
+const _tankCenter = new Vec3();
 
 /**
  * Swept ray-segment `[0, segLen]` intersection against a living tank's
  * center-of-mass bounding sphere AND low-profile hull cylinder.
  */
 export function intersectSegmentTank(
-  p0: THREE.Vector3,
-  dir: THREE.Vector3,
+  p0: Vec3,
+  dir: Vec3,
   segLen: number,
   tank: TankEntity,
   extraRadius: number,
-  outCenter: THREE.Vector3
+  outCenter: Vec3
 ): number | null {
   tank.getCenterMassWorld(outCenter);
   let bestT: number | null = null;
@@ -192,15 +195,15 @@ export function intersectSegmentTank(
  * Returns estimated time-of-flight `t` in seconds.
  */
 export function solveBallisticAim(
-  shooterMuzzlePos: THREE.Vector3,
-  targetPos: THREE.Vector3,
-  targetVel: THREE.Vector3,
+  shooterMuzzlePos: Vec3,
+  targetPos: Vec3,
+  targetVel: Vec3,
   muzzleSpeed: number,
   gravity: number,
-  outAimPoint: THREE.Vector3
+  outAimPoint: Vec3
 ): number {
   const speed = Math.max(1, muzzleSpeed);
-  let t = shooterMuzzlePos.distanceTo(targetPos) / speed;
+  let t = shooterMuzzlePos.distance(targetPos) / speed;
 
   for (let i = 0; i < 3; i++) {
     const px = targetPos.x + targetVel.x * t;
@@ -227,13 +230,13 @@ export function solveBallisticAim(
  * Returns Euclidean distance in meters from `muzzlePos` to `outPoint`.
  */
 export function predictBarrelImpact(
-  muzzlePos: THREE.Vector3,
-  muzzleDir: THREE.Vector3,
+  muzzlePos: Vec3,
+  muzzleDir: Vec3,
   muzzleSpeed: number,
   world: TerrainQuery,
   tanks: readonly TankEntity[],
   ignoreTank: TankEntity,
-  outPoint: THREE.Vector3,
+  outPoint: Vec3,
   spec?: ShellSpec
 ): number {
   const dtStep = 0.04;
@@ -241,7 +244,7 @@ export function predictBarrelImpact(
   const maxRangeSq = 600 * 600;
 
   _predPos.copy(muzzlePos);
-  _predVel.copy(muzzleDir).normalize().multiplyScalar(Math.max(1, muzzleSpeed));
+  _predVel.copy(muzzleDir).normalize().mulScalar(Math.max(1, muzzleSpeed));
 
   let elapsed = 0;
   while (elapsed < maxTime) {
@@ -250,10 +253,10 @@ export function predictBarrelImpact(
     stepProjectile(_predPos, _predVel, spec, elapsed, dtStep);
     _predNext.copy(_predPos);
 
-    _segDir.subVectors(_predNext, _predPrev);
+    _segDir.sub2(_predNext, _predPrev);
     const segLen = _segDir.length();
     if (segLen < 1e-5) continue;
-    _segDir.multiplyScalar(1 / segLen);
+    _segDir.mulScalar(1 / segLen);
 
     let closestDist = Infinity;
     let hitFound = false;
@@ -273,7 +276,7 @@ export function predictBarrelImpact(
     const worldHit = world.raycastWorld(_predPrev, _segDir, segLen);
     if (worldHit && worldHit.distance < closestDist) {
       outPoint.copy(worldHit.point);
-      return muzzlePos.distanceTo(outPoint);
+      return muzzlePos.distance(outPoint);
     }
 
     // 2b. River surface crossing
@@ -287,16 +290,16 @@ export function predictBarrelImpact(
         const f = (py - lvl) / Math.max(1e-4, py - ny);
         const wDist = f * segLen;
         if (wDist < closestDist) {
-          outPoint.copy(_predPrev).addScaledVector(_segDir, wDist);
+          outPoint.copy(_predPrev).addScaled(_segDir, wDist);
           outPoint.y = lvl;
-          return muzzlePos.distanceTo(outPoint);
+          return muzzlePos.distance(outPoint);
         }
       }
     }
 
     if (hitFound) {
-      outPoint.copy(_predPrev).addScaledVector(_segDir, closestDist);
-      return muzzlePos.distanceTo(outPoint);
+      outPoint.copy(_predPrev).addScaled(_segDir, closestDist);
+      return muzzlePos.distance(outPoint);
     }
 
     // Safety floor check against terrain heightmap
@@ -305,18 +308,18 @@ export function predictBarrelImpact(
       const prevAbove = Math.max(0, _predPrev.y - world.getHeightAt(_predPrev.x, _predPrev.z));
       const below = terrainY - _predNext.y;
       const frac = prevAbove + below > 1e-4 ? prevAbove / (prevAbove + below) : 1;
-      outPoint.lerpVectors(_predPrev, _predNext, frac);
+      outPoint.lerp(_predPrev, _predNext, frac);
       outPoint.y = world.getHeightAt(outPoint.x, outPoint.z);
-      return muzzlePos.distanceTo(outPoint);
+      return muzzlePos.distance(outPoint);
     }
 
-    if (_predPos.distanceToSquared(muzzlePos) >= maxRangeSq) {
+    if (_predPos.distanceSq(muzzlePos) >= maxRangeSq) {
       break;
     }
   }
 
   outPoint.copy(_predPos);
-  return muzzlePos.distanceTo(outPoint);
+  return muzzlePos.distance(outPoint);
 }
 
 /**
@@ -324,41 +327,20 @@ export function predictBarrelImpact(
  * softer outer bloom sheath) oriented with tip at `Z = 0` and tail extending to `Z = -1`.
  * Visible from every angle including straight down the 2.8x sniper optic!
  */
-function createTracerBoltGeometry(): THREE.BufferGeometry {
-  const core = new THREE.CylinderGeometry(0.015, 0.065, 1.0, 6, 1, false);
-  core.rotateX(Math.PI * 0.5);
-  core.translate(0, 0, -0.5);
-  const coreCount = core.attributes.position.count;
-  const coreColors = new Float32Array(coreCount * 3);
-  const corePos = core.attributes.position;
-  for (let i = 0; i < coreCount; i++) {
-    const z = corePos.getZ(i); // 0 at head, -1 at tail
-    const tailFade = z > -0.25 ? 1.0 : 0.25;
-    coreColors[i * 3] = tailFade;
-    coreColors[i * 3 + 1] = tailFade;
-    coreColors[i * 3 + 2] = tailFade;
+function createTracerBoltGeometry(): Geo {
+  const core = cylinder(0.015, 0.065, 1.0, 6, 1, false).rotateX(Math.PI * 0.5).translate(0, 0, -0.5);
+  core.colors = [];
+  for (let i = 0; i < core.vertexCount; i++) {
+    const fade = core.positions[i * 3 + 2] > -0.25 ? 1 : 0.25;
+    core.colors.push(fade, fade, fade, 1);
   }
-  core.setAttribute('color', new THREE.BufferAttribute(coreColors, 3));
-
-  const halo = new THREE.CylinderGeometry(0.03, 0.165, 1.0, 6, 1, false);
-  halo.rotateX(Math.PI * 0.5);
-  halo.translate(0, 0, -0.5);
-  const haloCount = halo.attributes.position.count;
-  const haloColors = new Float32Array(haloCount * 3);
-  const haloPos = halo.attributes.position;
-  for (let i = 0; i < haloCount; i++) {
-    const z = haloPos.getZ(i);
-    const w = z > -0.25 ? 0.34 : 0.05;
-    haloColors[i * 3] = w;
-    haloColors[i * 3 + 1] = w;
-    haloColors[i * 3 + 2] = w;
+  const halo = cylinder(0.03, 0.165, 1.0, 6, 1, false).rotateX(Math.PI * 0.5).translate(0, 0, -0.5);
+  halo.colors = [];
+  for (let i = 0; i < halo.vertexCount; i++) {
+    const fade = halo.positions[i * 3 + 2] > -0.25 ? 0.34 : 0.05;
+    halo.colors.push(fade, fade, fade, 1);
   }
-  halo.setAttribute('color', new THREE.BufferAttribute(haloColors, 3));
-
-  const merged = mergeGeometries([core, halo], false);
-  core.dispose();
-  halo.dispose();
-  return merged;
+  return Geo.merge([core, halo])!;
 }
 
 /** In-flight guidance state for a guided shell slot. */
@@ -436,13 +418,13 @@ interface MgSlot {
 export class BallisticsManager {
   public readonly GRAVITY = GRAVITY;
 
-  private readonly scene: THREE.Scene;
+  private readonly scene: Entity;
   private readonly effects: EffectsManager;
 
-  private readonly boltGeo: THREE.BufferGeometry;
-  private readonly boltMat: THREE.MeshBasicMaterial;
-  private readonly shellMesh: THREE.InstancedMesh;
-  private readonly mgMesh: THREE.InstancedMesh;
+  private readonly boltGeo: Geo;
+  private readonly boltMat: StandardMaterial;
+  private readonly shellMesh: InstancedMesh;
+  private readonly mgMesh: InstancedMesh;
 
   private readonly shells: ShellSlot[] = [];
   private shellCursor = 0;
@@ -452,32 +434,31 @@ export class BallisticsManager {
 
 
   // Scratch math objects
-  private readonly _hiddenMat4 = new THREE.Matrix4().makeScale(0, 0, 0);
-  private readonly _mat4 = new THREE.Matrix4();
-  private readonly _quat = new THREE.Quaternion();
-  private readonly _color = new THREE.Color();
-  private readonly _prevPos = new THREE.Vector3();
-  private readonly _nextPos = new THREE.Vector3();
-  private readonly _flyPos = new THREE.Vector3();
-  private readonly _flyVel = new THREE.Vector3();
-  private readonly _segDir = new THREE.Vector3();
-  private readonly _hitPoint = new THREE.Vector3();
-  private readonly _hitNormal = new THREE.Vector3();
-  private readonly _victimCenter = new THREE.Vector3();
-  private readonly _splashCenter = new THREE.Vector3();
-  private readonly _attackerPos = new THREE.Vector3();
-  private readonly _scaleVec = new THREE.Vector3();
-  private readonly _fwdZ = new THREE.Vector3(0, 0, 1);
-  private readonly _up = new THREE.Vector3(0, 1, 0);
-  private readonly _coaxSpreadDir = new THREE.Vector3();
-  private readonly _tangentA = new THREE.Vector3();
-  private readonly _tangentB = new THREE.Vector3();
-  private readonly _gAim = new THREE.Vector3();
-  private readonly _gTo = new THREE.Vector3();
-  private readonly _gVelDir = new THREE.Vector3();
-  private readonly _gLosRate = new THREE.Vector3();
-  private readonly _gAccel = new THREE.Vector3();
-  private readonly _gPerp = new THREE.Vector3();
+  private readonly _hiddenMat4 = new Mat4().setScale(0, 0, 0);
+  private readonly _mat4 = new Mat4();
+  private readonly _quat = new Quat();
+  private readonly _prevPos = new Vec3();
+  private readonly _nextPos = new Vec3();
+  private readonly _flyPos = new Vec3();
+  private readonly _flyVel = new Vec3();
+  private readonly _segDir = new Vec3();
+  private readonly _hitPoint = new Vec3();
+  private readonly _hitNormal = new Vec3();
+  private readonly _victimCenter = new Vec3();
+  private readonly _splashCenter = new Vec3();
+  private readonly _attackerPos = new Vec3();
+  private readonly _scaleVec = new Vec3();
+  private readonly _fwdZ = new Vec3(0, 0, 1);
+  private readonly _up = new Vec3(0, 1, 0);
+  private readonly _coaxSpreadDir = new Vec3();
+  private readonly _tangentA = new Vec3();
+  private readonly _tangentB = new Vec3();
+  private readonly _gAim = new Vec3();
+  private readonly _gTo = new Vec3();
+  private readonly _gVelDir = new Vec3();
+  private readonly _gLosRate = new Vec3();
+  private readonly _gAccel = new Vec3();
+  private readonly _gPerp = new Vec3();
 
   // QA metrics for guidedTest()
   public guidedHits = 0;
@@ -496,35 +477,28 @@ export class BallisticsManager {
     this.missProbeMin = Infinity;
   }
 
-  constructor(scene: THREE.Scene, effects: EffectsManager) {
+  constructor(scene: Entity, effects: EffectsManager) {
     this.scene = scene;
     this.effects = effects;
-    this._hiddenMat4.setPosition(0, 0, 0);
+    this._hiddenMat4.data[12] = this._hiddenMat4.data[13] = this._hiddenMat4.data[14] = 0;
 
     this.boltGeo = createTracerBoltGeometry();
-    this.boltMat = new THREE.MeshBasicMaterial({
-      vertexColors: true,
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      toneMapped: true,
+    this.boltMat = unlit({ vertexColors: true, transparent: true, depthWrite: false, additive: true });
+    enableInstanceColor(this.boltMat);
+
+    this.shellMesh = new InstancedMesh(this.boltGeo, this.boltMat, SHELL_POOL_SIZE, {
+      name: 'ballistics_shell_tracers', parent: scene, color: true, castShadows: false, receiveShadows: false,
     });
-
-    this.shellMesh = new THREE.InstancedMesh(this.boltGeo, this.boltMat, SHELL_POOL_SIZE);
-    this.shellMesh.name = 'ballistics_shell_tracers';
-    this.shellMesh.frustumCulled = false;
-    this.shellMesh.renderOrder = 8;
-    this.shellMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.shellMesh.meshInstance.cull = false;
+    this.shellMesh.meshInstance.drawOrder = 8;
     this._initPoolMesh(this.shellMesh, SHELL_POOL_SIZE);
-    this.scene.add(this.shellMesh);
 
-    this.mgMesh = new THREE.InstancedMesh(this.boltGeo, this.boltMat, MG_POOL_SIZE);
-    this.mgMesh.name = 'ballistics_mg_tracers';
-    this.mgMesh.frustumCulled = false;
-    this.mgMesh.renderOrder = 8;
-    this.mgMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.mgMesh = new InstancedMesh(this.boltGeo, this.boltMat, MG_POOL_SIZE, {
+      name: 'ballistics_mg_tracers', parent: scene, color: true, castShadows: false, receiveShadows: false,
+    });
+    this.mgMesh.meshInstance.cull = false;
+    this.mgMesh.meshInstance.drawOrder = 8;
     this._initPoolMesh(this.mgMesh, MG_POOL_SIZE);
-    this.scene.add(this.mgMesh);
 
     for (let i = 0; i < SHELL_POOL_SIZE; i++) {
       this.shells.push({
@@ -581,19 +555,14 @@ export class BallisticsManager {
     }
   }
 
-  private _initPoolMesh(mesh: THREE.InstancedMesh, capacity: number): void {
-    this._color.setRGB(0, 0, 0);
+  private _initPoolMesh(mesh: InstancedMesh, capacity: number): void {
     for (let i = 0; i < capacity; i++) {
       mesh.setMatrixAt(i, this._hiddenMat4);
-      mesh.setColorAt(i, this._color);
-    }
-    mesh.instanceMatrix.needsUpdate = true;
-    if (mesh.instanceColor) {
-      mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
-      mesh.instanceColor.needsUpdate = true;
+      mesh.setColorAt(i, 0, 0, 0);
     }
     // Keep count >= 1 with hidden slot 0 so shader compiles at frame 0
     mesh.count = 1;
+    mesh.update();
   }
 
   /**
@@ -602,8 +571,8 @@ export class BallisticsManager {
    */
   public fireCannon(
     shooter: TankEntity,
-    muzzlePos: THREE.Vector3,
-    muzzleDir: THREE.Vector3,
+    muzzlePos: Vec3,
+    muzzleDir: Vec3,
     shellSpec?: ShellSpec,
     guideTarget?: TankEntity | null
   ): void {
@@ -625,19 +594,19 @@ export class BallisticsManager {
     this._segDir.copy(muzzleDir).normalize();
     if (!shooter.isHuman) {
       if (Math.abs(this._segDir.y) < 0.92) {
-        this._tangentA.crossVectors(this._segDir, this._up).normalize();
+        this._tangentA.cross(this._segDir, this._up).normalize();
       } else {
-        this._tangentA.set(1, 0, 0).cross(this._segDir).normalize();
+        this._tangentA.cross(Vec3.RIGHT, this._segDir).normalize();
       }
-      this._tangentB.crossVectors(this._tangentA, this._segDir).normalize();
+      this._tangentB.cross(this._tangentA, this._segDir).normalize();
       const scatterAng = Math.random() * Math.PI * 2;
       // Rockets use their own tight dispersion; guns keep the bot scatter
       const scatterMag = spec.rocket
         ? spec.dispersionRad * shooter.dispersionMult * (0.6 + Math.random() * 0.8)
         : (0.045 + Math.random() * 0.055) * (Math.random() < 0.82 ? 1.0 : 0.35);
       this._segDir
-        .addScaledVector(this._tangentA, Math.cos(scatterAng) * scatterMag)
-        .addScaledVector(this._tangentB, Math.sin(scatterAng) * scatterMag * 0.65)
+        .addScaled(this._tangentA, Math.cos(scatterAng) * scatterMag)
+        .addScaled(this._tangentB, Math.sin(scatterAng) * scatterMag * 0.65)
         .normalize();
     }
     const speed = spec.muzzleSpeed;
@@ -701,8 +670,8 @@ export class BallisticsManager {
 
   public fireCoaxMG(
     shooter: TankEntity,
-    coaxPos: THREE.Vector3,
-    coaxDir: THREE.Vector3,
+    coaxPos: Vec3,
+    coaxDir: Vec3,
     beltSpec?: ShellSpec
   ): void {
     let slot: MgSlot | null = null;
@@ -721,11 +690,11 @@ export class BallisticsManager {
 
     this._coaxSpreadDir.copy(coaxDir).normalize();
     if (Math.abs(this._coaxSpreadDir.y) < 0.92) {
-      this._tangentA.crossVectors(this._coaxSpreadDir, this._up).normalize();
+      this._tangentA.cross(this._coaxSpreadDir, this._up).normalize();
     } else {
-      this._tangentA.set(1, 0, 0).cross(this._coaxSpreadDir).normalize();
+      this._tangentA.cross(Vec3.RIGHT, this._coaxSpreadDir).normalize();
     }
-    this._tangentB.crossVectors(this._tangentA, this._coaxSpreadDir).normalize();
+    this._tangentB.cross(this._tangentA, this._coaxSpreadDir).normalize();
 
     const angle = Math.random() * Math.PI * 2;
     const baseDisp = !shooter.isHuman
@@ -735,8 +704,8 @@ export class BallisticsManager {
         : MG_DISPERSION_RAD;
     const spread = Math.sqrt(Math.random()) * baseDisp;
     this._coaxSpreadDir
-      .addScaledVector(this._tangentA, Math.cos(angle) * spread)
-      .addScaledVector(this._tangentB, Math.sin(angle) * spread)
+      .addScaled(this._tangentA, Math.cos(angle) * spread)
+      .addScaled(this._tangentB, Math.sin(angle) * spread)
       .normalize();
 
     const spd = beltSpec ? beltSpec.muzzleSpeed : MG_MUZZLE_SPEED;
@@ -785,7 +754,7 @@ export class BallisticsManager {
    */
   private _applyGuidance(
     s: ShellSlot,
-    vel: THREE.Vector3,
+    vel: Vec3,
     tanks: readonly TankEntity[],
     decoyPoints: readonly { x: number; y: number; z: number }[] | undefined,
     dt: number
@@ -822,7 +791,7 @@ export class BallisticsManager {
       g.lost = true;
       return;
     }
-    this._gTo.multiplyScalar(1 / dist);
+    this._gTo.mulScalar(1 / dist);
     if (dist < g.minDist) g.minDist = dist;
     if (!g.hasDecoy && g.entity) {
       const dAim = Math.hypot(
@@ -840,7 +809,7 @@ export class BallisticsManager {
       g.lost = true;
       return;
     }
-    this._gVelDir.multiplyScalar(1 / spd);
+    this._gVelDir.mulScalar(1 / spd);
 
     // Seeker cone check: target must stay within seekerConeDeg of velocity
     const coneCos = Math.cos((gd.seekerConeDeg * Math.PI) / 180);
@@ -860,7 +829,7 @@ export class BallisticsManager {
           this._gLosRate.set(d.x - s.px, d.y - s.py, d.z - s.pz);
           const dd = this._gLosRate.length();
           if (dd < 1 || dd >= dist) continue; // must be closer than the target
-          this._gLosRate.multiplyScalar(1 / dd);
+          this._gLosRate.mulScalar(1 / dd);
           if (this._gLosRate.dot(this._gTo) < cos8) continue;
           if (Math.random() < 0.15) {
             g.hasDecoy = true;
@@ -973,10 +942,10 @@ export class BallisticsManager {
         }
       }
 
-      this._segDir.subVectors(this._nextPos, this._prevPos);
+      this._segDir.sub2(this._nextPos, this._prevPos);
       const segLen = this._segDir.length();
       if (segLen < 1e-6) continue;
-      this._segDir.multiplyScalar(1 / segLen);
+      this._segDir.mulScalar(1 / segLen);
 
       // Check living tank intersections
       let hitTank: TankEntity | null = null;
@@ -1023,9 +992,9 @@ export class BallisticsManager {
           const prevAbove = Math.max(0, this._prevPos.y - world.getHeightAt(this._prevPos.x, this._prevPos.z));
           const below = floorY - this._nextPos.y;
           const frac = prevAbove + below > 1e-4 ? prevAbove / (prevAbove + below) : 1;
-          const hitPt = new THREE.Vector3().lerpVectors(this._prevPos, this._nextPos, frac);
+          const hitPt = new Vec3().lerp(this._prevPos, this._nextPos, frac);
           hitPt.y = world.getHeightAt(hitPt.x, hitPt.z);
-          const hitNrm = world.getNormalAt(hitPt.x, hitPt.z, new THREE.Vector3());
+          const hitNrm = world.getNormalAt(hitPt.x, hitPt.z, new Vec3());
           worldHit = {
             point: hitPt,
             normal: hitNrm,
@@ -1051,11 +1020,11 @@ export class BallisticsManager {
         if (hitTank !== null && bestTankDist <= Math.min(worldDist, waterDist)) {
           // Direct hit on enemy/player armor!
           directVictim = hitTank;
-          this._hitPoint.copy(this._prevPos).addScaledVector(this._segDir, bestTankDist);
+          this._hitPoint.copy(this._prevPos).addScaled(this._segDir, bestTankDist);
           directVictim.getCenterMassWorld(this._victimCenter);
-          this._hitNormal.subVectors(this._hitPoint, this._victimCenter);
+          this._hitNormal.sub2(this._hitPoint, this._victimCenter);
           if (this._hitNormal.lengthSq() < 1e-4) {
-            this._hitNormal.copy(this._segDir).negate();
+            negate(this._hitNormal.copy(this._segDir));
           } else {
             this._hitNormal.normalize();
           }
@@ -1116,7 +1085,7 @@ export class BallisticsManager {
             const tank = tanks[tIdx];
             if (!tank.alive || tank === directVictim || tank.team === s.shooter?.team) continue;
             tank.getCenterMassWorld(this._splashCenter);
-            const rawDist = this._hitPoint.distanceTo(this._splashCenter);
+            const rawDist = this._hitPoint.distance(this._splashCenter);
             const effDist = Math.max(0, rawDist - tank.stats.hitRadius * 0.35);
             if (effDist < R) {
               const falloff = 1 - effDist / R;
@@ -1155,30 +1124,17 @@ export class BallisticsManager {
       // Render glowing 3D shell tracer bolt stretched along flight direction
       const speed = Math.sqrt(s.vx * s.vx + s.vy * s.vy + s.vz * s.vz);
       const streakLen = Math.min(6.2, Math.max(2.2, speed * 0.022));
-      this._quat.setFromUnitVectors(this._fwdZ, this._segDir);
+      quatFromUnitVectors(this._quat, this._fwdZ, this._segDir);
       this._scaleVec.set(1.25, 1.25, streakLen);
-      this._mat4.compose(this._nextPos, this._quat, this._scaleVec);
+      composeMat(this._mat4, this._nextPos, this._quat, this._scaleVec);
 
       const outIdx = activeShellCount++;
       this.shellMesh.setMatrixAt(outIdx, this._mat4);
-      this._color.setRGB(s.trR, s.trG, s.trB);
-      this.shellMesh.setColorAt(outIdx, this._color);
+      this.shellMesh.setColorAt(outIdx, s.trR, s.trG, s.trB);
     }
 
-    if (activeShellCount === 0) {
-      this.shellMesh.visible = false;
-    } else {
-      this.shellMesh.visible = true;
-      this.shellMesh.count = activeShellCount;
-      this.shellMesh.instanceMatrix.clearUpdateRanges();
-      this.shellMesh.instanceMatrix.addUpdateRange(0, activeShellCount * 16);
-      this.shellMesh.instanceMatrix.needsUpdate = true;
-      if (this.shellMesh.instanceColor) {
-        this.shellMesh.instanceColor.clearUpdateRanges();
-        this.shellMesh.instanceColor.addUpdateRange(0, activeShellCount * 3);
-        this.shellMesh.instanceColor.needsUpdate = true;
-      }
-    }
+    this.shellMesh.count = activeShellCount;
+    this.shellMesh.update();
 
     // -----------------------------------------------------------------------
     // 2. Step 7.62mm Coaxial MG Rounds
@@ -1203,10 +1159,10 @@ export class BallisticsManager {
         m.pz + m.vz * stepDt
       );
 
-      this._segDir.subVectors(this._nextPos, this._prevPos);
+      this._segDir.sub2(this._nextPos, this._prevPos);
       const segLen = this._segDir.length();
       if (segLen < 1e-6) continue;
-      this._segDir.multiplyScalar(1 / segLen);
+      this._segDir.mulScalar(1 / segLen);
 
       let hitTank: TankEntity | null = null;
       let bestTankDist = Infinity;
@@ -1255,11 +1211,11 @@ export class BallisticsManager {
         }
 
         if (hitTank !== null && bestTankDist <= Math.min(worldDist, mgWaterDist)) {
-          this._hitPoint.copy(this._prevPos).addScaledVector(this._segDir, bestTankDist);
+          this._hitPoint.copy(this._prevPos).addScaled(this._segDir, bestTankDist);
           hitTank.getCenterMassWorld(this._victimCenter);
-          this._hitNormal.subVectors(this._hitPoint, this._victimCenter);
+          this._hitNormal.sub2(this._hitPoint, this._victimCenter);
           if (this._hitNormal.lengthSq() < 1e-4) {
-            this._hitNormal.copy(this._segDir).negate();
+            negate(this._hitNormal.copy(this._segDir));
           } else {
             this._hitNormal.normalize();
           }
@@ -1305,7 +1261,7 @@ export class BallisticsManager {
               const tank = tanks[tIdx];
               if (!tank.alive || tank.team === m.shooter?.team) continue;
               tank.getCenterMassWorld(this._splashCenter);
-              const d = Math.max(0, this._hitPoint.distanceTo(this._splashCenter) - tank.stats.hitRadius * 0.4);
+              const d = Math.max(0, this._hitPoint.distance(this._splashCenter) - tank.stats.hitRadius * 0.4);
               if (d < m.splashRadius * 0.5) {
                 const sDmg = m.splashDamage * (1 - d / (m.splashRadius * 0.5));
                 if (sDmg >= 0.2) {
@@ -1344,7 +1300,7 @@ export class BallisticsManager {
               const tank = tanks[tIdx];
               if (!tank.alive || tank.team === m.shooter?.team) continue;
               tank.getCenterMassWorld(this._splashCenter);
-              const d = Math.max(0, worldHit.point.distanceTo(this._splashCenter) - tank.stats.hitRadius * 0.4);
+              const d = Math.max(0, worldHit.point.distance(this._splashCenter) - tank.stats.hitRadius * 0.4);
               if (d < m.splashRadius) {
                 const sDmg = m.splashDamage * (1 - d / m.splashRadius);
                 if (sDmg >= 0.2) {
@@ -1393,36 +1349,24 @@ export class BallisticsManager {
         continue;
       }
 
-      this._quat.setFromUnitVectors(this._fwdZ, this._segDir);
+      quatFromUnitVectors(this._quat, this._fwdZ, this._segDir);
       const tracerLen = Math.min(5.2, Math.max(1.8, segLen * 0.85));
       this._scaleVec.set(0.42, 0.42, tracerLen);
-      this._mat4.compose(this._nextPos, this._quat, this._scaleVec);
+      composeMat(this._mat4, this._nextPos, this._quat, this._scaleVec);
 
       const outIdx = activeMgCount++;
       this.mgMesh.setMatrixAt(outIdx, this._mat4);
-      this._color.setRGB(m.trR, m.trG, m.trB);
-      this.mgMesh.setColorAt(outIdx, this._color);
+      this.mgMesh.setColorAt(outIdx, m.trR, m.trG, m.trB);
     }
 
-    if (activeMgCount === 0) {
-      this.mgMesh.visible = false;
-    } else {
-      this.mgMesh.visible = true;
-      this.mgMesh.count = activeMgCount;
-      this.mgMesh.instanceMatrix.clearUpdateRanges();
-      this.mgMesh.instanceMatrix.addUpdateRange(0, activeMgCount * 16);
-      this.mgMesh.instanceMatrix.needsUpdate = true;
-      if (this.mgMesh.instanceColor) {
-        this.mgMesh.instanceColor.clearUpdateRanges();
-        this.mgMesh.instanceColor.addUpdateRange(0, activeMgCount * 3);
-        this.mgMesh.instanceColor.needsUpdate = true;
-      }
-    }
+    this.mgMesh.count = activeMgCount;
+    this.mgMesh.update();
   }
 
   public dispose(): void {
-    this.scene.remove(this.shellMesh, this.mgMesh);
-    this.boltGeo.dispose();
-    this.boltMat.dispose();
+    this.shellMesh.destroy();
+    this.mgMesh.destroy();
+    this.boltGeo.toMesh().destroy();
+    this.boltMat.destroy();
   }
 }

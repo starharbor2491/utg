@@ -1,5 +1,11 @@
-import * as THREE from 'three';
+import { Entity, FOG_EXP2, StandardMaterial } from 'playcanvas';
 import type { LoadedGameAssets } from './AssetLoader';
+import { getApp } from './engine/app';
+import { dodecahedron, Geo, plane } from './engine/geometry';
+import { enableInstanceColor, InstancedMesh } from './engine/instancing';
+import { addShaderHooks, standard } from './engine/materials';
+import { applyMat4, Box3, clamp, composeMat, decomposeMat, lerp, linearColor, Mat4, negate, Quat, quatFromAxisAngle, quatFromEuler, quatFromUnitVectors, setLocalEulerRad, srgb, Vec3 } from './engine/math';
+import { findByName, group, meshNode, setVisible } from './engine/scene';
 import type { ObstacleCollider, ObstacleKind, TerrainQuery, WorldRayHit } from './types';
 
 interface LandmarkPad {
@@ -11,8 +17,8 @@ interface LandmarkPad {
 }
 
 interface FallingPropAnim {
-  mesh: THREE.Object3D;
-  axis: THREE.Vector3;
+  mesh: Entity;
+  axis: Vec3;
   angle: number;
   angVel: number;
   maxAngle: number;
@@ -25,8 +31,8 @@ interface FallingPropAnim {
 
 interface PropBatchSlot {
   index: number;
-  world: THREE.Matrix4;
-  parts: readonly { mesh: THREE.InstancedMesh; local: THREE.Matrix4 }[];
+  world: Mat4;
+  parts: readonly { mesh: InstancedMesh; local: Mat4 }[];
 }
 
 const PROP_DURABILITY: Record<ObstacleKind, number> = {
@@ -105,27 +111,27 @@ function fbm(x: number, z: number): number {
 }
 
 function smoothstep(edge0: number, edge1: number, x: number): number {
-  const t = THREE.MathUtils.clamp((x - edge0) / (edge1 - edge0), 0, 1);
+  const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
   return t * t * (3 - 2 * t);
 }
 
 export class World implements TerrainQuery {
   public readonly worldHalfSize = 520;
-  public readonly root = new THREE.Group();
-  public readonly sunLight: THREE.DirectionalLight;
-  public readonly hemiLight: THREE.HemisphereLight;
+  public readonly root = group('battlefield_world');
+  public readonly sunLight: Entity;
 
   private readonly pads: LandmarkPad[] = [];
   private readonly obstacles: ObstacleCollider[] = [];
   private readonly fallingProps: FallingPropAnim[] = [];
   private readonly propBatchSlots = new Map<ObstacleCollider, PropBatchSlot>();
-  private readonly propInstanceMatrix = new THREE.Matrix4();
-  private rubble: THREE.InstancedMesh | null = null;
+  private readonly propInstanceMatrix = new Mat4();
+  private rubble: InstancedMesh | null = null;
   private rubbleIndex = 0;
   public onObstacleDestroyed?: (obstacle: ObstacleCollider) => void;
-  private grassMesh: THREE.InstancedMesh | null = null;
-  private terrainPositions!: THREE.BufferAttribute;
+  private grassMesh: InstancedMesh | null = null;
+  private terrainPositions!: Geo;
   private grassTimeUniform = { value: 0 };
+  private readonly animatedMaterials: StandardMaterial[] = [];
   private elapsedTime = 0;
 
   private readonly mounds: MoundDef[] = [];
@@ -143,11 +149,11 @@ export class World implements TerrainQuery {
   private grassComputeQueue: number[] = [];
   private _grassCellKey = -1;
 
-  private readonly _rayPt = new THREE.Vector3();
-  private readonly _rayNorm = new THREE.Vector3();
+  private readonly _rayPt = new Vec3();
+  private readonly _rayNorm = new Vec3();
   private readonly _rayHitResult: WorldRayHit = {
-    point: new THREE.Vector3(),
-    normal: new THREE.Vector3(0, 1, 0),
+    point: new Vec3(),
+    normal: new Vec3(0, 1, 0),
     distance: 0,
     hitKind: 'terrain',
   };
@@ -155,37 +161,29 @@ export class World implements TerrainQuery {
   private lastShadowSnapZ = Infinity;
 
   constructor(
-    private readonly scene: THREE.Scene,
+    private readonly scene: Entity,
     private readonly assets: LoadedGameAssets
   ) {
-    this.root.name = 'battlefield_world';
-    this.scene.add(this.root);
+    this.scene.addChild(this.root);
 
-    // Calibrated atmospheric sky & environment reflections
-    this.scene.background = assets.skyBackground;
-    this.scene.environment = assets.skyEnvMap;
-    this.scene.environmentIntensity = 0.92;
-    this.scene.fog = new THREE.FogExp2('#9eb0ba', 0.0011);
+    const appScene = getApp().scene;
+    appScene.skybox = assets.skyBox;
+    appScene.envAtlas = assets.skyEnvAtlas;
+    appScene.skyboxIntensity = 0.92;
+    appScene.ambientLight = srgb('#3d4638');
+    appScene.fog.type = FOG_EXP2;
+    appScene.fog.color = srgb('#9eb0ba');
+    appScene.fog.density = 0.0011;
 
-    // Warm golden-afternoon directional sun + cool sky bounce hemisphere
-    this.hemiLight = new THREE.HemisphereLight('#c6dcff', '#5b6344', 0.52);
-    this.root.add(this.hemiLight);
-
-    this.sunLight = new THREE.DirectionalLight('#fff1d6', 2.65);
-    this.sunLight.position.set(110, 145, -85);
-    this.sunLight.castShadow = true;
-    this.sunLight.shadow.mapSize.set(1536, 1536);
-    this.sunLight.shadow.camera.near = 20;
-    this.sunLight.shadow.camera.far = 340;
-    const shadowHalf = 80;
-    this.sunLight.shadow.camera.left = -shadowHalf;
-    this.sunLight.shadow.camera.right = shadowHalf;
-    this.sunLight.shadow.camera.top = shadowHalf;
-    this.sunLight.shadow.camera.bottom = -shadowHalf;
-    this.sunLight.shadow.bias = -0.00045;
-    this.sunLight.shadow.normalBias = 0.025;
-    this.root.add(this.sunLight);
-    this.root.add(this.sunLight.target);
+    this.sunLight = new Entity('afternoon_sun');
+    this.sunLight.addComponent('light', {
+      type: 'directional', color: srgb('#fff1d6'), intensity: 2.65 / Math.PI,
+      castShadows: true, shadowResolution: 1536, shadowDistance: 340, numCascades: 2,
+      shadowBias: -0.00045, normalOffsetBias: 0.025,
+    });
+    this.sunLight.setPosition(110, 145, -85);
+    this.sunLight.setRotation(quatFromUnitVectors(new Quat(), Vec3.DOWN, new Vec3(-110, -145, 85).normalize()));
+    this.root.addChild(this.sunLight);
 
     this.initLandmarkPads();
     this.initMounds();
@@ -210,12 +208,12 @@ export class World implements TerrainQuery {
     const dBlue = Math.hypot(x - 0, z + 420);
     if (dBlue < 46) {
       const w = 1 - smoothstep(14, 46, dBlue);
-      h = THREE.MathUtils.lerp(h, 0.0, w * 0.85);
+      h = lerp(h, 0.0, w * 0.85);
     }
     const dRed = Math.hypot(x - 0, z - 420);
     if (dRed < 46) {
       const w = 1 - smoothstep(14, 46, dRed);
-      h = THREE.MathUtils.lerp(h, 0.0, w * 0.85);
+      h = lerp(h, 0.0, w * 0.85);
     }
 
     // Outer perimeter ridge beyond the playable ~470 m square, rising toward the 620 m terrain edge
@@ -253,7 +251,7 @@ export class World implements TerrainQuery {
       const d = Math.hypot(x - p.x, z - p.z);
       if (d < p.outerRadius) {
         const w = 1 - smoothstep(p.innerRadius, p.outerRadius, d);
-        h = THREE.MathUtils.lerp(h, p.elevation, w);
+        h = lerp(h, p.elevation, w);
       }
     }
     return h;
@@ -301,8 +299,8 @@ export class World implements TerrainQuery {
       const level = this.riverLevelAt(r, x);
       const silt = valueNoise(x * 0.11 + 7.7, z * 0.11 - 3.1) - 0.5;
       const shelf = smoothstep(hw * 0.48, hw + 1.9, lat + silt * 1.2);
-      const bed = level + THREE.MathUtils.lerp(-1.04 + silt * 0.19, 0.58, shelf);
-      h = THREE.MathUtils.lerp(bed, h, smoothstep(hw + 1.6, hw + 6, lat));
+      const bed = level + lerp(-1.04 + silt * 0.19, 0.58, shelf);
+      h = lerp(bed, h, smoothstep(hw + 1.6, hw + 6, lat));
     }
     return h;
   }
@@ -341,7 +339,7 @@ export class World implements TerrainQuery {
   private static readonly RIVER_SAMPLE_STEP = 8;
 
   private riverLevelAt(r: RiverDef, x: number): number {
-    const fx = THREE.MathUtils.clamp(
+    const fx = clamp(
       (x - World.RIVER_X_MIN) / World.RIVER_SAMPLE_STEP,
       0,
       r.levels.length - 1.001
@@ -456,7 +454,7 @@ export class World implements TerrainQuery {
     }
   }
 
-  public getNormalAt(x: number, z: number, out = new THREE.Vector3()): THREE.Vector3 {
+  public getNormalAt(x: number, z: number, out = new Vec3()): Vec3 {
     const eps = 0.6;
     const hL = this.getHeightAt(x - eps, z);
     const hR = this.getHeightAt(x + eps, z);
@@ -505,28 +503,25 @@ export class World implements TerrainQuery {
       this.grassDirty = true;
     }
     const targetShadow = quality === 'high' ? 2048 : quality === 'medium' ? 1024 : 1536;
-    if (this.sunLight.shadow.mapSize.x !== targetShadow) {
-      this.sunLight.shadow.mapSize.set(targetShadow, targetShadow);
-      this.sunLight.shadow.map?.dispose();
-      this.sunLight.shadow.map = null;
+    if (this.sunLight.light!.shadowResolution !== targetShadow) {
+      this.sunLight.light!.shadowResolution = targetShadow;
     }
   }
 
   private buildTerrainMesh(): void {
-    const geo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, TERRAIN_SEGMENTS, TERRAIN_SEGMENTS);
-    geo.rotateX(-Math.PI / 2);
+    const geo = plane(TERRAIN_SIZE, TERRAIN_SIZE, TERRAIN_SEGMENTS, TERRAIN_SEGMENTS).rotateX(-Math.PI / 2);
 
-    const pos = geo.attributes.position as THREE.BufferAttribute;
-    this.terrainPositions = pos;
-    const roadAttr = new Float32Array(pos.count);
-    const meadowAttr = new Float32Array(pos.count);
-    const wetAttr = new Float32Array(pos.count);
+    const pos = geo.positions, count = geo.vertexCount;
+    this.terrainPositions = geo;
+    const roadAttr = new Float32Array(count);
+    const meadowAttr = new Float32Array(count);
+    const wetAttr = new Float32Array(count);
 
-    for (let i = 0; i < pos.count; i++) {
-      const vx = pos.getX(i);
-      const vz = pos.getZ(i);
+    for (let i = 0; i < count; i++) {
+      const vx = pos[i * 3];
+      const vz = pos[i * 3 + 2];
       const vy = this.getHeightAt(vx, vz);
-      pos.setY(i, vy);
+      pos[i * 3 + 1] = vy;
       const surface = this.riverSurfaceAt(vx, vz);
       wetAttr[i] = surface === undefined ? 0 : 1 - smoothstep(0.08, 0.64, vy - surface);
 
@@ -541,158 +536,81 @@ export class World implements TerrainQuery {
       meadowAttr[i] = valueNoise(vx * 0.048 + 11.3, vz * 0.048 + 11.3);
     }
 
-    geo.setAttribute('aRoadMask', new THREE.BufferAttribute(roadAttr, 1));
-    geo.setAttribute('aMeadowDry', new THREE.BufferAttribute(meadowAttr, 1));
-    geo.setAttribute('aRiverWet', new THREE.BufferAttribute(wetAttr, 1));
-    geo.computeVertexNormals();
+    geo.setAttribute('aRoadMask', roadAttr, 1, 'ATTR7');
+    geo.setAttribute('aMeadowDry', meadowAttr, 1, 'ATTR8');
+    geo.setAttribute('aRiverWet', wetAttr, 1, 'ATTR9');
+    geo.computeNormals();
 
     const tex = this.assets.terrainTextures;
-    const mat = new THREE.MeshStandardMaterial({
-      map: tex.grassColor,
-      normalMap: tex.grassNormal,
-      roughness: 0.90,
-      metalness: 0.02,
-      envMapIntensity: 0.55,
-    });
+    const mat = standard({ roughness: 0.90, metalness: 0.02, envIntensity: 0.55 });
+    mat.setAttribute('aRoadMask', 'ATTR7');
+    mat.setAttribute('aMeadowDry', 'ATTR8');
+    mat.setAttribute('aRiverWet', 'ATTR9');
+    mat.setParameter('uGrassColor', tex.grassColor);
+    mat.setParameter('uDirtColor', tex.dirtColor);
+    mat.setParameter('uTime', this.grassTimeUniform.value);
+    this.animatedMaterials.push(mat);
 
     // Fast 4-tap splat + wet-puddle specular + drifting cumulus cloud shadows + directional Mie aerial perspective
-    mat.customProgramCacheKey = () => 'steppe-terrain-hyper-v3';
-    mat.onBeforeCompile = (shader) => {
-      shader.uniforms.uDirtColor = { value: tex.dirtColor };
-      shader.uniforms.uDirtNormal = { value: tex.dirtNormal };
-      shader.uniforms.uTime = this.grassTimeUniform;
-      shader.uniforms.uSunDir = { value: new THREE.Vector3(110, 145, -85).normalize() };
+    addShaderHooks(mat, {
+      vsDecl: `
+        attribute float aRoadMask;
+        attribute float aMeadowDry;
+        attribute float aRiverWet;
+        varying vec3 vTerrainWorldPos;
+        varying vec3 vTerrainWorldNormal;
+        varying float vRoadMask;
+        varying float vMeadowDry;
+        varying float vRiverWet;`,
+      vsMainEnd: `
+        vTerrainWorldPos = vPositionW;
+        vTerrainWorldNormal = normalize(vNormalW);
+        vRoadMask = aRoadMask;
+        vMeadowDry = aMeadowDry;
+        vRiverWet = aRiverWet;`,
+      psDecl: `
+        uniform sampler2D uGrassColor;
+        uniform sampler2D uDirtColor;
+        uniform float uTime;
+        varying vec3 vTerrainWorldPos;
+        varying vec3 vTerrainWorldNormal;
+        varying float vRoadMask;
+        varying float vMeadowDry;
+        varying float vRiverWet;
+        float fastCloudNoise(vec2 p) {
+          vec2 i = floor(p), f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          float a = fract(sin(dot(i, vec2(127.1, 311.7))) * 43758.5453);
+          float b = fract(sin(dot(i + vec2(1.0, 0.0), vec2(127.1, 311.7))) * 43758.5453);
+          float c = fract(sin(dot(i + vec2(0.0, 1.0), vec2(127.1, 311.7))) * 43758.5453);
+          float d = fract(sin(dot(i + vec2(1.0, 1.0), vec2(127.1, 311.7))) * 43758.5453);
+          return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+        }`,
+      albedo: `
+        vec2 detailUV = vTerrainWorldPos.xz * 0.145;
+        vec3 grassCol = texture2D(uGrassColor, detailUV).rgb;
+        grassCol *= mix(vec3(0.74, 0.85, 0.60), vec3(1.05, 0.96, 0.72), vMeadowDry * 0.74);
+        vec3 dirtCol = texture2D(uDirtColor, detailUV * 1.15).rgb * vec3(0.90, 0.83, 0.74);
+        float slopeFactor = smoothstep(0.11, 0.34, 1.0 - clamp(vTerrainWorldNormal.y, 0.0, 1.0));
+        float splatDirt = clamp(max(vRoadMask * 0.96, slopeFactor * 0.88) + (vMeadowDry - 0.62) * 0.22, 0.0, 1.0);
+        float rutWave = sin(vTerrainWorldPos.x * 0.85 + vTerrainWorldPos.z * 0.65);
+        float puddleMask = smoothstep(0.62, 0.92, vRoadMask) * smoothstep(0.56, 0.80, vMeadowDry + rutWave * 0.18) * smoothstep(0.94, 0.995, vTerrainWorldNormal.y);
+        vec3 baseAlbedo = mix(grassCol, dirtCol, splatDirt);
+        baseAlbedo = mix(baseAlbedo, dirtCol * vec3(0.46, 0.44, 0.42), puddleMask * 0.78);
+        baseAlbedo = mix(baseAlbedo, dirtCol * vec3(0.52, 0.47, 0.39), vRiverWet * 0.85);
+        vec2 cloudUV = vTerrainWorldPos.xz * 0.0085 + vec2(uTime * 0.011, uTime * 0.005);
+        float cloudN = fastCloudNoise(cloudUV) * 0.65 + fastCloudNoise(cloudUV * 2.3 + 4.1) * 0.35;
+        dAlbedo = baseAlbedo * mix(0.68, 1.06, smoothstep(0.34, 0.68, cloudN));`,
+      gloss: `
+        float rutWaveR = sin(vTerrainWorldPos.x * 0.85 + vTerrainWorldPos.z * 0.65);
+        float puddleR = smoothstep(0.62, 0.92, vRoadMask) * smoothstep(0.56, 0.80, vMeadowDry + rutWaveR * 0.18) * smoothstep(0.94, 0.995, vTerrainWorldNormal.y);
+        float terrainRoughness = mix(mix(0.92, 0.76, vRoadMask), 0.13, puddleR);
+        terrainRoughness = mix(terrainRoughness, 0.35, vRiverWet * 0.8);
+        dGlossiness = 1.0 - terrainRoughness;`,
+    });
 
-      shader.vertexShader = shader.vertexShader
-        .replace(
-          '#include <common>',
-          `#include <common>
-          attribute float aRoadMask;
-          attribute float aMeadowDry;
-          attribute float aRiverWet;
-          varying vec3 vTerrainWorldPos;
-          varying vec3 vTerrainWorldNormal;
-          varying float vRoadMask;
-          varying float vMeadowDry;
-          varying float vRiverWet;`
-        )
-        .replace(
-          '#include <worldpos_vertex>',
-          `#include <worldpos_vertex>
-          vTerrainWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
-          vTerrainWorldNormal = normalize(mat3(modelMatrix) * objectNormal);
-          vRoadMask = aRoadMask;
-          vMeadowDry = aMeadowDry;
-          vRiverWet = aRiverWet;`
-        );
-
-      shader.fragmentShader = shader.fragmentShader
-        .replace(
-          '#include <common>',
-          `#include <common>
-          uniform sampler2D uDirtColor;
-          uniform sampler2D uDirtNormal;
-          uniform float uTime;
-          uniform vec3 uSunDir;
-          varying vec3 vTerrainWorldPos;
-          varying vec3 vTerrainWorldNormal;
-          varying float vRoadMask;
-          varying float vMeadowDry;
-          varying float vRiverWet;
-
-          float fastCloudNoise(vec2 p) {
-            vec2 i = floor(p);
-            vec2 f = fract(p);
-            f = f * f * (3.0 - 2.0 * f);
-            float a = fract(sin(dot(i, vec2(127.1, 311.7))) * 43758.5453);
-            float b = fract(sin(dot(i + vec2(1.0, 0.0), vec2(127.1, 311.7))) * 43758.5453);
-            float c = fract(sin(dot(i + vec2(0.0, 1.0), vec2(127.1, 311.7))) * 43758.5453);
-            float d = fract(sin(dot(i + vec2(1.0, 1.0), vec2(127.1, 311.7))) * 43758.5453);
-            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-          }`
-        )
-        .replace(
-          '#include <map_fragment>',
-          `
-          vec2 detailUV = vTerrainWorldPos.xz * 0.145;
-          vec3 grassCol = texture2D(map, detailUV).rgb;
-          grassCol *= mix(vec3(0.74, 0.85, 0.60), vec3(1.05, 0.96, 0.72), vMeadowDry * 0.74);
-
-          vec3 dirtCol = texture2D(uDirtColor, detailUV * 1.15).rgb * vec3(0.90, 0.83, 0.74);
-
-          float slopeFactor = smoothstep(0.11, 0.34, 1.0 - clamp(vTerrainWorldNormal.y, 0.0, 1.0));
-          float splatDirt = clamp(max(vRoadMask * 0.96, slopeFactor * 0.88) + (vMeadowDry - 0.62) * 0.22, 0.0, 1.0);
-
-          // Wet mud wheel-ruts & rain puddles along flat road stretches
-          float rutWave = sin(vTerrainWorldPos.x * 0.85 + vTerrainWorldPos.z * 0.65);
-          float puddleMask = smoothstep(0.62, 0.92, vRoadMask)
-                           * smoothstep(0.56, 0.80, vMeadowDry + rutWave * 0.18)
-                           * smoothstep(0.94, 0.995, vTerrainWorldNormal.y);
-
-          vec3 baseAlbedo = mix(grassCol, dirtCol, splatDirt);
-          baseAlbedo = mix(baseAlbedo, dirtCol * vec3(0.46, 0.44, 0.42), puddleMask * 0.78);
-          baseAlbedo = mix(baseAlbedo, dirtCol * vec3(0.52, 0.47, 0.39), vRiverWet * 0.85);
-
-          // Drifting overhead cumulus cloud shadows across the 520m valley
-          vec2 cloudUV = vTerrainWorldPos.xz * 0.0085 + vec2(uTime * 0.011, uTime * 0.005);
-          float cloudN = fastCloudNoise(cloudUV) * 0.65 + fastCloudNoise(cloudUV * 2.3 + 4.1) * 0.35;
-          float cloudLight = mix(0.68, 1.06, smoothstep(0.34, 0.68, cloudN));
-
-          diffuseColor.rgb *= baseAlbedo * cloudLight;
-          `
-        )
-        .replace(
-          '#include <roughnessmap_fragment>',
-          `
-          float roughnessFactor = roughness;
-          float rutWaveR = sin(vTerrainWorldPos.x * 0.85 + vTerrainWorldPos.z * 0.65);
-          float puddleR = smoothstep(0.62, 0.92, vRoadMask)
-                        * smoothstep(0.56, 0.80, vMeadowDry + rutWaveR * 0.18)
-                        * smoothstep(0.94, 0.995, vTerrainWorldNormal.y);
-          // Mirror-smooth wet puddle specular glints (0.13) vs matte grass/soil (0.90)
-          roughnessFactor = mix(mix(0.92, 0.76, vRoadMask), 0.13, puddleR);
-          roughnessFactor = mix(roughnessFactor, 0.35, vRiverWet * 0.8);
-          `
-        )
-        .replace(
-          '#include <normal_fragment_maps>',
-          `
-          vec2 nUV = vTerrainWorldPos.xz * 0.145;
-          vec3 gN = texture2D(normalMap, nUV).xyz * 2.0 - 1.0;
-          vec3 dN = texture2D(uDirtNormal, nUV * 1.15).xyz * 2.0 - 1.0;
-          float slopeN = smoothstep(0.11, 0.34, 1.0 - clamp(vTerrainWorldNormal.y, 0.0, 1.0));
-          float splatN = clamp(max(vRoadMask * 0.96, slopeN * 0.88), 0.0, 1.0);
-          float rutWaveN = sin(vTerrainWorldPos.x * 0.85 + vTerrainWorldPos.z * 0.65);
-          float puddleN = smoothstep(0.62, 0.92, vRoadMask)
-                        * smoothstep(0.56, 0.80, vMeadowDry + rutWaveN * 0.18)
-                        * smoothstep(0.94, 0.995, vTerrainWorldNormal.y);
-          vec3 blendedTangentN = normalize(mix(gN, dN, splatN));
-          // Flatten surface normal across standing water puddles for razor-sharp sky speculars
-          float bumpAmp = mix(0.42, 0.04, puddleN);
-          vec3 worldPerturb = normalize(vTerrainWorldNormal + vec3(blendedTangentN.x * bumpAmp, 0.0, blendedTangentN.y * bumpAmp));
-          normal = normalize((viewMatrix * vec4(worldPerturb, 0.0)).xyz);
-          `
-        )
-        .replace(
-          '#include <fog_fragment>',
-          `#ifdef USE_FOG
-            vec3 viewToFrag = normalize(vTerrainWorldPos - cameraPosition);
-            float sunAlign = max(dot(viewToFrag, uSunDir), 0.0);
-            vec3 rayleighSky = vec3(0.58, 0.69, 0.80);
-            vec3 mieSunHaze  = vec3(0.96, 0.86, 0.70);
-            vec3 scatterColor = mix(rayleighSky, mieSunHaze, pow(sunAlign, 3.0) * 0.72);
-            float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vFogDepth * vFogDepth);
-            gl_FragColor.rgb = mix(gl_FragColor.rgb, scatterColor, clamp(fogFactor, 0.0, 1.0));
-          #endif`
-        );
-    };
-
-    const terrainMesh = new THREE.Mesh(geo, mat);
-    terrainMesh.name = 'steppe_terrain';
-    terrainMesh.receiveShadow = true;
-    terrainMesh.updateMatrix();
-    terrainMesh.matrixAutoUpdate = false;
-    this.root.add(terrainMesh);
+    const terrainMesh = meshNode(geo, mat, this.root, { name: 'steppe_terrain', castShadows: false, receiveShadows: true });
+    terrainMesh.setLocalPosition(0, 0, 0);
   }
 
   private populateBattlefieldProps(): void {
@@ -729,9 +647,9 @@ export class World implements TerrainQuery {
       { cx: -330, cz: 95, yaw: 0.15, count: 3 },
       { cx: 330, cz: -95, yaw: -2.6, count: 3 },
     ];
-    const wallTransforms: THREE.Matrix4[] = [];
+    const wallTransforms: Mat4[] = [];
     const wallColliders: ObstacleCollider[] = [];
-    const dummy = new THREE.Object3D();
+    const dummy = new Entity();
     let wallIdx = 0;
     for (const c of bermClusters) {
       const cosY = Math.cos(c.yaw);
@@ -741,11 +659,10 @@ export class World implements TerrainQuery {
         const wx = c.cx + cosY * offset;
         const wz = c.cz - sinY * offset;
         const wy = this.getHeightAt(wx, wz) - 0.04;
-        dummy.position.set(wx, wy, wz);
-        dummy.rotation.set(0, c.yaw, 0);
-        dummy.scale.setScalar(1);
-        dummy.updateMatrix();
-        wallTransforms.push(dummy.matrix.clone());
+        dummy.setLocalPosition(wx, wy, wz);
+        setLocalEulerRad(dummy, 0, c.yaw, 0);
+        dummy.setLocalScale(1, 1, 1);
+        wallTransforms.push(dummy.getWorldTransform().clone());
         wallColliders.push({
           id: `hesco_${wallIdx++}`,
           kind: 'barrier',
@@ -782,10 +699,10 @@ export class World implements TerrainQuery {
     ];
     crateCoords.forEach(([cx, cz, yaw], idx) => {
       const cy = this.getHeightAt(cx, cz) - 0.03;
-      const crate = this.assets.models.supply_crates.clone(true);
-      crate.position.set(cx, cy, cz);
-      crate.rotation.y = yaw;
-      this.root.add(crate);
+      const crate = this.assets.models.supply_crates.clone();
+      crate.setLocalPosition(cx, cy, cz);
+      setLocalEulerRad(crate, 0, yaw, 0);
+      this.root.addChild(crate);
       this.obstacles.push({
         id: `crate_${idx}`,
         kind: 'crates',
@@ -802,8 +719,8 @@ export class World implements TerrainQuery {
     });
 
     // 6. Deterministic Limestone Boulder Outcrops — batched into TWO InstancedMeshes (1 draw call each)!
-    const largeRockTransforms: THREE.Matrix4[] = [];
-    const medRockTransforms: THREE.Matrix4[] = [];
+    const largeRockTransforms: Mat4[] = [];
+    const medRockTransforms: Mat4[] = [];
     const largeRockColliders: ObstacleCollider[] = [];
     const medRockColliders: ObstacleCollider[] = [];
     let rockIdx = 0;
@@ -817,12 +734,11 @@ export class World implements TerrainQuery {
       const isLarge = i % 3 !== 0;
       const scale = isLarge ? 0.95 + hash2(i, 7.1) * 0.65 : 0.9 + hash2(i, 3.3) * 0.55;
       const ry = this.getHeightAt(rx, rz) - 0.08 * scale;
-      dummy.position.set(rx, ry, rz);
-      dummy.rotation.set(0, hash2(i, 19.3) * Math.PI * 2, 0);
-      dummy.scale.setScalar(scale);
-      dummy.updateMatrix();
-      if (isLarge) largeRockTransforms.push(dummy.matrix.clone());
-      else medRockTransforms.push(dummy.matrix.clone());
+      dummy.setLocalPosition(rx, ry, rz);
+      setLocalEulerRad(dummy, 0, hash2(i, 19.3) * Math.PI * 2, 0);
+      dummy.setLocalScale(scale, scale, scale);
+      if (isLarge) largeRockTransforms.push(dummy.getWorldTransform().clone());
+      else medRockTransforms.push(dummy.getWorldTransform().clone());
 
       (isLarge ? largeRockColliders : medRockColliders).push({
         id: `rock_${rockIdx++}`,
@@ -842,7 +758,7 @@ export class World implements TerrainQuery {
     // 7. Aspen Tree Clusters — 10 groves of 4-9 trees batched into shared InstancedMeshes
     //    (trunk colliders stay solid obstacles; instancing keeps draw calls flat)
     const treeRng = mulberry32(0x7ee5);
-    const treeTransforms: THREE.Matrix4[] = [];
+    const treeTransforms: Mat4[] = [];
     const treeColliders: ObstacleCollider[] = [];
     let treeIdx = 0;
     const clusterCount = 10;
@@ -870,11 +786,10 @@ export class World implements TerrainQuery {
 
         const scale = 0.82 + treeRng() * 0.42;
         const ty = this.getHeightAt(tx, tz) - 0.08 * scale;
-        dummy.position.set(tx, ty, tz);
-        dummy.rotation.set(0, treeRng() * Math.PI * 2, 0);
-        dummy.scale.setScalar(scale); // Strictly uniform scale!
-        dummy.updateMatrix();
-        treeTransforms.push(dummy.matrix.clone());
+        dummy.setLocalPosition(tx, ty, tz);
+        setLocalEulerRad(dummy, 0, treeRng() * Math.PI * 2, 0);
+        dummy.setLocalScale(scale, scale, scale); // Strictly uniform scale!
+        treeTransforms.push(dummy.getWorldTransform().clone());
 
         treeColliders.push({
           id: `tree_${treeIdx++}`,
@@ -895,17 +810,17 @@ export class World implements TerrainQuery {
 
   /** Match the terrain triangles at the shore, not just the driving height query. */
   private renderedGroundAt(x: number, z: number): number {
-    const toGrid = (v: number) => THREE.MathUtils.clamp((v / TERRAIN_SIZE + 0.5) * TERRAIN_SEGMENTS, 0, TERRAIN_SEGMENTS);
+    const toGrid = (v: number) => clamp((v / TERRAIN_SIZE + 0.5) * TERRAIN_SEGMENTS, 0, TERRAIN_SEGMENTS);
     const gx = toGrid(x), gz = toGrid(z);
     const ix = Math.min(TERRAIN_SEGMENTS - 1, Math.floor(gx));
     const iz = Math.min(TERRAIN_SEGMENTS - 1, Math.floor(gz));
     const fx = gx - ix, fz = gz - iz;
     const stride = TERRAIN_SEGMENTS + 1;
     const i = iz * stride + ix;
-    const pos = this.terrainPositions;
-    const east = pos.getY(i + 1), south = pos.getY(i + stride);
-    if (fx + fz <= 1) return east * fx + south * fz + pos.getY(i) * (1 - fx - fz);
-    return east * (1 - fz) + south * (1 - fx) + pos.getY(i + stride + 1) * (fx + fz - 1);
+    const pos = this.terrainPositions.positions;
+    const east = pos[(i + 1) * 3 + 1], south = pos[(i + stride) * 3 + 1];
+    if (fx + fz <= 1) return east * fx + south * fz + pos[i * 3 + 1] * (1 - fx - fz);
+    return east * (1 - fz) + south * (1 - fx) + pos[(i + stride + 1) * 3 + 1] * (fx + fz - 1);
   }
 
   /** Two strips, with no reflection or refraction render passes. */
@@ -946,135 +861,95 @@ export class World implements TerrainQuery {
         }
       }
 
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      geo.setAttribute('aWaterUv', new THREE.BufferAttribute(uvs, 2));
-      geo.setAttribute('aWaterDepth', new THREE.BufferAttribute(depths, 1));
-      geo.setIndex(indices);
-      geo.computeVertexNormals();
+      const geo = new Geo(Array.from(positions), [], [], indices);
+      geo.setAttribute('aWaterUv', uvs, 2, 'ATTR7');
+      geo.setAttribute('aWaterDepth', depths, 1, 'ATTR8');
+      geo.computeNormals();
 
-      const mat = new THREE.MeshPhysicalMaterial({
-        color: 0xffffff,
-        roughness: 0.13,
-        metalness: 0.0,
-        ior: 1.333,
-        envMapIntensity: 1.1,
-        transparent: true,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-        forceSinglePass: true,
-      });
-      mat.customProgramCacheKey = () => 'river-water-v2';
-      mat.onBeforeCompile = (shader) => {
-        shader.uniforms.uTime = this.grassTimeUniform;
-        shader.vertexShader = shader.vertexShader
-          .replace(
-            '#include <common>',
-            `#include <common>
-            attribute vec2 aWaterUv;
-            attribute float aWaterDepth;
-            varying vec2 vWaterUv;
-            varying float vWaterDepth;
-            varying vec3 vWaterWorld;`
-          )
-          .replace(
-            '#include <worldpos_vertex>',
-            `#include <worldpos_vertex>
-            vWaterUv = aWaterUv;
-            vWaterDepth = aWaterDepth;
-            vWaterWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;`
-          );
-        shader.fragmentShader = shader.fragmentShader
-          .replace(
-            '#include <common>',
-            `#include <common>
-            uniform float uTime;
-            varying vec2 vWaterUv;
-            varying float vWaterDepth;
-            varying vec3 vWaterWorld;`
-          )
-          .replace(
-            '#include <color_fragment>',
-            `#include <color_fragment>
-            if (vWaterDepth <= 0.0) discard;
-            vec2 flow = vWaterUv - vec2(uTime * 0.92, 0.0);
-            float eddy = sin(flow.x * 0.48 + flow.y * 0.63) + sin(flow.x * 0.29 - flow.y * 0.84);
-            float shore = smoothstep(0.025, 0.09, vWaterDepth) * (1.0 - smoothstep(0.09, 0.27, vWaterDepth));
+      const mat = standard({ roughness: 0.13, metalness: 0, envIntensity: 1.1, transparent: true, depthWrite: false, doubleSided: true });
+      mat.setAttribute('aWaterUv', 'ATTR7');
+      mat.setAttribute('aWaterDepth', 'ATTR8');
+      mat.setParameter('uTime', this.grassTimeUniform.value);
+      this.animatedMaterials.push(mat);
+      addShaderHooks(mat, {
+        vsDecl: `
+          attribute vec2 aWaterUv;
+          attribute float aWaterDepth;
+          varying vec2 vWaterUv;
+          varying float vWaterDepth;
+          varying vec3 vWaterWorld;`,
+        vsMainEnd: `
+          vWaterUv = aWaterUv;
+          vWaterDepth = aWaterDepth;
+          vWaterWorld = vPositionW;`,
+        psDecl: `
+          uniform float uTime;
+          uniform vec3 view_position;
+          varying vec2 vWaterUv;
+          varying float vWaterDepth;
+          varying vec3 vWaterWorld;
+          float waterEddy(vec2 flow) { return sin(flow.x * 0.48 + flow.y * 0.63) + sin(flow.x * 0.29 - flow.y * 0.84); }
+          float waterFoam(vec2 flow, float eddy, float depth) {
+            float shore = smoothstep(0.025, 0.09, depth) * (1.0 - smoothstep(0.09, 0.27, depth));
             float flecks = sin(flow.x * 2.2 + eddy) * sin(flow.x * 0.9 - flow.y * 3.6);
-            float foam = shore * smoothstep(0.23, 0.83, flecks + eddy * 0.16) * 0.42;
-            vec3 silt = mix(vec3(0.072, 0.083, 0.049), vec3(0.025, 0.054, 0.045), smoothstep(0.0, 1.08, vWaterDepth));
-            diffuseColor.rgb = mix(silt * (1.0 + eddy * 0.035), vec3(0.52, 0.55, 0.49), foam);`
-          )
-          .replace(
-            '#include <normal_fragment_maps>',
-            `
-            vec2 swirls = flow + vec2(0.62 * eddy, 0.46 * sin(flow.x * 0.77 - flow.y * 0.49));
-            float w1 = cos(dot(swirls, vec2(2.1, 0.82)) - uTime * 1.4 + eddy * 0.8);
-            float w2 = cos(dot(swirls, vec2(0.95, -3.2)) + uTime * 2.1 + eddy);
-            float w5 = cos(dot(flow, vec2(3.82, -1.56)) - uTime * 3.3 + eddy);
-            float w3 = cos(dot(flow, vec2(8.6, 3.3)) - uTime * 2.7);
-            float w4 = cos(dot(flow, vec2(-3.5, 12.1)) + uTime * 3.2);
-            vec3 waterView = cameraPosition - vWaterWorld;
-            float micro = 1.0 - smoothstep(18.0, 90.0, length(waterView));
-            float ripple = mix(0.32, 1.0, smoothstep(0.02, 0.7, vWaterDepth));
-            vec3 worldWaterN = normalize(vec3(
-              ripple * (w1 * 0.032 + w2 * 0.014 - w5 * 0.029 + (w3 * 0.036 - w4 * 0.013) * micro),
-              1.0,
-              ripple * (w1 * 0.014 - w2 * 0.031 + w5 * 0.023 + (w3 * 0.014 + w4 * 0.042) * micro)
-            ));
-            normal = normalize((viewMatrix * vec4(worldWaterN * faceDirection, 0.0)).xyz);
-            float waterNoV = clamp(abs(dot(worldWaterN, normalize(waterView))), 0.0, 1.0);
-            float fresnel = 0.0204 + 0.9796 * pow(1.0 - waterNoV, 5.0);
-            float absorption = 1.0 - exp(-1.6 * vWaterDepth / max(0.25, waterNoV));
-            diffuseColor.a = (1.0 - (1.0 - absorption) * (1.0 - fresnel)) * smoothstep(0.0, 0.12, vWaterDepth);
-            diffuseColor.a = max(diffuseColor.a, foam);
-            `
-          )
-          .replace(
-            '#include <roughnessmap_fragment>',
-            `float roughnessFactor = roughness + 0.021 * eddy + foam * 0.34;`
-          );
-      };
+            return shore * smoothstep(0.23, 0.83, flecks + eddy * 0.16) * 0.42;
+          }`,
+        albedo: `
+          if (vWaterDepth <= 0.0) discard;
+          vec2 flow = vWaterUv - vec2(uTime * 0.92, 0.0);
+          float eddy = waterEddy(flow);
+          float foam = waterFoam(flow, eddy, vWaterDepth);
+          vec3 silt = mix(vec3(0.072, 0.083, 0.049), vec3(0.025, 0.054, 0.045), smoothstep(0.0, 1.08, vWaterDepth));
+          dAlbedo = mix(silt * (1.0 + eddy * 0.035), vec3(0.52, 0.55, 0.49), foam);`,
+        opacity: `
+          vec2 flow = vWaterUv - vec2(uTime * 0.92, 0.0);
+          float eddy = waterEddy(flow);
+          float foam = waterFoam(flow, eddy, vWaterDepth);
+          vec3 waterView = view_position - vWaterWorld;
+          float waterNoV = clamp(abs(normalize(vNormalW).y), 0.0, 1.0);
+          float fresnel = 0.0204 + 0.9796 * pow(1.0 - waterNoV, 5.0);
+          float absorption = 1.0 - exp(-1.6 * vWaterDepth / max(0.25, waterNoV));
+          dAlpha = (1.0 - (1.0 - absorption) * (1.0 - fresnel)) * smoothstep(0.0, 0.12, vWaterDepth);
+          dAlpha = max(dAlpha, foam);`,
+        gloss: `
+          vec2 flow = vWaterUv - vec2(uTime * 0.92, 0.0);
+          float eddy = waterEddy(flow);
+          float foam = waterFoam(flow, eddy, vWaterDepth);
+          dGlossiness = clamp(0.87 - 0.021 * eddy - foam * 0.34, 0.0, 1.0);`,
+      });
 
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.name = 'river_water';
-      mesh.renderOrder = 2;
-      mesh.receiveShadow = true;
-      mesh.castShadow = false;
-      mesh.frustumCulled = false; // 1.3 km strip; cheap enough to always draw
-      this.root.add(mesh);
+      const mesh = meshNode(geo, mat, this.root, { name: 'river_water', castShadows: false, receiveShadows: true });
+      mesh.render!.meshInstances[0].drawOrder = 2;
+      mesh.render!.meshInstances[0].cull = false;
     }
   }
 
   private addBatchedStaticModel(
-    template: THREE.Object3D,
-    worldMatrices: readonly THREE.Matrix4[],
+    template: Entity,
+    worldMatrices: readonly Mat4[],
     castShadow: boolean,
     colliders: readonly ObstacleCollider[]
   ): void {
     if (worldMatrices.length === 0) return;
-    template.updateMatrixWorld(true);
-    const invRoot = new THREE.Matrix4().copy(template.matrixWorld).invert();
-    const localMat = new THREE.Matrix4();
-    const finalMat = new THREE.Matrix4();
-    const parts: { mesh: THREE.InstancedMesh; local: THREE.Matrix4 }[] = [];
+    const invRoot = new Mat4().copy(template.getWorldTransform()).invert();
+    const localMat = new Mat4();
+    const finalMat = new Mat4();
+    const parts: { mesh: InstancedMesh; local: Mat4 }[] = [];
 
-    template.traverse((obj) => {
-      if (!(obj as THREE.Mesh).isMesh) return;
-      const mesh = obj as THREE.Mesh;
-      localMat.multiplyMatrices(invRoot, mesh.matrixWorld);
-      const inst = new THREE.InstancedMesh(mesh.geometry, mesh.material, worldMatrices.length);
-      inst.castShadow = castShadow;
-      inst.receiveShadow = true;
-      inst.matrixAutoUpdate = false;
-      for (let i = 0; i < worldMatrices.length; i++) {
-        finalMat.multiplyMatrices(worldMatrices[i], localMat);
-        inst.setMatrixAt(i, finalMat);
+    template.forEach((obj) => {
+      for (const mi of (obj as Entity).render?.meshInstances ?? []) {
+        if (!mi.mesh || !mi.material) continue;
+        localMat.mul2(invRoot, (obj as Entity).getWorldTransform());
+        const inst = new InstancedMesh(mi.mesh, mi.material, worldMatrices.length, {
+          parent: this.root, castShadows: castShadow, receiveShadows: true,
+        });
+        for (let i = 0; i < worldMatrices.length; i++) {
+          finalMat.mul2(worldMatrices[i], localMat);
+          inst.setMatrixAt(i, finalMat);
+        }
+        inst.update();
+        parts.push({ mesh: inst, local: localMat.clone() });
       }
-      inst.instanceMatrix.needsUpdate = true;
-      inst.computeBoundingSphere();
-      this.root.add(inst);
-      parts.push({ mesh: inst, local: localMat.clone() });
     });
     for (let i = 0; i < colliders.length; i++) {
       this.obstacles.push(colliders[i]);
@@ -1084,14 +959,10 @@ export class World implements TerrainQuery {
 
   private placeRuinedBuilding(id: string, x: number, z: number, yaw: number): void {
     const y = this.getHeightAt(x, z);
-    const bldg = this.assets.models.ruined_building.clone(true);
-    bldg.position.set(x, y, z);
-    bldg.rotation.y = yaw;
-    bldg.updateMatrixWorld(true);
-    bldg.traverse((o) => {
-      o.matrixAutoUpdate = false;
-    });
-    this.root.add(bldg);
+    const bldg = this.assets.models.ruined_building.clone();
+    bldg.setLocalPosition(x, y, z);
+    setLocalEulerRad(bldg, 0, yaw, 0);
+    this.root.addChild(bldg);
 
     // Verified from asset_report.json: ruined_building bounds center is [+1.56, 6.43, +2.47]
     const cosY = Math.cos(yaw);
@@ -1117,14 +988,10 @@ export class World implements TerrainQuery {
 
   private placeFuelStation(id: string, x: number, z: number, yaw: number): void {
     const y = this.getHeightAt(x, z);
-    const station = this.assets.models.fuel_station.clone(true);
-    station.position.set(x, y, z);
-    station.rotation.y = yaw;
-    station.updateMatrixWorld(true);
-    station.traverse((o) => {
-      o.matrixAutoUpdate = false;
-    });
-    this.root.add(station);
+    const station = this.assets.models.fuel_station.clone();
+    station.setLocalPosition(x, y, z);
+    setLocalEulerRad(station, 0, yaw, 0);
+    this.root.addChild(station);
 
     this.obstacles.push({
       id,
@@ -1142,12 +1009,10 @@ export class World implements TerrainQuery {
 
   private placeGuardTower(id: string, x: number, z: number, yaw: number): void {
     const y = this.getHeightAt(x, z);
-    const towerAssembly = this.assets.models.guard_tower.clone(true);
-    towerAssembly.position.set(x, y, z);
-    towerAssembly.rotation.y = yaw;
-    towerAssembly.updateMatrixWorld(true);
-    towerAssembly.traverse((o) => { o.matrixAutoUpdate = false; });
-    this.root.add(towerAssembly);
+    const towerAssembly = this.assets.models.guard_tower.clone();
+    towerAssembly.setLocalPosition(x, y, z);
+    setLocalEulerRad(towerAssembly, 0, yaw, 0);
+    this.root.addChild(towerAssembly);
 
     // Main 5.8x5.8m tower at local [0, 0, 0]
     this.obstacles.push({
@@ -1164,11 +1029,16 @@ export class World implements TerrainQuery {
     });
 
     // Checkpoint barrier gate sub-assembly at local [+7.5, 0, 0] (destructible if rammed!)
-    const gateNode = towerAssembly.getObjectByName('barrier_gate');
+    const gateNode = findByName(towerAssembly, 'barrier_gate');
     if (gateNode) {
-      // The gate can fall on its own, and remains standing if only the tower is hit.
-      this.root.attach(gateNode);
-      gateNode.matrixAutoUpdate = true;
+      // Reparent without changing the gate's world pose so it can fall independently.
+      const world = gateNode.getWorldTransform().clone();
+      this.root.addChild(gateNode);
+      const p = new Vec3(), q = new Quat(), s = new Vec3();
+      decomposeMat(world, p, q, s);
+      gateNode.setLocalPosition(p);
+      gateNode.setLocalRotation(q);
+      gateNode.setLocalScale(s);
       const cosY = Math.cos(yaw);
       const sinY = Math.sin(yaw);
       const gx = x + 7.5 * cosY;
@@ -1215,76 +1085,40 @@ export class World implements TerrainQuery {
    * Builds 7,500 lightweight GPU-instanced 4-blade grass clumps in a single fast draw call.
    */
   private buildInstancedSteppeGrass(): void {
-    const bladeCount = 4;
-    const positions: number[] = [];
-    const normals: number[] = [];
-    const colors: number[] = [];
-
-    const rootCol = new THREE.Color('#2d381d');
-    const tipCol = new THREE.Color('#778348');
-
+    const bladeCount = 4, positions: number[] = [], normals: number[] = [], colors: number[] = [];
+    const rootCol = linearColor('#2d381d'), tipCol = linearColor('#778348');
     for (let b = 0; b < bladeCount; b++) {
-      const ang = (b / bladeCount) * Math.PI * 2 + b * 0.43;
-      const lean = 0.09 + (b % 3) * 0.055;
-      const h = 0.24 + (b % 4) * 0.065;
-      const hw = 0.024;
-
-      const cosA = Math.cos(ang);
-      const sinA = Math.sin(ang);
-      const offX = cosA * 0.06;
-      const offZ = sinA * 0.06;
-
-      const lx = offX - sinA * hw;
-      const lz = offZ + cosA * hw;
-      const rx = offX + sinA * hw;
-      const rz = offZ - cosA * hw;
-      const tx = offX + cosA * lean;
-      const tz = offZ + sinA * lean;
-
+      const ang = b / bladeCount * Math.PI * 2 + b * 0.43;
+      const lean = 0.09 + (b % 3) * 0.055, h = 0.24 + (b % 4) * 0.065, hw = 0.024;
+      const cosA = Math.cos(ang), sinA = Math.sin(ang), offX = cosA * 0.06, offZ = sinA * 0.06;
+      const lx = offX - sinA * hw, lz = offZ + cosA * hw;
+      const rx = offX + sinA * hw, rz = offZ - cosA * hw;
+      const tx = offX + cosA * lean, tz = offZ + sinA * lean;
       positions.push(lx, 0, lz, rx, 0, rz, tx, h, tz);
       normals.push(0, 1, 0, 0, 1, 0, 0, 1, 0);
-      colors.push(rootCol.r, rootCol.g, rootCol.b, rootCol.r, rootCol.g, rootCol.b, tipCol.r, tipCol.g, tipCol.b);
+      colors.push(rootCol.r, rootCol.g, rootCol.b, 1, rootCol.r, rootCol.g, rootCol.b, 1, tipCol.r, tipCol.g, tipCol.b, 1);
     }
-
-    const tuftGeo = new THREE.BufferGeometry();
-    tuftGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    tuftGeo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
-    tuftGeo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-    tuftGeo.computeBoundingSphere();
-
-    const tuftMat = new THREE.MeshLambertMaterial({
-      vertexColors: true,
-      side: THREE.DoubleSide,
+    const tuftGeo = new Geo(positions, normals);
+    tuftGeo.colors = colors;
+    const tuftMat = standard({ vertexColors: true, doubleSided: true });
+    enableInstanceColor(tuftMat);
+    tuftMat.setParameter('uTime', 0);
+    this.animatedMaterials.push(tuftMat);
+    addShaderHooks(tuftMat, {
+      vsDecl: 'uniform float uTime;',
+      vsLocalPosition: `
+        vec3 instWorld = getModelMatrix()[3].xyz;
+        float swayWeight = clamp(vertex_position.y * 2.4, 0.0, 1.0);
+        float gust = sin(uTime * 2.0 + instWorld.x * 0.14 + instWorld.z * 0.11) * 0.07;
+        localPos.x += gust * swayWeight;
+        localPos.z += gust * 0.5 * swayWeight;`,
     });
-
-    tuftMat.onBeforeCompile = (shader) => {
-      shader.uniforms.uTime = this.grassTimeUniform;
-      shader.vertexShader = shader.vertexShader
-        .replace(
-          '#include <common>',
-          `#include <common>
-          uniform float uTime;`
-        )
-        .replace(
-          '#include <begin_vertex>',
-          `#include <begin_vertex>
-          vec3 instWorld = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
-          float swayWeight = clamp(position.y * 2.4, 0.0, 1.0);
-          float gust = sin(uTime * 2.0 + instWorld.x * 0.14 + instWorld.z * 0.11) * 0.07;
-          transformed.x += gust * swayWeight;
-          transformed.z += gust * 0.5 * swayWeight;`
-        );
-    };
-
-    const inst = new THREE.InstancedMesh(tuftGeo, tuftMat, World.GRASS_CAPACITY);
-    inst.name = 'steppe_grass_instanced';
-    inst.receiveShadow = false;
-    inst.castShadow = false;
+    const inst = new InstancedMesh(tuftGeo, tuftMat, World.GRASS_CAPACITY, {
+      name: 'steppe_grass_instanced', parent: this.root, color: true, castShadows: false, receiveShadows: false,
+    });
     inst.count = 0;
-    inst.frustumCulled = false; // instance disc follows the camera; geometry bounds are meaningless
-    inst.setColorAt(0, new THREE.Color(1, 1, 1)); // allocate instanceColor buffer once
+    inst.update();
     this.grassMesh = inst;
-    this.root.add(inst);
   }
 
   /** Deterministic tuft candidates for one 40 m chunk; null when the chunk is bare. */
@@ -1298,8 +1132,7 @@ export class World implements TerrainQuery {
     const maxTufts = 90;
     const mats = new Float32Array(maxTufts * 16);
     const cols = new Float32Array(maxTufts * 3);
-    const dummy = new THREE.Object3D();
-    const tint = new THREE.Color();
+    const dummy = new Entity();
     let count = 0;
 
     for (let i = 0; i < 240 && count < maxTufts; i++) {
@@ -1325,22 +1158,16 @@ export class World implements TerrainQuery {
       if (n.y < 0.84) continue;
 
       const sc = 0.75 + hash2(cx * 3.1 + i * 7.7, cz * 5.3 + i * 2.9) * 0.72;
-      dummy.position.set(gx, gy - 0.015, gz);
-      dummy.rotation.set(0, hash2(cx * 9.7 + i, cz * 4.1 + i * 3.3) * Math.PI * 2, 0);
-      dummy.scale.setScalar(sc);
-      dummy.updateMatrix();
-      const e = dummy.matrix.elements;
+      dummy.setLocalPosition(gx, gy - 0.015, gz);
+      setLocalEulerRad(dummy, 0, hash2(cx * 9.7 + i, cz * 4.1 + i * 3.3) * Math.PI * 2, 0);
+      dummy.setLocalScale(sc, sc, sc);
+      const e = dummy.getWorldTransform().data;
       for (let j = 0; j < 16; j++) mats[count * 16 + j] = e[j];
 
       const dry = valueNoise(gx * 0.055 + 11.3, gz * 0.055 + 11.3);
-      tint.setRGB(
-        THREE.MathUtils.lerp(0.82, 1.12, dry),
-        THREE.MathUtils.lerp(0.92, 1.00, dry),
-        THREE.MathUtils.lerp(0.74, 0.80, dry)
-      );
-      cols[count * 3] = tint.r;
-      cols[count * 3 + 1] = tint.g;
-      cols[count * 3 + 2] = tint.b;
+      cols[count * 3] = lerp(0.82, 1.12, dry);
+      cols[count * 3 + 1] = lerp(0.92, 1.00, dry);
+      cols[count * 3 + 2] = lerp(0.74, 0.80, dry);
       count++;
     }
 
@@ -1357,8 +1184,7 @@ export class World implements TerrainQuery {
     const inst = this.grassMesh;
     if (!inst) return;
     const stride = this.grassDensity >= 0.99 ? 1 : Math.max(1, Math.round(1 / this.grassDensity));
-    const matArr = inst.instanceMatrix.array as Float32Array;
-    const colArr = (inst.instanceColor?.array ?? null) as Float32Array | null;
+    const data = inst.data, instanceStride = inst.stride;
     let out = 0;
     const cap = World.GRASS_CAPACITY;
 
@@ -1366,30 +1192,20 @@ export class World implements TerrainQuery {
       const ch = this.grassChunks.get(k);
       if (!ch) continue;
       for (let i = 0; i < ch.count && out < cap; i += stride) {
-        const so = i * 16;
-        const dof = out * 16;
-        for (let j = 0; j < 16; j++) matArr[dof + j] = ch.mats[so + j];
-        if (colArr) {
-          const sc = i * 3;
-          const dc = out * 3;
-          colArr[dc] = ch.cols[sc];
-          colArr[dc + 1] = ch.cols[sc + 1];
-          colArr[dc + 2] = ch.cols[sc + 2];
-        }
+        const so = i * 16, dof = out * instanceStride;
+        for (let j = 0; j < 16; j++) data[dof + j] = ch.mats[so + j];
+        data[dof + 16] = ch.cols[i * 3];
+        data[dof + 17] = ch.cols[i * 3 + 1];
+        data[dof + 18] = ch.cols[i * 3 + 2];
+        data[dof + 19] = 1;
         out++;
       }
       if (out >= cap) break;
     }
 
     inst.count = out;
-    inst.instanceMatrix.clearUpdateRanges();
-    inst.instanceMatrix.addUpdateRange(0, out * 16);
-    inst.instanceMatrix.needsUpdate = true;
-    if (inst.instanceColor) {
-      inst.instanceColor.clearUpdateRanges();
-      inst.instanceColor.addUpdateRange(0, out * 3);
-      inst.instanceColor.needsUpdate = true;
-    }
+    inst.markDirty();
+    inst.update();
   }
 
   /** Camera-following grass streaming: one new chunk computed per frame max. */
@@ -1416,6 +1232,7 @@ export class World implements TerrainQuery {
           this.grassNeeded.add((cx + 32) * 128 + (cz + 32));
         }
       }
+      this.grassComputeQueue.length = 0;
       this.grassDirty = true;
     }
 
@@ -1459,13 +1276,18 @@ export class World implements TerrainQuery {
     if (obstacle.damage < durability) return false;
     obstacle.destroyed = true;
     const batch = this.propBatchSlots.get(obstacle);
-    const mesh = obstacle.mesh ?? (batch ? new THREE.Object3D() : null);
+    const mesh = obstacle.mesh ?? (batch ? new Entity() : null);
     if (mesh) {
-      if (batch) batch.world.decompose(mesh.position, mesh.quaternion, mesh.scale);
-      mesh.matrixAutoUpdate = true;
+      if (batch) {
+        const p = new Vec3(), q = new Quat(), s = new Vec3();
+        decomposeMat(batch.world, p, q, s);
+        mesh.setLocalPosition(p);
+        mesh.setLocalRotation(q);
+        mesh.setLocalScale(s);
+      }
       const axis = dirX * dirX + dirZ * dirZ > 0.001
-        ? new THREE.Vector3(dirZ, 0, -dirX).normalize()
-        : new THREE.Vector3(1, 0, 0);
+        ? new Vec3(dirZ, 0, -dirX).normalize()
+        : new Vec3(1, 0, 0);
       const collapse = !obstacle.lightCover;
       this.fallingProps.push({
         mesh,
@@ -1474,7 +1296,7 @@ export class World implements TerrainQuery {
         angVel: collapse ? 0.1 : obstacle.kind === 'tree' ? 1.35 : 3.2,
         maxAngle: collapse ? 0.3 : Math.PI * 0.48,
         sinkY: collapse ? Math.min(0.6, obstacle.height * 0.1) : obstacle.kind === 'crates' ? 0.55 : 0.05,
-        startScaleY: mesh.scale.y,
+        startScaleY: mesh.getLocalScale().y,
         collapse,
         obstacle,
         batch,
@@ -1499,19 +1321,13 @@ export class World implements TerrainQuery {
   private scatterRubble(o: ObstacleCollider): void {
     const capacity = 800;
     if (!this.rubble) {
-      this.rubble = new THREE.InstancedMesh(
-        new THREE.DodecahedronGeometry(1, 0),
-        new THREE.MeshStandardMaterial({ roughness: 0.94 }),
-        capacity
-      );
-      this.rubble.name = 'scenery_rubble';
+      const material = standard({ roughness: 0.94 });
+      enableInstanceColor(material);
+      this.rubble = new InstancedMesh(dodecahedron(1, 0), material, capacity, {
+        name: 'scenery_rubble', parent: this.root, color: true, castShadows: false, receiveShadows: true,
+      });
       this.rubble.count = 0;
-      this.rubble.frustumCulled = false;
-      this.rubble.receiveShadow = true;
-      this.root.add(this.rubble);
     }
-    const piece = new THREE.Object3D();
-    const color = new THREE.Color();
     const count = Math.min(18, 5 + Math.ceil(o.radius));
     for (let i = 0; i < count; i++) {
       const a = i * 2.39996 + o.x;
@@ -1519,24 +1335,20 @@ export class World implements TerrainQuery {
       const x = o.x + Math.sin(a) * r, z = o.z + Math.cos(a) * r;
       const size = Math.min(1.6, o.radius * 0.38) * (0.63 + 0.75 * hash2(i, o.x));
       const shade = 0.39 + hash2(i, o.z) * 0.16;
-      color.setRGB(shade, shade * 0.92, shade * 0.79, THREE.SRGBColorSpace);
-      piece.position.set(x, this.getHeightAt(x, z) + size * 0.17, z);
-      piece.rotation.set(i * 1.7, a, i * 0.54);
-      piece.scale.set(size, size * 0.58, size * 0.83);
-      piece.updateMatrix();
-      this.rubble.setMatrixAt(this.rubbleIndex, piece.matrix);
-      this.rubble.setColorAt(this.rubbleIndex, color);
+      const matrix = composeMat(new Mat4(), new Vec3(x, this.getHeightAt(x, z) + size * 0.17, z),
+        quatFromEuler(new Quat(), i * 1.7, a, i * 0.54), new Vec3(size, size * 0.58, size * 0.83));
+      this.rubble.setMatrixAt(this.rubbleIndex, matrix);
+      this.rubble.setColorAt(this.rubbleIndex, shade, shade * 0.92, shade * 0.79);
       this.rubbleIndex = (this.rubbleIndex + 1) % capacity;
     }
     this.rubble.count = Math.min(capacity, this.rubble.count + count);
-    this.rubble.instanceMatrix.needsUpdate = true;
-    if (this.rubble.instanceColor) this.rubble.instanceColor.needsUpdate = true;
+    this.rubble.update();
   }
 
   /** Dev/bench counter: total raycastWorld calls (reset via bench tooling). */
   public raycastCount = 0;
 
-  public raycastWorld(origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number): WorldRayHit | null {
+  public raycastWorld(origin: Vec3, dir: Vec3, maxDist: number): WorldRayHit | null {
     this.raycastCount++;
     let bestDist = maxDist;
     let hitKind: 'terrain' | 'obstacle' | null = null;
@@ -1582,7 +1394,7 @@ export class World implements TerrainQuery {
       hitKind = 'obstacle';
       hitObs = obs;
       hitPoint.set(origin.x + dx * t, origin.y + dy * t, origin.z + dz * t);
-      if (t === 0) hitNormal.copy(dir).negate();
+      if (t === 0) negate(hitNormal.copy(dir));
       else if (cap) hitNormal.set(0, -Math.sign(dy), 0);
       else hitNormal.set(hitPoint.x - obs.x, 0, hitPoint.z - obs.z).normalize();
     }
@@ -1636,19 +1448,19 @@ export class World implements TerrainQuery {
   public getSafeSpawnPoint(
     preferRadiusMin: number,
     preferRadiusMax: number,
-    avoidPoints: readonly THREE.Vector3[],
+    avoidPoints: readonly Vec3[],
     center?: { x: number; z: number }
-  ): THREE.Vector3 {
+  ): Vec3 {
     const cx0 = center?.x ?? 0;
     const cz0 = center?.z ?? 0;
-    const best = new THREE.Vector3(cx0, 0, cz0);
+    const best = new Vec3(cx0, 0, cz0);
     let bestScore = -Infinity;
 
     for (let attempt = 0; attempt < 42; attempt++) {
       const ang = Math.random() * Math.PI * 2;
-      const rad = THREE.MathUtils.lerp(preferRadiusMin, preferRadiusMax, Math.random());
-      const cx = THREE.MathUtils.clamp(cx0 + Math.cos(ang) * rad, -this.worldHalfSize + 24, this.worldHalfSize - 24);
-      const cz = THREE.MathUtils.clamp(cz0 + Math.sin(ang) * rad, -this.worldHalfSize + 24, this.worldHalfSize - 24);
+      const rad = lerp(preferRadiusMin, preferRadiusMax, Math.random());
+      const cx = clamp(cx0 + Math.cos(ang) * rad, -this.worldHalfSize + 24, this.worldHalfSize - 24);
+      const cz = clamp(cz0 + Math.sin(ang) * rad, -this.worldHalfSize + 24, this.worldHalfSize - 24);
 
       // Must be clear of solid obstacles
       let blocked = false;
@@ -1685,9 +1497,10 @@ export class World implements TerrainQuery {
     return best;
   }
 
-  public update(dt: number, shadowFocusPos: THREE.Vector3, grassFocusPos?: THREE.Vector3): void {
+  public update(dt: number, shadowFocusPos: Vec3, grassFocusPos?: Vec3): void {
     this.elapsedTime += dt;
     this.grassTimeUniform.value = this.elapsedTime;
+    for (const material of this.animatedMaterials) material.setParameter('uTime', this.elapsedTime);
     this.updateGrass((grassFocusPos ?? shadowFocusPos).x, (grassFocusPos ?? shadowFocusPos).z);
 
     // Only update sun shadow frustum when player moves onto a new 3m cell
@@ -1698,9 +1511,7 @@ export class World implements TerrainQuery {
       this.lastShadowSnapX = fx;
       this.lastShadowSnapZ = fz;
       const fy = this.getHeightAt(fx, fz);
-      this.sunLight.target.position.set(fx, fy, fz);
-      this.sunLight.position.set(fx + 110, fy + 145, fz - 85);
-      this.sunLight.target.updateMatrixWorld();
+      this.sunLight.setPosition(fx + 110, fy + 145, fz - 85);
     }
 
     // Animate toppling trees / crushed crates
@@ -1709,15 +1520,18 @@ export class World implements TerrainQuery {
       fp.angVel += 4.2 * dt;
       const step = Math.min(fp.angVel * dt, fp.maxAngle - fp.angle);
       fp.angle += step;
-      fp.mesh.rotateOnWorldAxis(fp.axis, step);
-      fp.mesh.position.y -= fp.sinkY * (step / fp.maxAngle);
-      if (fp.collapse) fp.mesh.scale.y = fp.startScaleY * (1 - 0.91 * fp.angle / fp.maxAngle);
+      fp.mesh.setRotation(quatFromAxisAngle(new Quat(), fp.axis, step).mul(fp.mesh.getRotation()));
+      const position = fp.mesh.getLocalPosition();
+      fp.mesh.setLocalPosition(position.x, position.y - fp.sinkY * (step / fp.maxAngle), position.z);
+      if (fp.collapse) {
+        const scale = fp.mesh.getLocalScale();
+        fp.mesh.setLocalScale(scale.x, fp.startScaleY * (1 - 0.91 * fp.angle / fp.maxAngle), scale.z);
+      }
       if (fp.batch) {
-        fp.mesh.updateMatrix();
         for (const { mesh, local } of fp.batch.parts) {
-          this.propInstanceMatrix.multiplyMatrices(fp.mesh.matrix, local);
+          this.propInstanceMatrix.mul2(fp.mesh.getWorldTransform(), local);
           mesh.setMatrixAt(fp.batch.index, this.propInstanceMatrix);
-          mesh.instanceMatrix.needsUpdate = true;
+          mesh.update();
         }
       }
       if (fp.angle >= fp.maxAngle - 0.001) {
