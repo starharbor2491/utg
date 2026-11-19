@@ -25,7 +25,13 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node scripts/damage-selftest.mjs
-      - run: npm run build
+      - run: npm run build:single
+      - name: Include offline game and UX audit
+        run: |
+          cp untitled-tank-game.html dist/
+          mkdir -p dist/docs
+          cp docs/UX-AUDIT.md dist/docs/
+          cp -R docs/ux-evidence dist/docs/
       - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
         with:
           path: dist

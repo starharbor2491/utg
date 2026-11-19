@@ -1,7 +1,7 @@
 import type { Entity, Material } from 'playcanvas';
 import { applyRealisticArmorShader } from '../engine/materials';
 import type { InstantiatedTankRig } from '../AssetLoader';
-import { buildRocketChassis } from './RocketLauncher';
+import { addSixWheels, SIX_WHEEL_BASE } from './SixWheelBase';
 import type { Team } from '../types';
 import { box, CatmullRomCurve3, cylinder, extrude, Geo, roundedBox, Shape, sphere, torus, tube } from '../engine/geometry';
 import { standard } from '../engine/materials';
@@ -101,54 +101,127 @@ export function buildFpvDrone(armed = false): Entity {
   return g;
 }
 
+/** Extrude a side elevation (longitudinal Z, height Y), centred on the given X. */
+function sidePanel(points: readonly (readonly [number, number])[], width: number, x = 0) {
+  const outline = new Shape(points.map(([z, y]) => new Vec2(z, y)));
+  return extrude(outline, { depth: width, bevelEnabled: false }).rotateY(-Math.PI / 2).translate(x + width / 2, 0, 0);
+}
+
 export function buildSupportVehicleRig(team: Team): InstantiatedTankRig {
-  const ch = buildRocketChassis(team);
-  const { root, hullTiltGroup, visualRoot, wheels, steerNodes, hullMeshes } = ch;
-  const paint = bedMat(team === 'blue' ? '#55675c' : '#796353', 0.62, 0.28);
-  const steel = bedMat('#333d3c', 0.48, 0.68);
-  const rubber = bedMat('#1b2323', 0.86, 0.14);
-  const stencil = bedMat('#d9ac65', 0.7, 0.2);
-  const lens = standard({ color: '#172322', emissive: '#8cbea2', emissiveIntensity: 1.1 });
-  const deck = new GeoBucket();
-  deck.rbox(paint, 2.22, 0.37, 4.35, 0.09, 0, 1.57, -1.03);
-  deck.rbox(steel, 2.13, 0.16, 3.96, 0.05, 0, 1.78, -1.09);
-  // Forward battery/operations cabinet and twin recessed launch pads aft.
-  deck.rbox(paint, 2.11, 0.92, 1.34, 0.14, 0, 2.23, 0.33);
-  deck.rbox(rubber, 1.96, 0.10, 1.15, 0.04, 0, 2.70, 0.36);
-  deck.rbox(steel, 1.48, 0.57, 0.08, 0.04, 0, 2.25, -0.36);
-  for (const sx of [-1, 1]) {
-    const x = sx * 0.53;
-    deck.rbox(paint, 0.17, 0.42, 2.85, 0.04, sx * 1.02, 1.99, -1.71);
-    deck.rbox(rubber, 0.86, 0.065, 1.30, 0.04, x, 1.89, -2.24);
-    deck.rbox(steel, 0.72, 0.07, 0.38, 0.025, x, 1.94, -2.27);
-    deck.box(lens, 0.37, 0.032, 0.05, x, 1.96, -2.93);
-    for (const sz of [-1, 1]) {
-      deck.box(stencil, 0.68, 0.012, 0.052, x, 1.934, -2.24 + sz * 0.60);
-      deck.box(stencil, 0.052, 0.012, 0.32, x + sz * 0.35, 1.934, -2.24);
+  const root = group(`drone_carrier_${team}`);
+  const hullTiltGroup = group('hull_tilt_group', root);
+  const visualRoot = group('carrier_visual', hullTiltGroup);
+  const hullMeshes: Entity[] = [];
+  const { wheels, steerNodes } = addSixWheels(visualRoot, hullMeshes);
+  const blue = team === 'blue';
+  const paint = bedMat(blue ? '#45666b' : '#885744', 0.66, 0.23);
+  const light = bedMat(blue ? '#a2b7ae' : '#c1ac86', 0.64, 0.24);
+  const steel = bedMat('#384446', 0.53, 0.55);
+  const tread = bedMat('#273033', 0.89, 0.12);
+  const ivory = bedMat('#e2d7ad', 0.78, 0.12);
+  const glass = standard({ color: '#16313d', roughness: 0.18, metalness: 0.40 });
+  applySurfaceFinish(glass, 'glass');
+  const lamp = standard({ color: '#d4e2d9', emissive: '#8dbdad', emissiveIntensity: 0.65 });
+  const tail = standard({ color: '#8e493b', emissive: '#a63826', emissiveIntensity: 0.65 });
+  const body = new GeoBucket();
+
+  // A continuous wheel-arch skirt and a raked nose replace the separate cargo cab.
+  const skirt: [number, number][] = [[-3.46, 1.54], [-3.33, 0.78]];
+  for (const z of [...SIX_WHEEL_BASE.axleZ].reverse()) {
+    for (let i = 0; i <= 12; i++) {
+      const a = i * Math.PI / 12;
+      skirt.push([z - 0.68 * Math.cos(a), 0.62 + 0.68 * Math.sin(a)]);
     }
-    for (let i = 0; i < 6; i++) {
-      deck.box(steel, 0.035, 0.10, 0.25, sx * 1.066, 2.25 + (i % 2) * 0.14, 0.72 - Math.floor(i / 2) * 0.29);
-      deck.box(stencil, 0.097, 0.048, 0.01, sx * (0.76 + (i % 3) * 0.106), 1.97 + Math.floor(i / 3) * 0.065, -3.142, 0, 0, -0.51);
-    }
-    deck.cyl(steel, 0.034, 0.044, 0.69, 8, sx * 0.84, 2.94, 0.65, 0, 0, sx * -0.17);
-    deck.cyl(rubber, 0.014, 0.025, 0.31, 6, sx * 0.92, 3.40, 0.65, 0, 0, sx * -0.17);
-    deck.rbox(steel, 0.31, 0.32, 0.40, 0.045, x, 2.03, -0.69);
-    deck.box(lens, 0.16, 0.04, 0.016, x, 2.12, -0.90);
   }
-  deck.rbox(steel, 1.73, 0.21, 0.17, 0.025, 0, 1.66, -3.18, 0.25);
-  deck.box(steel, 0.07, 0.21, 2.13, 0, 1.92, -1.91);
-  for (let i = 0; i < 4; i++) deck.box(steel, 1.78, 0.024, 0.07, 0, 1.87, -1.06 - i * 0.14);
-  deck.flush(hullTiltGroup, hullMeshes);
+  skirt.push([3.31, 0.85], [3.53, 1.26], [3.36, 1.55]);
+  body.rbox(tread, 1.64, 0.68, 6.58, 0.12, 0, 0.91, -0.04);
+  body.rbox(steel, 2.13, 0.25, 6.88, 0.10, 0, 1.38, -0.02);
+  for (const z of SIX_WHEEL_BASE.axleZ) body.cyl(steel, 0.12, 0.12, 1.93, 12, 0, 0.58, z, 0, 0, Math.PI / 2);
+  for (const s of [-1, 1]) {
+    body.put(paint, sidePanel(skirt, 0.14, s * 1.13));
+    body.rbox(steel, 0.13, 0.13, 6.72, 0.04, s * 1.19, 1.50, -0.06);
+    body.rbox(tread, 0.09, 0.43, 1.02, 0.035, s * 1.22, 0.97, 0.65);
+    body.box(light, 0.04, 0.07, 0.28, s * 1.275, 1.07, 0.68);
+    for (const z of [-3.12, 0.12, 3.12]) body.box(lamp, 0.024, 0.047, 0.11, s * 1.265, 1.49, z);
+  }
 
-  const fpv = buildFpvDrone(), gun = buildFpvDrone(true);
-  fpv.setLocalPosition(0.53, 2.02, -2.26);
-  gun.setLocalPosition(-0.53, 2.18, -2.26);
-  hullTiltGroup.addChild(fpv);
-  hullTiltGroup.addChild(gun);
+  const cabin = [[0.04, 1.48], [0.06, 2.07], [0.32, 2.71], [0.56, 2.81],
+    [2.48, 2.81], [2.70, 2.64], [3.49, 1.58], [3.34, 1.40]] as const;
+  body.put(paint, sidePanel(cabin, 2.20));
+  const roof = [[0.29, 2.69], [0.52, 2.85], [2.49, 2.85], [2.73, 2.66], [2.60, 2.65], [2.43, 2.75], [0.58, 2.75], [0.38, 2.66]] as const;
+  body.put(light, sidePanel(roof, 2.26));
+  const rake = -Math.atan2(0.79, 1.06);
+  body.rbox(tread, 2.14, 0.91, 0.044, 0.045, 0, 2.15, 3.09, rake);
+  for (const s of [-1, 1]) {
+    body.rbox(glass, 0.986, 0.77, 0.044, 0.038, s * 0.512, 2.17, 3.104, rake);
+    body.put(steel, sidePanel([[1.41, 1.55], [1.42, 2.06], [1.81, 2.11], [2.90, 2.01], [3.04, 1.72], [2.87, 1.55]], 0.022, s * 1.106));
+    body.put(paint, sidePanel([[1.46, 1.59], [1.47, 2.02], [1.83, 2.07], [2.87, 1.98], [2.98, 1.73], [2.84, 1.59]], 0.021, s * 1.119));
+    body.put(tread, sidePanel([[0.30, 2.19], [0.47, 2.63], [2.53, 2.63], [3.02, 1.97], [1.77, 1.97]], 0.027, s * 1.106));
+    body.put(glass, sidePanel([[1.53, 2.16], [1.55, 2.56], [2.47, 2.56], [2.87, 2.04], [1.82, 2.04]], 0.024, s * 1.125));
+    body.put(glass, sidePanel([[0.43, 2.23], [0.57, 2.56], [1.42, 2.56], [1.40, 2.14]], 0.024, s * 1.125));
+    body.put(light, sidePanel([[0.40, 1.79], [0.39, 1.92], [1.87, 1.75], [2.05, 1.60]], 0.018, s * 1.11));
+    body.box(steel, 0.048, 0.048, 0.22, s * 1.149, 1.85, 1.66);
+    body.rbox(steel, 0.23, 0.075, 0.67, 0.02, s * 1.13, 0.64, 1.17);
+    for (const z of [0.97, 1.38]) body.box(steel, 0.16, 0.19, 0.08, s * 1.045, 0.74, z);
+    for (let i = 0; i < 6; i++) body.box(tread, 0.028, 0.096, 0.056, s * 1.213, 1.41, -2.76 + i * 0.14, -0.32);
+    body.box(tread, 0.49, 0.14, 0.073, s * 0.78, 1.53, 3.465);
+    body.box(lamp, 0.38, 0.064, 0.035, s * 0.78, 1.54, 3.517);
+    body.rbox(steel, 0.62, 0.18, 0.27, 0.04, s * 0.73, 1.22, 3.40);
+  }
+  // Low two-tone comms dome; the aft glazing faces the flight deck.
+  body.cyl(steel, 0.32, 0.38, 0.12, 20, -0.38, 2.90, 1.02);
+  body.rbox(tread, 0.74, 0.09, 0.82, 0.055, 0.42, 2.86, 1.81);
+  for (let i = 0; i < 5; i++) body.box(steel, 0.57, 0.035, 0.039, 0.42, 2.91, 1.54 + i * 0.13);
+  body.rbox(tread, 1.55, 0.44, 0.045, 0.035, 0, 2.38, 0.173, 0.39);
+  body.rbox(glass, 1.40, 0.34, 0.036, 0.03, 0, 2.39, 0.144, 0.39);
+  body.rbox(steel, 1.04, 0.25, 0.06, 0.025, 0, 1.93, 0.039);
+  for (const y of [1.86, 1.93, 2.00]) body.box(paint, 0.93, 0.036, 0.065, 0, y, 0.007, -0.18);
 
-  // The damage model still expects an aim pivot; the carrier has no moving launcher.
+  // A chamfered flight deck carries two staggered spots, with room to see each drone from behind.
+  const deckPlan = new Shape([[-1.23, 3.20], [-0.96, 3.52], [0.96, 3.52], [1.23, 3.20],
+    [1.23, -0.22], [1.05, -0.38], [-1.05, -0.38], [-1.23, -0.22]].map(([x, z]) => new Vec2(x, z)));
+  const deck = extrude(deckPlan, { depth: 0.22, bevelEnabled: false }).rotateX(-Math.PI / 2);
+  body.put(steel, deck, 0, 1.46, 0);
+  body.put(tread, deck, 0, 1.68, -0.02, 0, 0, 0, 0.96, 0.26, 0.97);
+  for (const s of [-1, 1]) {
+    body.rbox(paint, 0.12, 0.18, 3.03, 0.025, s * 1.14, 1.77, -1.54);
+    for (const z of [-2.91, -1.58, -0.37]) body.box(lamp, 0.073, 0.017, 0.20, s * 1.14, 1.866, z);
+    body.rbox(steel, 0.38, 0.22, 0.12, 0.03, s * 0.78, 1.40, -3.48);
+    body.box(tail, 0.26, 0.072, 0.024, s * 0.78, 1.42, -3.548);
+  }
+  const pad = (x: number, z: number, radius: number, number: 1 | 2) => {
+    body.cyl(steel, radius, radius * 0.95, 0.071, 32, x, 1.768, z);
+    body.cyl(tread, radius * 0.94, radius * 0.94, 0.024, 32, x, 1.812, z);
+    const arc = torus(radius * 0.83, 0.030, 5, 12, Math.PI * 0.37).rotateX(-Math.PI / 2);
+    for (let i = 0; i < 4; i++) body.put(ivory, arc, x, 1.827, z, 0, Math.PI * (i / 2 + 0.065), 0, 1, 0.25, 1);
+    // One or two ivory bars repeat the keyboard slot on the lip of each dock.
+    for (let i = 0; i < number; i++) body.box(ivory, 0.055, 0.012, 0.18, x + (i - (number - 1) / 2) * 0.10, 1.832, z - radius * 0.83);
+  };
+  const gunSpot = { x: -0.18, z: -2.35 }, fpvSpot = { x: 0.36, z: -0.78 };
+  pad(gunSpot.x, gunSpot.z, 0.87, 1);
+  pad(fpvSpot.x, fpvSpot.z, 0.55, 2);
+  body.rbox(paint, 0.50, 0.34, 0.79, 0.065, -0.71, 1.89, -0.62);
+  body.box(steel, 0.41, 0.057, 0.67, -0.71, 2.06, -0.62);
+  for (const z of [-0.87, -0.43]) body.box(light, 0.42, 0.012, 0.045, -0.71, 2.095, z);
+  body.flush(visualRoot, hullMeshes);
+
+  const dock = (spot: { x: number; z: number }, armed: boolean) => {
+    const cradle = group(armed ? 'carrier_dock_1' : 'carrier_dock_2', hullTiltGroup);
+    cradle.setLocalPosition(spot.x, 1.824, spot.z);
+    const drone = buildFpvDrone(armed);
+    // Seat the lowest feature of each existing rig on its pad; keep the airborne scale.
+    drone.setLocalPosition(0, armed ? 0.115 : 0.073, 0);
+    cradle.addChild(drone);
+  };
+  dock(gunSpot, true);
+  dock(fpvSpot, false);
+
+  // Use the real sensor dome as the aim pivot; empty turret rigs get a tank-sized fallback box.
   const turretPivot = group('carrier_turret_pivot', hullTiltGroup);
-  turretPivot.setLocalPosition(0, 2.34, 0.35);
+  turretPivot.setLocalPosition(-0.38, 2.98, 1.02);
+  const dome = meshNode(sphere(0.37, 20, 10), light, turretPivot, { name: 'carrier_sensor_dome', castShadows: true, receiveShadows: true });
+  dome.setLocalScale(1, 0.46, 1);
+  hullMeshes.push(dome);
   const turretRestPos = turretPivot.getLocalPosition().clone();
   const gunPivot = group('carrier_gun_pivot', turretPivot);
   const gunRecoilGroup = group('carrier_recoil_group', gunPivot);

@@ -18,6 +18,9 @@ export type VehicleClass = 'normal' | 'heavy' | 'ifv' | 'humvee' | 'rocket' | 's
 
 export type DriveType = 'tracked' | 'wheeled' | 'air';
 
+/** Airframe controls only; turret aim, free-look, drones and collective retain their own response. */
+export const AIRCRAFT_ROTATION_GAIN = 1.6;
+
 export type ObstacleKind = 'building' | 'tower' | 'station' | 'rock' | 'barrier' | 'tree' | 'crates';
 
 export interface ObstacleCollider {

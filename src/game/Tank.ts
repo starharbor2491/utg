@@ -2,6 +2,7 @@ import type { Entity } from 'playcanvas';
 import { instantiateTankRig, type InstantiatedTankRig, type LoadedGameAssets } from './AssetLoader';
 import { applyMat4, applyQuat, Box3, clamp, damp, degToRad, lerp, Mat4, negate, Quat, quatFromEuler, setLocalEulerRad, transformDirection, Vec3, worldToLocal } from './engine/math';
 import { setVisible, userData } from './engine/scene';
+import { AIRCRAFT_ROTATION_GAIN } from './types';
 import {
   DAMAGE_LAYOUTS,
   FIRE_COOKOFF_PER_S,
@@ -1361,8 +1362,8 @@ export class Tank implements TankEntity {
     this.rotorAngle += 35 * rotorDt;
     const yaw = intent?.flightYaw;
     if (yaw !== undefined && !pilotOut) {
-      const maxStep = this.stats.hullTurnRate * dt;
-      const movement = wrapAnglePi(yaw - this.hullYaw) * (1 - Math.exp(-3.7 * dt));
+      const maxStep = this.stats.hullTurnRate * AIRCRAFT_ROTATION_GAIN * dt;
+      const movement = wrapAnglePi(yaw - this.hullYaw) * (1 - Math.exp(-3.7 * AIRCRAFT_ROTATION_GAIN * dt));
       this.hullYaw = wrapAnglePi(this.hullYaw + clamp(movement, -maxStep, maxStep));
     }
     const p = this.position;
@@ -1374,7 +1375,7 @@ export class Tank implements TankEntity {
     const sideSpeed = v.x * cos - v.z * sin;
     const pose = this.hullTilt;
     const control = pilotOut || engineOut ? 0 : Math.sqrt(mobility);
-    const cyclicStep = Math.min(1, this.stats.hullTurnRate / 3) * dt;
+    const cyclicStep = Math.min(1, this.stats.hullTurnRate / 3) * AIRCRAFT_ROTATION_GAIN * dt;
     // Cyclic settings stay where the pilot leaves them; opposite input levels the craft.
     pose.x = wrapAnglePi(pose.x + ((intent?.throttle ?? 0) * 0.95 * cyclicStep + (intent?.flightPitchDelta ?? 0)) * control);
     pose.z = wrapAnglePi(pose.z + ((intent?.flightRollDelta ?? 0) - (intent?.steer ?? 0) * 0.9 * cyclicStep) * control);

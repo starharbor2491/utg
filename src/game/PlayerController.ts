@@ -1,6 +1,7 @@
 import type { Entity } from 'playcanvas';
 import { clamp, quatFromEuler, Quat, radToDeg, Vec3 } from './engine/math';
 import type { TankEntity, TankIntent, TerrainQuery } from './types';
+import { AIRCRAFT_ROTATION_GAIN } from './types';
 
 const BASE_FOV_DEG = 58;
 const DEFAULT_SNIPER_FOV_DEG = 22; // ~2.8x optical magnification
@@ -260,7 +261,7 @@ export class PlayerController {
       // Scale mouse sensitivity naturally with active FOV so 2.8x sniper optic has crisp precision
       const baseSens = 0.0021;
       const fovScale = this._sniperZoom ? (this.sniperFovDeg / BASE_FOV_DEG) * 0.92 : 1.0;
-      const sens = baseSens * fovScale;
+      const sens = baseSens * fovScale * (this.aircraftControls ? AIRCRAFT_ROTATION_GAIN : 1);
 
       if (this.aircraftControls && this.keysDown.has('KeyR')) {
         this.flightRollDelta += dx * sens;

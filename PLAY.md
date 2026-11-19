@@ -8,7 +8,7 @@ Play online at [starharbor2491.github.io/utg](https://starharbor2491.github.io/u
 
 Double-click **`untitled-tank-game.html`** in Finder / File Explorer to open it directly in any modern browser (`file://`) — **no server, no internet connection, no installation, and no other files required**. You can send that single `.html` file by itself to anyone.
 
-*(To rebuild the standalone single-file HTML after code edits, run `npm run build:single`.)*
+Save the [standalone HTML](https://starharbor2491.github.io/utg/untitled-tank-game.html) to play offline. To rebuild it after code edits, run `npm run build:single`.
 
 Choose **Free Play** for a 6v6 match with bots. For **1v1**, choose **Host room** and send the six-character code to a friend. Your friend selects **1v1**, enters the code, and chooses **Join room**. Once connected, each player chooses a vehicle and presses **Play**. Only the two players are in the battle, and opening the menu doesn't pause the duel. Both browsers need internet access for public signaling; restrictive networks can block peer-to-peer connections.
 

@@ -115,14 +115,14 @@ const ROCKET_LAYOUT: ClassDamageLayout = {
   ],
 };
 
-/** Both launch bays are fixed to the carrier's hull. */
+/** Both launch bays and their storage are fixed to the carrier, not the small roof dome. */
 const SUPPORT_LAYOUT: ClassDamageLayout = {
   ...ROCKET_LAYOUT,
-  modules: ROCKET_LAYOUT.modules.map((m) =>
-    m.id === 'launcher'
-      ? { ...m, boxes: [nx(0.09, 0.48, 0.03, 0.91, 0.77, 0.43, HULL, EXT)] }
-      : m
-  ),
+  modules: ROCKET_LAYOUT.modules.map((m) => {
+    if (m.id === 'launcher') return { ...m, boxes: [nx(0.09, 0.48, 0.03, 0.91, 0.77, 0.43, HULL, EXT)] };
+    if (m.id === 'ammo') return { ...m, boxes: [nx(0.19, 0.32, 0.08, 0.81, 0.50, 0.43, HULL)] };
+    return m;
+  }),
 };
 
 export const DAMAGE_LAYOUTS: Record<DamageClass, ClassDamageLayout> = {

@@ -3,18 +3,18 @@ import { applyRealisticArmorShader } from '../engine/materials';
 import type { InstantiatedTankRig, WheelNodeBinding } from '../AssetLoader';
 import type { Team } from '../types';
 import {
-  applyMat4, composeMat, degToRad, Mat4, Quat, quatFromEuler, quatFromUnitVectors,
-  setLocalEulerRad, Vec2, Vec3,
+  applyMat4, degToRad, Mat4, Quat, quatFromUnitVectors, Vec2, Vec3,
 } from '../engine/math';
-import { cone, cylinder, extrude, Geo, lathe, Path, roundedBox, Shape, sphere, torus } from '../engine/geometry';
+import { cone, cylinder, extrude, Geo, lathe, Path, Shape, sphere, torus } from '../engine/geometry';
 import { standard } from '../engine/materials';
 import type { StandardOptions } from '../engine/materials';
 import { group, meshNode } from '../engine/scene';
 import { GeoBucket } from './GeoBucket';
 import { applySurfaceFinish } from './SurfaceFinish';
+import { addSixWheels, SIX_WHEEL_BASE } from './SixWheelBase';
 
 const DIMS = {
-  length: 7.0, width: 2.4, wheelRadius: 0.57, wheelWidth: 0.36, trackX: 1.02, axleZ: [2.3, -0.9, -2.3],
+  length: 7.0, width: 2.4, ...SIX_WHEEL_BASE,
   frameY: 0.86, deckTopY: 1.38, deckHalfW: 0.72, deckZFront: 1.9, deckZRear: -3.45,
   cabZFront: 3.45, cabZRear: 1.75, cabFloorY: 1.15, cabRoofY: 2.36,
   turretY: 1.38, turretZ: -1.48, gunPivotY: 0.90, gunPivotZ: -0.67,
@@ -34,8 +34,7 @@ export interface RocketChassisParts {
   mats: Record<string, StandardMaterial>;
 }
 
-/** Shared 6x6 chassis for the rocket launcher and Drone Carrier. */
-export function buildRocketChassis(team: Team): RocketChassisParts {
+function buildRocketChassis(team: Team): RocketChassisParts {
   const isBlue = team === 'blue';
   const root = group(`rocket_${team}`);
   const hullTiltGroup = group('hull_tilt_group', root);
@@ -66,8 +65,6 @@ export function buildRocketChassis(team: Team): RocketChassisParts {
   const modSteelP = mkMod('#2c2f2c', 0.45, 0.72, 2.7, 'rocket-mod-steel-p');
   const rocketMat = mat(isBlue ? '#5a6142' : '#77684a', 0.5, 0.4);
   applyRealisticArmorShader(rocketMat, 'rocket-body', { grain: 0.5, heightRef: 2.7 });
-  const wheelMat = standard({ vertexColors: true, roughness: 0.62, metalness: 0.38, envIntensity: 0.9 });
-  applySurfaceFinish(wheelMat, 'wheel');
   const hullMeshes: Entity[] = [], b = new GeoBucket();
   const visualRoot = group('rocket_visual');
 
@@ -200,48 +197,13 @@ export function buildRocketChassis(team: Team): RocketChassisParts {
     b.box(darkSteelMat, 0.5, 0.06, 0.08, sx * DIMS.trackX, 0.68, -2.9);
   }
 
-  const tyreProfile = [new Vec2(0.3, -0.16), new Vec2(0.465, -0.179), new Vec2(0.518, -0.166), new Vec2(0.544, -0.131),
-    new Vec2(0.554, -0.078), new Vec2(0.557, 0), new Vec2(0.554, 0.078), new Vec2(0.544, 0.131), new Vec2(0.518, 0.166),
-    new Vec2(0.465, 0.179), new Vec2(0.3, 0.16)];
-  const wheelParts: Geo[] = [lathe(tyreProfile, 40).rotateZ(Math.PI / 2).setColor('#1b1c1e')];
-  const lugGeo = roundedBox(DIMS.wheelWidth * 0.47, 0.032, 0.104, 1, 0.007).weld();
-  for (const sx of [-1, 1]) for (let i = 0; i < 23; i++) {
-    const a = (i + sx * 0.16) / 23 * Math.PI * 2;
-    const lug = lugGeo.clone().applyMatrix(composeMat(new Mat4(), new Vec3(sx * 0.087, Math.cos(a) * 0.554, Math.sin(a) * 0.554),
-      quatFromEuler(new Quat(), a, sx * 0.36, 0), Vec3.ONE));
-    wheelParts.push(lug.setColor('#151619'));
-  }
-  const rimProfile = [new Vec2(0.1, -0.14), new Vec2(0.28, -0.16), new Vec2(0.3, -0.1), new Vec2(0.3, 0.1), new Vec2(0.28, 0.16), new Vec2(0.1, 0.14)];
-  wheelParts.push(lathe(rimProfile, 30).rotateZ(Math.PI / 2).setColor('#3a3d3a'));
-  for (const sx of [-1, 1]) {
-    wheelParts.push(torus(0.285, 0.016, 8, 30).rotateY(Math.PI / 2).translate(sx * 0.145, 0, 0).setColor('#555a55'));
-    wheelParts.push(torus(0.465, 0.007, 6, 36).rotateY(Math.PI / 2).translate(sx * 0.176, 0, 0).setColor('#242629'));
-    wheelParts.push(cylinder(0.065, 0.065, 0.035, 12).rotateZ(Math.PI / 2).translate(sx * 0.218, 0, 0).setColor('#626861'));
-  }
-  wheelParts.push(cylinder(0.12, 0.12, 0.4, 10).rotateZ(Math.PI / 2).setColor('#2a2d2a'));
-  const boltGeo = cylinder(0.02, 0.02, 0.05, 6).rotateZ(Math.PI / 2);
-  for (const sx of [-1, 1]) for (let i = 0; i < 8; i++) {
-    const a = i / 8 * Math.PI * 2;
-    wheelParts.push(boltGeo.clone().translate(sx * 0.17, Math.cos(a) * 0.20, Math.sin(a) * 0.20).setColor('#555a55'));
-  }
-  const wheelGeo = Geo.merge(wheelParts)!;
-  const wheels: WheelNodeBinding[] = [], steerNodes: Entity[] = [], axleNames = ['FL', 'FR', 'RL1', 'RR1', 'RL2', 'RR2'] as const;
-  for (let i = 0; i < 6; i++) {
-    const name = axleNames[i], z = DIMS.axleZ[Math.min(i >> 1, 2)], sx = name.includes('L') ? -1 : 1;
-    const steerPivot = group(`steer_${name}`, visualRoot);
-    steerPivot.setLocalPosition(sx * DIMS.trackX, DIMS.wheelRadius, z);
-    const spinNode = group(`wheel_${name}`, steerPivot);
-    const wheelMesh = meshNode(wheelGeo, wheelMat, spinNode, { castShadows: true, receiveShadows: true });
-    wheels.push({ node: spinNode, side: name.includes('L') ? 'L' : 'R', radius: DIMS.wheelRadius });
-    hullMeshes.push(wheelMesh);
-    if (i < 2) steerNodes.push(steerPivot);
-  }
+  const { wheels, steerNodes } = addSixWheels(visualRoot, hullMeshes);
   b.flush(visualRoot, hullMeshes);
   hullTiltGroup.addChild(visualRoot);
   return {
     root, hullTiltGroup, visualRoot, wheels, steerNodes, hullMeshes,
     mats: { paintMat, paintDarkMat, steelMat, darkSteelMat, rubberMat, glassMat, lensMat,
-      modPaintT, modDarkT, modSteelT, modPaintP, modDarkP, modSteelP, rocketMat, wheelMat },
+      modPaintT, modDarkT, modSteelT, modPaintP, modDarkP, modSteelP, rocketMat },
   };
 }
 

@@ -29,4 +29,38 @@ try {
   assert.equal(measured.ports, 6);
   assert.ok(measured.muzzleZ < 1.7, 'resting pod clears the rear of the cab');
   console.log('Open ports, outward-facing roof, six rounds and bed clearance passed.');
+
+  for (const team of ['blue', 'red']) {
+    await page.goto(`${process.env.TANK_GAME_URL ?? 'http://127.0.0.1:5173/'}showroom.html?v=support&team=${team}&view=top`);
+    await page.waitForFunction(() => window.__showroom);
+    assert.equal(await page.locator('#audit-overlay').textContent(), `support/${team}: 0 error, 0 warn`);
+    const slots = await page.evaluate(async (team) => {
+      const { DroneManager } = await import('/src/game/Drone.ts');
+      const { Tank } = await import('/src/game/Tank.ts');
+      const { Vec3 } = await import('/src/game/engine/math.ts');
+      const { worldBounds } = await import('/src/game/engine/scene.ts');
+      const { assets, scene } = window.__showroom;
+      const carrier = new Tank('carrier-test', team, 'support', assets, new Vec3(20, 1, 18), 0.74, true, 'Test');
+      scene.addChild(carrier.root);
+      const manager = new DroneManager();
+      manager.world = { getHeightAt: () => 1 };
+      return ['gun', 'fpv'].map((kind) => {
+        const selected = carrier.root.findByName(`${kind}_drone`);
+        const other = carrier.root.findByName(kind === 'gun' ? 'fpv_drone' : 'gun_drone');
+        const source = selected.getPosition().clone();
+        const before = worldBounds(selected, undefined, true);
+        const gap = before.min.y - selected.parent.getPosition().y;
+        const flight = manager.launch(carrier, { kind });
+        const occupied = other.enabled && !selected.enabled && selected.parent.enabled;
+        const spawnGap = source.distance(flight.pos);
+        manager.reset();
+        return { kind, gap, occupied, spawnGap, restored: selected.enabled && other.enabled };
+      });
+    }, team);
+    for (const slot of slots) {
+      assert.ok(slot.occupied && slot.restored, `${team} ${slot.kind}: only the launched drone disappears; both recover`);
+      assert.ok(slot.spawnGap < 0.001 && Math.abs(slot.gap) < 0.005, `${team} ${slot.kind}: grounded dock and world-space launch`);
+    }
+  }
+  console.log('Both carrier variants and all four dock launch/restore paths passed.');
 } finally { await browser.close(); }

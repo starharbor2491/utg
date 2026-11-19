@@ -86,8 +86,8 @@ try {
     await page.mouse.move(660, 440, { steps: 4 });
     await page.evaluate(() => window.__tankQA.fastForward(0.5));
     const down = await player();
-    assert.ok(down.flight.pitch > before.flight.pitch + 0.06, `${down.cls}: mouse down pitches the airframe down`);
-    assert.ok(angleDelta(down.yaw, before.yaw) < -0.07, `${down.cls}: mouse right turns the airframe`);
+    assert.ok(down.flight.pitch > before.flight.pitch + 0.28, `${down.cls}: 90 px pitches down at the faster rate`);
+    assert.ok(angleDelta(down.yaw, before.yaw) < -0.27, `${down.cls}: yaw follows a 100 px mouse turn within half a second`);
     await page.mouse.move(560, 350, { steps: 4 });
     await page.evaluate(() => window.__tankQA.fastForward(0.5));
     const up = await player();
@@ -117,7 +117,7 @@ try {
     await page.mouse.move(660, 350, { steps: 4 });
     await page.evaluate(() => window.__tankQA.fastForward(0.15));
     const rightRoll = await player();
-    assert.ok(rightRoll.flight.roll > back.flight.roll + 0.12, `${up.cls}: R + mouse right banks right`);
+    assert.ok(rightRoll.flight.roll > back.flight.roll + 0.30, `${up.cls}: R + 100 px banks at the faster rate`);
     assert.ok(Math.abs(angleDelta(rightRoll.yaw, back.yaw)) < 0.03, `${up.cls}: cursor roll does not change heading`);
     assert.equal((await cam()).yaw, aimBeforeRoll.yaw, `${up.cls}: cursor roll does not orbit the camera`);
     assert.equal(rightRoll.flight.throttle, back.flight.throttle);
@@ -144,10 +144,13 @@ try {
       await page.evaluate(() => window.__tankQA.fastForward(0.05));
     }
     const mouseNeutral = (await player()).flight.pitch;
-    for (let i = 0; i < 4; i++) await mousePitchStroke(160, 520);
-    assert.ok(Math.cos((await player()).flight.pitch) < -0.8 && Math.cos((await cam()).pitch) < -0.8,
-      `${up.cls}: sustained mouse pitch takes the airframe and chase view past vertical`);
-    for (let i = 0; i < 4; i++) await mousePitchStroke(520, 160);
+    const cameraNeutral = (await cam()).pitch;
+    for (let i = 0; i < 4; i++) await mousePitchStroke(160, 390);
+    const airTurn = angleDelta((await player()).flight.pitch, mouseNeutral);
+    const cameraTurn = angleDelta((await cam()).pitch, cameraNeutral);
+    assert.ok(Math.cos(airTurn) < -0.95 && Math.cos(cameraTurn) < -0.95 && Math.abs(angleDelta(airTurn, -cameraTurn)) < 0.08,
+      `${up.cls}: sustained mouse pitch rotates both airframe and chase view half a turn (${airTurn}, ${cameraTurn})`);
+    for (let i = 0; i < 4; i++) await mousePitchStroke(390, 160);
     assert.ok(Math.abs(angleDelta((await player()).flight.pitch, mouseNeutral)) < 0.06,
       `${up.cls}: opposite mouse pitch brings the airframe back`);
   }
@@ -161,13 +164,19 @@ try {
     await page.keyboard.down('w');
     let total = 0, last = start.flight.pitch;
     for (let i = 0; i < 8; i++) {
-      await advance(start.cls === 'apache' ? 1.1 : 0.8);
+      await advance(start.cls === 'apache' ? 0.69 : 0.51);
       const next = await player();
       total += angleDelta(next.flight.pitch, last);
       last = next.flight.pitch;
       if (i === 3) {
         assert.ok(Math.cos(last) < -0.8, `${next.cls} pitches upside down`);
-        assert.ok(next.flight.climb < 0, `${next.cls} loses altitude under inverted thrust`);
+        // A faster half-loop can still carry upward momentum. Hold inverted to test the thrust direction.
+        await page.keyboard.up('w');
+        await advance(1);
+        const inverted = await player();
+        assert.ok(inverted.flight.climb < 0 && inverted.flight.climb < next.flight.climb,
+          `${next.cls} descends while inverted`);
+        await page.keyboard.down('w');
       }
     }
     await page.keyboard.up('w');
@@ -184,7 +193,7 @@ try {
   await page.keyboard.down('Shift');
   await page.evaluate(() => window.__tankQA.fastForward(0.65));
   await page.keyboard.down('w');
-  await page.evaluate(() => window.__tankQA.fastForward(0.6));
+  await page.evaluate(() => window.__tankQA.fastForward(0.38));
   await page.keyboard.up('w');
   await page.evaluate(() => window.__tankQA.fastForward(1.4));
   await page.keyboard.up('Shift');
@@ -385,7 +394,7 @@ try {
     const flight = { ...intent, flightYaw: 0, collectiveAdjust: 1, steer: 0 };
     const neutral = { ...flight, throttle: 0, collectiveAdjust: 0 };
     let missiles = 0, burst = 0;
-    for (let i = 0; i < 162; i++) bird.stepKinematics(dt, { ...flight, throttle: i < 42 ? 1 : 0, fireCannon: i === 108, fireMG: i < 70 }, flat, [], {
+    for (let i = 0; i < 162; i++) bird.stepKinematics(dt, { ...flight, throttle: i < 26 ? 1 : 0, fireCannon: i === 108, fireMG: i < 70 }, flat, [], {
       onFireCannon: (_t, pos, _dir, shell) => { if (pos.y > 3 && shell.id === 'littlebird_missile') missiles++; },
       onFireMG: (_t, _pos, _dir, shell) => { if (shell.id === 'littlebird_mg') burst++; },
     });
@@ -408,6 +417,11 @@ try {
     for (const cls of ['littlebird', 'apache']) {
       const craft = mkTank(cls, true);
       for (let i = 0; i < 60; i++) craft.stepKinematics(dt, { ...neutral, throttle: 1, steer: -1 }, flat, []);
+      const pitchRate = cls === 'apache' ? 1.14 : 1.52, rollRate = cls === 'apache' ? 1.08 : 1.44;
+      check(near(craft.hullTilt.x, pitchRate) && near(craft.hullTilt.z, rollRate), `${cls}: one-second keyboard pitch and bank`);
+      craft.respawnAt(v(), 0);
+      craft.stepKinematics(dt, { ...neutral, flightYaw: -Math.PI / 2 }, flat, []);
+      check(near(craft.hullYaw / dt, cls === 'apache' ? -3.6 : -5.6), `${cls}: quicker yaw slew cap`);
       check(craft.position.y === 0 && craft.flightThrottle === 0, `${cls}: cyclic alone changes no throttle`);
       craft.respawnAt(v(), 0);
       for (let i = 0; i < 600; i++) craft.stepKinematics(dt, { ...neutral, collectiveAdjust: 1 }, flat, []);
@@ -421,7 +435,7 @@ try {
       check(craft.flightThrottle === 0 && craft.velocity.y < -3, `${cls}: reducing throttle descends`);
       craft.respawnAt(v(0, 600), 0);
       for (const pitchSign of [1, -1]) {
-        const rate = 0.95 * Math.min(1, craft.stats.hullTurnRate / 3);
+        const rate = pitchRate;
         const steps = Math.round(Math.PI / (2 * dt * rate));
         for (let i = 0; i < steps; i++) craft.stepKinematics(dt, { ...neutral, throttle: pitchSign }, flat, []);
         const nose = applyQuat(v(0, 0, 1), craft.rig.hullTiltGroup.getRotation());
