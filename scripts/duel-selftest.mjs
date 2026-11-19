@@ -20,7 +20,11 @@ const vehicleState = (page) => page.evaluate(() => ({
 const openPage = async () => {
   const page = await browser.newPage({ viewport: { width: 1140, height: 740 } });
   page.on('pageerror', (err) => errors.push(err.message));
-  page.on('console', (msg) => { if (msg.type() === 'error' && !msg.text().includes('favicon')) errors.push(msg.text()); });
+  page.on('console', (msg) => {
+    if (msg.type() === 'error' && !msg.text().includes('favicon')) {
+      errors.push(`${msg.text()} (${msg.location().url.split('?')[0]})`);
+    }
+  });
   await page.goto(url);
   return page;
 };
@@ -87,8 +91,14 @@ try {
   assert.deepEqual(await vehicleState(host), parked);
   await Promise.all([host, guest].map((page) => page.locator('.fcs-briefing-backdrop').waitFor({ state: 'hidden' })));
   await guest.keyboard.down('w'); // An auto-repeat from before start is not a new press.
+  await guest.waitForTimeout(400);
   await guest.keyboard.up('w');
-  assert.deepEqual(await vehicleState(host), parked);
+  const afterStart = await vehicleState(host);
+  // The first simulation steps can adjust ride height; check for actual driving and firing instead.
+  assert.deepEqual(afterStart.tanks.map(([x, , z, yaw, flight]) => [x, z, yaw, flight]),
+    parked.tanks.map(([x, , z, yaw, flight]) => [x, z, yaw, flight]));
+  assert.equal(afterStart.mgHeat, parked.mgHeat);
+  assert.equal(afterStart.cooldown, parked.cooldown);
 
   // The host's menu must not stop the authoritative simulation.
   await host.keyboard.press('p');
