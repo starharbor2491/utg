@@ -102,10 +102,54 @@
 .fcs-controls-drawer { margin-top: 14px; color: var(--briefing-muted); font-size: 12px; }
 .fcs-controls-drawer summary { width: max-content; cursor: pointer; }
 .fcs-controls-drawer a { text-underline-offset: 3px; }
+.fcs-flight-steps {
+  margin: 9px 0 0;
+  padding-left: 1.4em;
+  color: var(--briefing-muted);
+  font: 13px/1.42 system-ui, sans-serif;
+  text-transform: none;
+}
+.fcs-flight-steps li + li { margin-top: 5px; }
+.fcs-flight-steps strong, .fcs-flight-steps kbd { color: #f5ecda; }
+.fcs-touch-notice {
+  display: none;
+  margin-top: 9px;
+  color: #f4d397;
+  font: 600 13px/1.4 system-ui, sans-serif;
+  text-transform: none;
+}
+@media (pointer: coarse) {
+  .fcs-touch-notice { display: block; }
+  .fcs-touch-reminder { grid-column: 1 / -1; margin: 0; }
+}
+.fcs-hud-setting {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  color: var(--briefing-muted);
+  font: 600 13px/1.3 system-ui, sans-serif;
+  text-transform: none;
+}
+.fcs-hud-setting select {
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid #708987;
+  background: #1d353a;
+  color: #edf2e7;
+  color-scheme: dark;
+  font: inherit;
+}
 .fcs-room { margin-top: 12px; padding: 10px 0; border-block: 1px solid var(--briefing-rule); }
 .fcs-room form { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
 .fcs-room [hidden], .fcs-mode-picker[hidden] { display: none; }
 .fcs-room-status { font-size: 13px; line-height: 1.4; color: #dfebea; }
+.fcs-readiness {
+  grid-column: 1 / -1;
+  color: #f4d397;
+  font: 650 13px/1.4 system-ui, sans-serif;
+  text-transform: none;
+}
 .fcs-room input, .fcs-room button {
   padding: 7px 9px;
   border: 1px solid #708987;
@@ -153,9 +197,37 @@
   border-radius: 0 12px 0 0;
 }
 .fcs-radar-panel { border-radius: 12px 0 0 0; }
-.fcs-speed-num { font-size: 34px; font-weight: 750; }
-.fcs-bar-header { font-size: 11px; }
-.fcs-part-row { font-size: 10px; }
+.fcs-root {
+  --hud-type: 12px;
+  --hud-edge: 18px;
+  --radar-size: 196px;
+}
+.fcs-root[data-hud-size="large"] { --hud-type: 15px; }
+.fcs-instruments {
+  position: absolute;
+  inset: auto var(--hud-edge) var(--hud-edge);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+.fcs-instruments > * { position: relative; inset: auto; }
+.fcs-vehicle-panel { width: fit-content; max-width: 100%; min-width: 0; }
+.fcs-systems-col { min-width: max(234px, 18em); font-size: var(--hud-type); }
+.fcs-speed-num { font-size: calc(var(--hud-type) * 2.6); font-weight: 750; }
+.fcs-bar-header { flex-wrap: wrap; gap: 0 6px; }
+.fcs-part-row { min-height: 1.45em; height: auto; column-gap: 6px; }
+.fcs-part-state { flex-shrink: 0; }
+.fcs-crew-row { min-height: 2em; }
+.fcs-crew-seat b { font-size: calc(var(--hud-type) * .75); }
+.fcs-fire-strip, .fcs-shell-pill, .fcs-speed-unit, .fcs-part-row,
+.fcs-bar-title, .fcs-bar-readout, .fcs-radar-title, .fcs-feed-row { font-size: var(--hud-type); }
+.fcs-shell-pill { padding: 3px 4px; min-width: 0; white-space: normal; }
+.fcs-shell-code { overflow-wrap: anywhere; }
+.fcs-radar-panel { grid-column: 2; }
+.fcs-radar-canvas-frame { width: var(--radar-size); height: var(--radar-size); }
+.fcs-radar-canvas { width: 100%; height: 100%; }
+.fcs-event-feed { right: var(--hud-edge); bottom: calc(var(--radar-size) + var(--hud-edge) + 4em); }
 .fcs-scoreboard {
   border: 0;
   padding: 8px 29px;
@@ -165,7 +237,8 @@
   background: #172e34;
   clip-path: polygon(0 0, 100% 0, calc(100% - 14px) 100%, 14px 100%);
 }
-.fcs-score-num { font-size: 22px; }
+.fcs-score-label, .fcs-score-sep { font-size: var(--hud-type); }
+.fcs-score-num { font-size: calc(var(--hud-type) * 1.8); }
 .fcs-linear-track { border: 0; height: 4px; }
 
 @media (max-width: 740px) {
@@ -186,32 +259,59 @@
 .fcs-briefing-backdrop { --menu-width: clamp(440px, 48vw, 690px); --mobile-preview: clamp(102px, 31dvh, 285px);
   background: linear-gradient(90deg, #102228 var(--menu-width), rgba(16,34,40,.21) calc(var(--menu-width) + 5vw), transparent 78%); }
 .fcs-model-preview { position: absolute; inset: 0 0 0 var(--menu-width); display: grid; place-items: end center; }
-.fcs-model-preview, .fcs-profile { touch-action: none; user-select: none; cursor: grab; }
+.fcs-model-preview, .fcs-profile { touch-action: pinch-zoom; user-select: none; cursor: grab; }
 .fcs-model-preview.is-dragging, .fcs-profile.is-dragging { cursor: grabbing; }
 .fcs-model-preview:focus-visible, .fcs-profile:focus-visible { outline: 2px solid #ddc08f; outline-offset: -4px; }
 .fcs-orbit-hint { pointer-events: none; margin-bottom: clamp(14px, 4vh, 40px); display: flex; align-items: center; gap: 7px;
   padding: 5px 10px; color: #f4edda; background: #152c30e8; font: 600 12px/1.3 system-ui,sans-serif; text-transform: none; letter-spacing: 0; }
-.fcs-control-guide { position: fixed; top: 18px; right: 18px; z-index: 12; width: max-content; min-width: 140px;
+.fcs-control-guide { position: fixed; top: 18px; right: 18px; z-index: 12; width: max-content; max-width: calc(100% - 16px); min-width: 140px;
   padding: 8px 10px; background: rgba(14,33,36,.90); color: #eff2e9; pointer-events: none; }
 .fcs-control-guide header { display: flex; justify-content: space-between; align-items: center; gap: 12px;
-  font: 650 13px/1.1 var(--hud-font-display); letter-spacing: 0; }
+  font: 650 var(--hud-type)/1.1 var(--hud-font-display); letter-spacing: 0; }
 .fcs-control-guide header kbd { color: #d1ddd6; border: 1px solid #879d98; padding: 1px 3px; font: 10px/1 var(--hud-font-mono); }
-.fcs-control-guide dl { margin: 7px 0 0; display: grid; grid-template-columns: max-content 1fr; gap: 2px 11px;
-  text-transform: none; letter-spacing: 0; font: 11px/1.35 system-ui,sans-serif; }
-.fcs-control-guide dt { color: #d9e9e3; font: 600 11px/1.35 var(--hud-font-mono); }
-.fcs-control-guide dd { margin: 0; color: #edf1e6; }
+.fcs-kbgrid, .fcs-control-guide dl { margin: 7px 0 0; display: grid; grid-template-columns: max-content 1fr; gap: 3px 11px;
+  text-transform: none; letter-spacing: 0; font: var(--hud-type)/1.35 system-ui,sans-serif; }
+:is(.fcs-kbgrid, .fcs-control-guide) dt { color: #d9e9e3; font: 600 1em/1.35 var(--hud-font-mono); }
+:is(.fcs-kbgrid, .fcs-control-guide) dd { margin: 0; color: #edf1e6; }
 .fcs-control-guide.is-folded { min-width: 0; }
 .fcs-control-guide[hidden], .fcs-control-guide dl[hidden], #hud-root.is-briefing .fcs-control-guide,
 #hud-root:has(.fcs-hit-review.is-active) .fcs-control-guide, #hud-root.is-briefing .fcs-hit-review { display: none !important; }
+.fcs-fpv-row { min-height: 1.45em; height: auto; font-size: var(--hud-type); }
+.fcs-fpv-row span:first-child { width: auto; }
+.fcs-fpv-row span:first-child, .fcs-fpv-val, .fcs-fpv-tag { font-size: var(--hud-type); }
+.fcs-fpv-stats { left: 18px; top: 48px; }
+@media (max-width: 740px), (max-height: 500px) {
+  .fcs-paperdoll-col, .fcs-part-row:has(.fcs-part-state.is-ok), .fcs-event-feed { display: none; }
+}
 @media (max-width: 740px) {
+  .fcs-root { --hud-edge: 8px; --radar-size: clamp(84px, 29vw, 160px); }
+  .fcs-vehicle-panel { padding: 8px; background: #102428f2; }
+  .fcs-systems-col { min-width: 0; width: min(17em, 100%); gap: 5px; }
+  .fcs-scoreboard { top: 8px; }
+  .fcs-radar-panel { padding: 5px; }
+  .fcs-radar-header { padding: 0; letter-spacing: 0; }
+  .fcs-part-row, .fcs-bar-title, .fcs-bar-readout { letter-spacing: .025em; }
+  .fcs-part-row { line-height: 1.18; }
   .fcs-briefing-backdrop { background: linear-gradient(0deg, #102228 calc(100% - var(--mobile-preview)), transparent calc(100% - var(--mobile-preview) + 24px)); }
   .fcs-briefing-modal { height: calc(100dvh - var(--mobile-preview)); max-height: calc(100dvh - var(--mobile-preview)); }
   .fcs-model-preview { inset: 0 0 auto; height: var(--mobile-preview); }
   .fcs-orbit-hint { margin-bottom: 7px; font-size: 11px; }
   .fcs-control-guide { top: 52px; right: 8px; min-width: 0; padding: 6px 8px; }
   .fcs-control-guide dl { gap: 1px 6px; }
+  .fcs-lock-banner { top: 52px; left: 8px; max-width: calc(100% - 130px); transform: none; }
+  #hud-root:has(.fcs-lock-banner:not([hidden])) .fcs-control-guide:not(.is-folded) { top: 110px; }
+  .fcs-fpv-tag { top: auto; bottom: calc(112px + var(--hud-edge)); left: 8px; }
+  .fcs-fpv-stats { top: auto; bottom: var(--hud-edge); left: 8px; }
 }
-@media (max-height: 500px) and (min-width: 741px) {
-  .fcs-control-guide { top: 5px; right: 8px; }
+@media (max-width: 355px) {
+  .fcs-shell-pills { gap: 2px; }
+  .fcs-shell-pill { padding: 2px; gap: 2px; }
+  .fcs-radar-title { max-width: 7ch; }
+}
+@media (max-height: 500px) {
+  .fcs-root { --hud-edge: 6px; --radar-size: clamp(80px, 28dvh, 145px); }
+  .fcs-vehicle-panel { padding: 6px 8px; }
+  .fcs-systems-col, .fcs-ordnance-grid { gap: 3px; }
+  .fcs-control-guide { top: 7px; right: 8px; }
   .fcs-control-guide dl { gap: 0 8px; }
 }

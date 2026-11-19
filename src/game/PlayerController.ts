@@ -59,6 +59,7 @@ export class PlayerController {
   private rmbZoomDownTime = 0;
   private rmbTurnedZoomOn = false;
   private _pointerLocked = false;
+  private inputEnabled = true;
   private _pointerLockBlocked = false;
   private _engaged = false;
   private pendingShellSlot: 0 | 1 | 'toggle' | null = null;
@@ -128,9 +129,11 @@ export class PlayerController {
     this._pointerLocked = document.pointerLockElement === this.canvas;
 
     this._onKeyDown = (e: KeyboardEvent) => {
+      if (!this.inputEnabled) return;
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       if (!this.pointerLocked && e.code === 'Space' && tag === 'BUTTON') return;
+      if (e.repeat && !this.keysDown.has(e.code)) return;
       const alt = e.code === 'AltLeft' || e.code === 'AltRight';
       if (alt && !this.pointerLocked) return;
 
@@ -179,6 +182,7 @@ export class PlayerController {
     };
 
     this._onMouseDown = (e: MouseEvent) => {
+      if (!this.inputEnabled) return;
       const targetEl = e.target as HTMLElement | null;
       const clickedInteractiveUI = Boolean(targetEl?.closest('button, a'));
 
@@ -276,6 +280,7 @@ export class PlayerController {
     };
 
     this._onWheel = (e: WheelEvent) => {
+      if (!this.inputEnabled || e.ctrlKey || e.metaKey) return;
       if (!this._pointerLocked && e.target !== this.canvas) return;
       e.preventDefault();
       if (this.freeLooking || this.droneMode) return;
@@ -362,6 +367,15 @@ export class PlayerController {
 
   public setEngaged(engaged: boolean): void {
     this._engaged = engaged;
+  }
+
+  public setInputEnabled(enabled: boolean): void {
+    this.inputEnabled = enabled;
+    this.clearHeldInput();
+    if (!enabled) {
+      this._engaged = false;
+      this._sniperZoom = false;
+    }
   }
 
   private clearHeldInput(): void {

@@ -1,8 +1,8 @@
 # Game UX audit: Untitled Tank Game
 
-**November 19, 2026.** Reviewed the game at [the preview/launcher release](https://github.com/starharbor2491/utg/commit/63db84d) and the local flight-tuning update. The flight change is implemented; the recommendations below are not.
+**November 19, 2026.** Reviewed the game at [the preview/launcher release](https://github.com/starharbor2491/utg/commit/63db84d) and the local flight-tuning update. Findings and screenshots describe that baseline.
 
-**Start with three things:** teach the controls of the vehicle the player actually picked, be explicit about keyboard/mouse requirements before Play on touch devices, and give both duelists a ready state. These remove observed failures. A new visual theme would not.
+**P1 follow-up:** The briefing and battle now share the selected vehicle's controls, helicopters have a three-step flight guide, and touch-first visitors see the input requirement before Play. Both players must ready up for the duel countdown to start. Browser zoom is enabled, and HUD size can be changed in the briefing or menu. The P2 and P3 findings remain open.
 
 ## What was tested
 
@@ -75,6 +75,6 @@ The yaw speed cap and response coefficient also increased 60%, rather than just 
 
 ## Suggested next release and playtest
 
-1. **First release:** fix the aircraft briefing, disclose the input requirement before deployment, enable browser zoom, and give the duel a shared ready state. These do not require a wholesale HUD redesign.
-2. **Next:** build scalable HUD layouts and sensitivity/comfort controls. Then test the radar shapes, aircraft instruments, and queued-loadout confirmation together.
-3. **Validate with players:** recruit newcomers and returning players, including keyboard-only and low-vision participants. Ask them to take off and recover, identify the nearest hostile with colors removed, queue a class away from base, and host/rematch a duel. Record first-attempt success, assistance needed and time to recover from an error. Compare against the same tasks on the current build; do not infer usability from frame rate or test passes alone.
+1. **Regression checks:** `node scripts/ux-selftest.mjs` exercises the flight instructions with real inputs, briefing/HUD control agreement, touch copy, zoom, preference persistence and compact layout. `node scripts/duel-selftest.mjs` exercises the public room flow on two Chromium clients, including readiness, cancellation and the menu.
+2. **Next:** add sensitivity and comfort controls. Then test the radar shapes, aircraft instruments, and queued-loadout confirmation together.
+3. **Validate with players:** recruit newcomers and returning players, including keyboard-only and low-vision participants. Ask them to take off and recover, identify the nearest hostile with colors removed, queue a class away from base, and host/rematch a duel. Record first-attempt success, assistance needed and time to recover from an error. Compare against the same tasks on the original build; do not infer usability from frame rate or test passes alone.

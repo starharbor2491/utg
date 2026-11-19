@@ -77,7 +77,7 @@ try {
   await page.setViewportSize({ width: 1152, height: 720 });
   await page.evaluate(() => window.__tankQA.teleportForTest(0, -420, 0));
   await choose('Apache'); await play();
-  await guide.getByText('Throttle', { exact: true }).waitFor();
+  await guide.getByText('Raise / lower throttle', { exact: true }).waitFor();
   await page.keyboard.press('p'); await choose('Drone Carrier'); await play();
   await guide.getByText('Launch', { exact: true }).waitFor();
   await page.keyboard.press('1'); await page.mouse.click(570, 355);

@@ -10,7 +10,7 @@ Double-click **`untitled-tank-game.html`** in Finder / File Explorer to open it 
 
 Save the [standalone HTML](https://starharbor2491.github.io/utg/untitled-tank-game.html) to play offline. To rebuild it after code edits, run `npm run build:single`.
 
-Choose **Free Play** for a 6v6 match with bots. For **1v1**, choose **Host room** and send the six-character code to a friend. Your friend selects **1v1**, enters the code, and chooses **Join room**. Once connected, each player chooses a vehicle and presses **Play**. Only the two players are in the battle, and opening the menu doesn't pause the duel. Both browsers need internet access for public signaling; restrictive networks can block peer-to-peer connections.
+Choose **Free Play** for a 6v6 match with bots. For **1v1**, choose **Host room** and send the six-character code to a friend. Your friend selects **1v1**, enters the code, and chooses **Join room**. Choose a vehicle, then press **Ready up**. Once both players are ready, a three-second countdown starts. Either player can unready during the countdown or leave the room. The battle opens automatically; click **Click to lock mouse** to capture the cursor. Opening the menu doesn't pause an online duel. Both browsers need internet access for public signaling; restrictive networks can block peer-to-peer connections. Use the same game version on both sides.
 
 ### Optional Local Dev Server
 If editing source code in `src/`:
@@ -21,7 +21,7 @@ npm run dev
 
 ## Controls
 
-In the briefing or pause menu, drag the 3D vehicle preview to turn it or tilt the view. With the preview focused, the arrow keys rotate it and `Home` resets it. While playing, the controls in the upper right change to match your vehicle or drone. Press `H` to collapse or expand them.
+Battle requires a keyboard and mouse. You can still drag the 3D vehicle preview with a finger to inspect it. With the preview focused, the arrow keys rotate it and `Home` resets it. Open **Controls & credits** for the selected vehicle's controls. While playing, the controls in the upper right match your current vehicle or drone. Press `H` to collapse or expand them. Choose **HUD size → Large** in the briefing or menu for larger readouts; the HUD automatically uses a compact layout on small viewports.
 
 | Input | Action |
 |---|---|

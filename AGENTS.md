@@ -9,6 +9,9 @@
 - **Gameplay regression tests**: `node scripts/gameplay-selftest.mjs` against the dev server with Playwright available. Set `PLAYWRIGHT_MODULE` to the module path if installed outside the repo. Run `node scripts/duel-selftest.mjs` for two-client public signaling and gameplay.
 - **Local preview**: `npm run preview` (`http://127.0.0.1:4173`) or `./PLAY.command`
 
+## Deployment
+- After every completed change to this game, run the relevant checks, commit only the intended changes, and push to `origin/main` to trigger `.github/workflows/pages.yml`, unless the user asks to hold the release. Confirm the workflow succeeds and smoke-test the change at [GitHub Pages](https://starharbor2491.github.io/utg/) before reporting it live.
+
 ## Architecture & Conventions
 - **Coordinate system (`src/game/types.ts`)**:
   - Right-handed Y-up (`1 unit = 1 meter`).

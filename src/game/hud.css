@@ -944,28 +944,6 @@
 .fcs-briefing-rule { font-size: 12px; color: var(--briefing-muted); }
 .fcs-briefing-modal button:focus-visible { outline: 2px solid var(--briefing-sheet); outline-offset: -2px; }
 
-/* Controls matrix */
-.fcs-kbgrid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px 16px;
-}
-
-.fcs-kbrow {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 8px;
-  min-width: 0;
-}
-
-.fcs-kbcaps {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  flex: none;
-}
-
 .fcs-key-cap {
   font-family: var(--hud-font-mono);
   font-size: 11px;
@@ -977,13 +955,6 @@
   border-radius: 0;
   color: var(--fcs-text-2);
   white-space: nowrap;
-}
-
-.fcs-key-desc {
-  font: 12px/1.3 system-ui, sans-serif;
-  text-transform: none;
-  color: var(--briefing-muted);
-  text-align: left;
 }
 
 /* Primary Deploy Button — off-white slab, loading progress along bottom edge */
@@ -1129,62 +1100,16 @@
   color: var(--fcs-accent);
 }
 
-/* Compact & landscape mobile viewport adjustments */
-@media (max-width: 980px) {
-  .fcs-vehicle-panel {
-    transform: scale(0.84);
-    transform-origin: bottom left;
-    left: 12px;
-    bottom: 12px;
-  }
-  .fcs-radar-panel {
-    transform: scale(0.84);
-    transform-origin: bottom right;
-    right: 12px;
-    bottom: 12px;
-  }
-  .fcs-event-feed {
-    right: 12px;
-    bottom: 226px;
-    transform: scale(0.88);
-    transform-origin: bottom right;
-  }
-}
-
 @media (max-height: 540px) {
-  .fcs-vehicle-panel {
-    left: 10px;
-    bottom: 10px;
-    transform: scale(0.68);
-    transform-origin: bottom left;
-  }
-  .fcs-radar-panel {
-    right: 10px;
-    bottom: 10px;
-    transform: scale(0.66);
-    transform-origin: bottom right;
-  }
-  .fcs-event-feed {
-    right: 10px;
-    bottom: 180px;
-    transform: scale(0.76);
-    transform-origin: bottom right;
-  }
   .fcs-briefing-modal {
     padding: 14px 16px;
   }
 }
 
-@media (max-width: 650px) {
-  .fcs-kbgrid { grid-template-columns: 1fr 1fr; }
-}
 @media (max-width: 490px) {
   .fcs-briefing-board, .fcs-briefing-footer { grid-template-columns: 1fr; gap: 8px; }
   .fcs-briefing-detail { border-left: 0; padding-left: 0; margin-top: 0; }
   .fcs-profile svg { max-height: 84px; }
-  .fcs-kbgrid {
-    grid-template-columns: 1fr;
-  }
 }
 
 /* ==========================================================================
@@ -1210,6 +1135,8 @@
   color: var(--fcs-text-2);
   z-index: 22;
 }
+
+.fcs-lock-banner:not([hidden]) { display: block; }
 
 .fcs-lock-banner:hover {
   color: var(--fcs-text);

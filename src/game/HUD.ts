@@ -2,7 +2,7 @@ import './hud.css';
 import './interface.css';
 import { assetUrl } from './AssetLoader';
 import { playerDriveScale, TANK_STATS } from './Tank';
-import { validCode, type DuelStatus } from './Duel';
+import { validCode, type DuelLobbyView, type DuelStatus } from './Duel';
 import type {
   HUDTelemetry,
   MinimapObstacle,
@@ -16,6 +16,7 @@ export interface HUDCallbacks {
   onSelectVehicleClass?: (cls: VehicleClass) => void;
   onDuelRequest?: (host: boolean, code: string) => void;
   onDuelLeave?: () => void;
+  onDuelReady?: () => void;
 }
 
 interface FeedSlot {
@@ -49,9 +50,9 @@ const BRIEFING_VEHICLES: readonly { id: VehicleClass; name: string; armament: st
   { id: 'ifv', name: 'IFV', armament: '30 mm autocannon', note: 'Fast on tracks. Switch between armour-piercing and explosive ammunition.' },
   { id: 'humvee', name: 'Humvee', armament: 'M2 .50 cal', note: 'Quick on roads, lightly protected. Keep moving and avoid heavier guns.' },
   { id: 'rocket', name: 'Rocket artillery', armament: 'Six-round rocket pod', note: 'Choose between guided and unguided rockets. Leave room to reload.' },
-  { id: 'support', name: 'Drone Carrier', armament: 'Gun drone and FPV', note: '1 selects the gun drone; 2 selects the impact FPV. Click to launch. Hold click to fire the gun drone.' },
-  { id: 'littlebird', name: 'Little Bird', armament: 'Guided missiles and machine gun', note: 'Shift / Ctrl adjust throttle. Mouse turns and pitches. Hold R and move the mouse sideways to roll, or use A/D.' },
-  { id: 'apache', name: 'Apache', armament: '16-missile volley and heavy Gatling', note: 'Shift / Ctrl adjust throttle. Mouse turns and pitches. Hold R and move the mouse sideways to roll, or use A/D.' },
+  { id: 'support', name: 'Drone Carrier', armament: 'Gun drone and FPV', note: 'Launch one drone at a time. The gun drone can be shot down; the FPV detonates on impact.' },
+  { id: 'littlebird', name: 'Little Bird', armament: 'Guided missiles and machine gun', note: '' },
+  { id: 'apache', name: 'Apache', armament: '16-missile volley and heavy Gatling', note: '' },
 ];
 
 const PROFILE: Record<VehicleClass, string> = {
@@ -65,31 +66,35 @@ const PROFILE: Record<VehicleClass, string> = {
   apache: 'M23 57 19 41l11 1 11 15 80 4 18-20 24 1 11 8h25l16 20 26 8-7 11h-79l-34-12-82-9Z M131 36v-8h28v8M61 35h166 M151 49l13 1 8 15h-28Z M177 55h18l13 15h-29Z M127 67h65v13h-65Z M139 82l-2 15m65-12 6 13m-21-8v4h46v5 M128 98a8 8 0 1 0 16 0 8 8 0 1 0-16 0 M201 99a8 8 0 1 0 16 0 8 8 0 1 0-16 0',
 };
 
-const BRIEFING_CONTROLS: readonly { keys: readonly string[]; action: string }[] = [
-  { keys: ['W', 'A', 'S', 'D'], action: 'Drive' },
-  { keys: ['Mouse'], action: 'Aim' },
-  { keys: ['Alt'], action: 'Free-look (hold)' },
-  { keys: ['Left click'], action: 'Fire main gun' },
-  { keys: ['Right click'], action: 'Zoom' },
-  { keys: ['1', '2', 'Q'], action: 'Switch shell' },
-  { keys: ['Space'], action: 'Machine gun' },
-  { keys: ['Esc'], action: 'Pause' },
-];
-
 const RADAR_CSS_SIZE = 196;
 type KeyRows = readonly (readonly [string, string])[];
 const DRIVE_KEYS: KeyRows = [['WASD', 'Drive'], ['Mouse', 'Aim']];
-const PILOT_KEYS: KeyRows = [['Mouse', 'Turn / pitch'], ['W / S', 'Pitch'], ['A / D', 'Bank'], ['R + mouse', 'Roll'], ['Shift / Ctrl', 'Throttle']];
+const PILOT_KEYS: KeyRows = [['Shift / Ctrl', 'Raise / lower throttle'], ['W / S', 'Pitch nose down / up'], ['Mouse', 'Turn / pitch'], ['A / D', 'Bank'], ['R + mouse', 'Roll (hold R)']];
 const DRONE_KEYS: KeyRows = [['Mouse', 'Aim / steer'], ['W / S', 'Speed'], ['A / D', 'Turn']];
-const CONTROL_GUIDES: Record<string, KeyRows> = {
-  tank: [...DRIVE_KEYS, ['LMB', 'Fire'], ['Space', 'Machine gun'], ['1 / 2', 'Ammo'], ['RMB', 'Optic']],
-  light: [...DRIVE_KEYS, ['LMB / Space', 'Fire gun'], ['1 / 2', 'Ammo belt'], ['RMB', 'Optic']],
-  rocket: [...DRIVE_KEYS, ['LMB', 'Fire salvo'], ['1 / 2', 'Rocket type'], ['RMB', 'Optic']],
-  carrier: [...DRIVE_KEYS, ['1', 'Gun drone'], ['2', 'Impact FPV'], ['LMB', 'Launch'], ['RMB', 'Optic']],
-  air: [...PILOT_KEYS, ['1 / 2', 'Missiles / gun'], ['LMB', 'Fire selected'], ['Space', 'Fire gun']],
-  fpv: [...DRONE_KEYS, ['Contact', 'Detonate'], ['RMB', 'Abort']],
-  gun: [...DRONE_KEYS, ['LMB / Space', 'Fire gun'], ['RMB', 'Abort']],
-};
+const OPTIC = ['Right click', 'Optic'] as const;
+const CONTROL_GUIDES = {
+  tank: [...DRIVE_KEYS, ['Left click', 'Main gun'], ['Space', 'Machine gun'], ['1 / 2 / Q', 'Ammo'], OPTIC],
+  light: [...DRIVE_KEYS, ['Click / Space', 'Fire gun'], ['1 / 2 / Q', 'Ammo belt'], OPTIC],
+  rocket: [...DRIVE_KEYS, ['Left click', 'Fire salvo'], ['1 / 2 / Q', 'Rocket type'], OPTIC],
+  carrier: [...DRIVE_KEYS, ['1 / 2', 'Gun drone / impact FPV'], ['Left click', 'Launch'], OPTIC],
+  air: [...PILOT_KEYS, ['1 / 2', 'Missiles / gun'], ['Left click', 'Fire selected'], ['Space', 'Fire gun'], OPTIC],
+  fpv: [...DRONE_KEYS, ['Contact', 'Detonate'], ['Right click', 'Abort']],
+  gun: [...DRONE_KEYS, ['Click / Space', 'Fire gun'], ['Right click', 'Abort']],
+} satisfies Record<string, KeyRows>;
+type GuideKind = keyof typeof CONTROL_GUIDES;
+function vehicleGuide(cls: VehicleClass): GuideKind {
+  return TANK_STATS[cls].drive === 'air' ? 'air' : cls === 'support' ? 'carrier' :
+    cls === 'rocket' ? 'rocket' : cls === 'ifv' || cls === 'humvee' ? 'light' : 'tank';
+}
+function renderControls(el: HTMLDListElement, kind: GuideKind): void {
+  const rows = document.createDocumentFragment();
+  for (const [key, action] of [...CONTROL_GUIDES[kind], ['Alt', 'Free-look (hold)'], ['Esc / P', 'Menu']]) {
+    const term = document.createElement('dt'), desc = document.createElement('dd');
+    term.textContent = key; desc.textContent = action;
+    rows.append(term, desc);
+  }
+  el.replaceChildren(rows);
+}
 const RADAR_RANGE_METERS = 220;
 const RADAR_SCOPE_RADIUS = 84;
 
@@ -126,10 +131,16 @@ export class HUD {
   private readonly guide = document.createElement('aside');
   private readonly guideRows = document.createElement('dl');
   private guideKind = '';
+  private readonly compact = matchMedia('(max-width: 740px), (max-height: 500px)');
+  private guideFolded: boolean | null = null;
+  private readonly syncGuide = () => {
+    this.guideRows.hidden = this.guideFolded ?? this.compact.matches;
+    this.guide.classList.toggle('is-folded', this.guideRows.hidden);
+  };
   private readonly toggleGuide = (e: KeyboardEvent) => {
     if (e.code !== 'KeyH' || e.repeat || this.briefingVisible || e.ctrlKey || e.metaKey || e.altKey) return;
-    this.guideRows.hidden = !this.guideRows.hidden;
-    this.guide.classList.toggle('is-folded', this.guideRows.hidden);
+    this.guideFolded = !this.guideRows.hidden;
+    this.syncGuide();
   };
   private readonly container: HTMLElement;
   private readonly callbacks: HUDCallbacks;
@@ -209,6 +220,7 @@ export class HUD {
   private readonly radarCanvas: HTMLCanvasElement;
   private readonly radarCtx: CanvasRenderingContext2D;
   private radarDpr = 0;
+  private radarFont = 12;
 
   // Event feed, scoreboard & respawn banner refs
   private readonly feedSlots: FeedSlot[] = [];
@@ -227,6 +239,9 @@ export class HUD {
   private readonly engageBtnEl: HTMLButtonElement;
   private mode: 'free' | 'duel' = 'free';
   private roomState: DuelStatus | 'idle' = 'idle';
+  private duelBattle = false;
+  private lobbyState: DuelLobbyView = { localReady: false, opponentReady: false, countdown: 0, starting: false };
+  private readonly readyStatus = document.createElement('p');
   private assetsReady = false;
   private roomOutput?: HTMLElement;
   private roomForm?: HTMLFormElement;
@@ -288,7 +303,6 @@ export class HUD {
     this.mgBarFillEl = vehicle.mgBarFill;
     this.shellPillEls = vehicle.pillEls;
     this.shellCodeEls = vehicle.pillCodes;
-    this.root.appendChild(this.vehiclePanelEl);
     this.fpvEl = this.buildFpvOverlay();
     this.root.appendChild(this.fpvEl);
 
@@ -296,7 +310,10 @@ export class HUD {
     const radar = this.buildRadarPanel();
     this.radarCanvas = radar.canvas;
     this.radarCtx = radar.ctx;
-    this.root.appendChild(radar.panel);
+    const instruments = document.createElement('div');
+    instruments.className = 'fcs-instruments';
+    instruments.append(this.vehiclePanelEl, radar.panel);
+    this.root.append(instruments);
     this.guide.className = 'fcs-control-guide';
     this.guide.setAttribute('aria-label', 'Controls');
     this.guide.innerHTML = '<header>Controls <kbd title="Toggle controls">H</kbd></header>';
@@ -345,10 +362,12 @@ export class HUD {
     // Bind interactive callbacks
     this.handleEngageClick = () => {
       if (this.engageBtnEl.disabled) return;
-      this.callbacks.onEngageClick();
+      if (this.mode === 'duel' && !this.duelBattle) this.callbacks.onDuelReady?.();
+      else this.callbacks.onEngageClick();
     };
     this.handleResize = () => {
       this.syncCanvasHiDPI();
+      this.syncGuide();
     };
 
     this.engageBtnEl.addEventListener('click', this.handleEngageClick);
@@ -358,6 +377,7 @@ export class HUD {
     this.container.appendChild(this.root);
 
     this.syncCanvasHiDPI();
+    this.syncGuide();
     this.setBriefingVisible(true);
   }
 
@@ -370,10 +390,9 @@ export class HUD {
     this.loaderFillEl.style.width = `${(p * 100).toFixed(1)}%`;
     const loaderBar = this.loaderFillEl.parentElement;
     if (p >= 0.999) {
-      this.engageBtnEl.disabled = this.mode === 'duel' && this.roomState !== 'connected';
-      this.engageMainTextEl.textContent = 'Play';
       this.engageSubTextEl.textContent = '';
       if (loaderBar) loaderBar.style.display = 'none';
+      this.syncEngageButton();
     } else {
       this.engageBtnEl.disabled = true;
       this.engageMainTextEl.textContent = `Loading ${pct}%`;
@@ -387,7 +406,7 @@ export class HUD {
     if (this.roomOutput) this.roomOutput.textContent = detail || ({
       idle: 'Create a room or enter your opponent’s code.',
       connecting: 'Connecting…', waiting: 'Share this code with your opponent.',
-      connected: 'Opponent connected. Choose a vehicle and play.', error: '', closed: '',
+      connected: 'Opponent connected. Choose a vehicle, then ready up.', error: '', closed: '',
     })[state];
     if (this.roomCode) {
       this.roomCode.value = code;
@@ -398,7 +417,7 @@ export class HUD {
       this.roomExit.hidden = state === 'idle' || state === 'error';
       this.roomExit.textContent = state === 'closed' ? 'Return to start' : state === 'connected' ? 'Leave duel' : 'Cancel';
     }
-    if (this.mode === 'duel') this.engageBtnEl.disabled = !this.assetsReady || state !== 'connected';
+    this.syncEngageButton();
     if (state === 'closed') {
       this.setBriefingVisible(true);
       this.briefingBackdropEl.querySelector('h1')!.textContent = 'Duel ended';
@@ -406,11 +425,39 @@ export class HUD {
     }
   }
 
+  public setDuelLobby(state: DuelLobbyView): void {
+    this.lobbyState = state;
+    this.syncEngageButton();
+  }
+
+  public startDuelBattle(): void {
+    this.duelBattle = true;
+    this.roomOutput!.textContent = 'Battle in progress. This menu does not pause the duel.';
+    this.roomCode!.hidden = true;
+    this.syncEngageButton();
+  }
+
+  private syncEngageButton(): void {
+    const duel = this.mode === 'duel';
+    const connected = this.roomState === 'connected';
+    const { localReady, opponentReady, countdown, starting } = this.lobbyState;
+    this.readyStatus.hidden = !duel || !connected || this.duelBattle;
+    if (!this.readyStatus.hidden) {
+      const phase = starting ? 'Starting duel…' : countdown > 0 ? `Battle starts in ${countdown}…` : '';
+      this.readyStatus.textContent = `You: ${localReady ? 'Ready' : 'Not ready'}. Opponent: ${opponentReady ? 'Ready' : 'Not ready'}.${phase ? ` ${phase}` : ''}`;
+    }
+    this.engageBtnEl.disabled = !this.assetsReady || (duel && (!connected || (!this.duelBattle && starting)));
+    if (!this.assetsReady) return;
+    if (!duel) this.engageMainTextEl.textContent = this.hasDeployed ? 'Resume battle' : 'Play';
+    else if (this.duelBattle) this.engageMainTextEl.textContent = 'Resume battle';
+    else this.engageMainTextEl.textContent = starting && connected ? 'Starting…' : localReady && connected ? 'Unready' : 'Ready up';
+  }
+
   public setBriefingVisible(visible: boolean): void {
     if (this.roomState === 'closed') visible = true;
     if (!visible) this.hasDeployed = true;
     if (this.briefingVisible !== visible && visible && this.hasDeployed) {
-      this.engageMainTextEl.textContent = 'Resume battle';
+      this.syncEngageButton();
       this.briefingBackdropEl.querySelector('h1')!.textContent = this.roomState === 'closed' ? 'Duel ended'
         : this.mode === 'duel' ? 'Duel menu' : 'Battle paused';
       this.briefingBackdropEl.classList.add('is-pause');
@@ -437,17 +484,10 @@ export class HUD {
     const fpv = telemetry.fpv ?? null;
     this.guide.hidden = !telemetry.alive && !fpv;
     const cls = telemetry.vehicleClass;
-    const kind = fpv?.kind ?? (cls === 'littlebird' || cls === 'apache' ? 'air' : cls === 'support' ? 'carrier' :
-      cls === 'rocket' ? 'rocket' : cls === 'ifv' || cls === 'humvee' ? 'light' : 'tank');
+    const kind = fpv?.kind ?? vehicleGuide(cls);
     if (kind !== this.guideKind) {
       this.guideKind = kind;
-      const rows = document.createDocumentFragment();
-      for (const [key, action] of [...CONTROL_GUIDES[kind], ['Alt', 'Free-look'], ['Esc / P', 'Menu']]) {
-        const dt = document.createElement('dt'), dd = document.createElement('dd');
-        dt.textContent = key; dd.textContent = action;
-        rows.append(dt, dd);
-      }
-      this.guideRows.replaceChildren(rows);
+      renderControls(this.guideRows, kind);
     }
     if (this.fpvEl) {
       this.fpvEl.classList.toggle('is-active', fpv !== null);
@@ -533,7 +573,9 @@ export class HUD {
   // =========================================================================
 
   private syncCanvasHiDPI(): void {
-    const dpr = clamp(window.devicePixelRatio || 1, 1, 2.5);
+    const width = this.radarCanvas.clientWidth || RADAR_CSS_SIZE;
+    const dpr = Math.max(1, width * clamp(window.devicePixelRatio || 1, 1, 2.5) / RADAR_CSS_SIZE);
+    this.radarFont = Math.round((this.root.dataset.hudSize === 'large' ? 14 : 11) * RADAR_CSS_SIZE / width);
     if (Math.abs(dpr - this.radarDpr) > 0.01) {
       this.radarDpr = dpr;
       this.radarCanvas.width = Math.round(RADAR_CSS_SIZE * dpr);
@@ -1172,13 +1214,6 @@ export class HUD {
     ctx.arc(cx, cy, r200, 0, TWO_PI);
     ctx.stroke();
 
-    ctx.font = '600 8px ui-monospace, "SF Mono", Menlo, Consolas, monospace';
-    ctx.fillStyle = 'rgba(143, 168, 118, 0.68)';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'bottom';
-    ctx.fillText('100M', cx + 3, cy - r100 - 1);
-    ctx.fillText('200M', cx + 3, cy - r200 - 1);
-
     // Camera FOV Cone (always pointing straight UP = -PI/2 on canvas)
     const aspect = clamp(window.innerWidth / Math.max(1, window.innerHeight), 1, 2.4);
     const vFov = clamp(t.cameraFovRad || 1.0, 0.22, 1.8);
@@ -1255,6 +1290,14 @@ export class HUD {
     ctx.beginPath();
     ctx.arc(cx, cy, rScope, 0, TWO_PI);
     ctx.stroke();
+
+    // Draw labels inside the lower arc without clipping large lettering to the scope.
+    ctx.font = `600 ${this.radarFont}px ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
+    ctx.fillStyle = '#bfceb0';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('100', cx + r100 * .6, cy + r100 * .8);
+    ctx.fillText('200', cx + r200 * .6, cy + r200 * .8);
 
     // Fixed top lubber triangle at 12 o'clock on bezel
     ctx.fillStyle = '#E8A938';
@@ -2264,7 +2307,7 @@ export class HUD {
       duelBtn.setAttribute('aria-pressed', 'false');
       room.hidden = true;
       sub.textContent = '6 vs 6 against AI. No internet required.';
-      this.engageBtnEl.disabled = !this.assetsReady;
+      this.syncEngageButton();
     });
     duelBtn.addEventListener('click', () => {
       if (this.mode === 'duel') return;
@@ -2289,11 +2332,21 @@ export class HUD {
     detail.className = 'fcs-briefing-detail';
     detail.innerHTML = `<div class="fcs-profile"><span class="fcs-profile-label">Vehicle profile</span>
       <svg viewBox="0 0 286 122" aria-hidden="true"><path class="fcs-profile-datum" d="M14 107h258M32 21v91M250 21v91M56 103v4m24-4v4m24-4v4m24-4v4m24-4v4m24-4v4m24-4v4m24-4v4"/><path class="fcs-profile-outline"/></svg></div>
-      <h2></h2><p class="fcs-profile-loadout"></p><p class="fcs-profile-note"></p>`;
+      <h2></h2><p class="fcs-profile-loadout"></p><p class="fcs-profile-note"></p>
+      <ol class="fcs-flight-steps" aria-label="First flight" hidden>
+        <li><strong>Lift.</strong> Hold <kbd>Shift</kbd> until you climb. Release it to keep that throttle.</li>
+        <li><strong>Move.</strong> Once clear of the ground, tap <kbd>W</kbd> to dip the nose and fly forward.</li>
+        <li><strong>Level out.</strong> Tap <kbd>S</kbd> until the nose is level and counter any bank. Hold <kbd>Ctrl</kbd> to lower throttle.</li>
+      </ol>`;
     const detailName = detail.querySelector('h2')!;
     const loadout = detail.querySelector('.fcs-profile-loadout')!;
-    const note = detail.querySelector('.fcs-profile-note')!;
+    const note = detail.querySelector<HTMLParagraphElement>('.fcs-profile-note')!;
+    const flightSteps = detail.querySelector<HTMLOListElement>('.fcs-flight-steps')!;
     const outline = detail.querySelector('.fcs-profile-outline')!;
+    const kbGrid = document.createElement('dl');
+    kbGrid.className = 'fcs-kbgrid';
+    const kbLabel = document.createElement('h3');
+    kbLabel.className = 'fcs-bsec-label';
     const showDetails = (spec: (typeof BRIEFING_VEHICLES)[number]) => {
       const stats = TANK_STATS[spec.id];
       const speed = Math.round(stats.maxForwardSpeed * playerDriveScale(spec.id) * 3.6);
@@ -2305,6 +2358,10 @@ export class HUD {
       profile.setAttribute('aria-label', `Rotate the ${spec.name} preview`);
       loadout.textContent = `${spec.armament} / ${speed} km/h`;
       note.textContent = spec.note;
+      note.hidden = !spec.note;
+      flightSteps.hidden = stats.drive !== 'air';
+      kbLabel.textContent = `${spec.name} controls`;
+      renderControls(kbGrid, vehicleGuide(spec.id));
       outline.setAttribute('d', PROFILE[spec.id]);
       detail.classList.toggle('is-aircraft', stats.drive === 'air');
     };
@@ -2339,33 +2396,8 @@ export class HUD {
     });
     classSection.append(classLabel, classList);
 
-    // Controls matrix
     const kbSection = document.createElement('div');
     kbSection.className = 'fcs-bsec';
-    const kbLabel = document.createElement('div');
-    kbLabel.className = 'fcs-bsec-label';
-    kbLabel.textContent = 'Quick controls';
-
-    const kbGrid = document.createElement('div');
-    kbGrid.className = 'fcs-kbgrid';
-
-    for (const { keys, action } of BRIEFING_CONTROLS) {
-      const row = document.createElement('div');
-      row.className = 'fcs-kbrow';
-      const caps = document.createElement('span');
-      caps.className = 'fcs-kbcaps';
-      for (const key of keys) {
-        const cap = document.createElement('span');
-        cap.className = 'fcs-key-cap';
-        cap.textContent = key;
-        caps.appendChild(cap);
-      }
-      const desc = document.createElement('span');
-      desc.className = 'fcs-key-desc';
-      desc.textContent = action;
-      row.append(caps, desc);
-      kbGrid.appendChild(row);
-    }
     kbSection.append(kbLabel, kbGrid);
     const changeNote = document.createElement('p');
     changeNote.className = 'fcs-briefing-rule';
@@ -2398,12 +2430,34 @@ export class HUD {
     board.append(classSection, detail);
     const footer = document.createElement('div');
     footer.className = 'fcs-briefing-footer';
-    footer.append(changeNote, engageBtn);
+    const touchNotice = document.createElement('p');
+    touchNotice.className = 'fcs-touch-notice';
+    touchNotice.id = 'touch-play-note';
+    touchNotice.textContent = 'Battle requires a keyboard and mouse. You can still drag to inspect vehicles.';
+    const touchReminder = document.createElement('p');
+    touchReminder.className = 'fcs-touch-notice fcs-touch-reminder';
+    touchReminder.textContent = 'Keyboard and mouse required for battle.';
+    if (matchMedia('(pointer: coarse)').matches) engageBtn.setAttribute('aria-describedby', touchNotice.id);
+    const hudSize = document.createElement('label');
+    hudSize.className = 'fcs-hud-setting';
+    hudSize.innerHTML = 'HUD size <select><option value="standard">Standard</option><option value="large">Large</option></select>';
+    const size = hudSize.querySelector('select')!;
+    try { if (localStorage.getItem('utg-hud-size') === 'large') size.value = 'large'; } catch { /* Storage may be blocked. */ }
+    this.root.dataset.hudSize = size.value;
+    size.addEventListener('change', () => {
+      this.root.dataset.hudSize = size.value;
+      this.syncCanvasHiDPI();
+      try { localStorage.setItem('utg-hud-size', size.value); } catch { /* Still apply for this session. */ }
+    });
+    this.readyStatus.className = 'fcs-readiness';
+    this.readyStatus.hidden = true;
+    this.readyStatus.setAttribute('role', 'status');
+    footer.append(changeNote, touchReminder, this.readyStatus, engageBtn);
     const controls = document.createElement('details');
     controls.className = 'fcs-controls-drawer';
     controls.innerHTML = '<summary>Controls & credits</summary>';
     controls.append(kbSection, modelCredit);
-    modal.append(head, modes, sub, room, board, footer, controls);
+    modal.append(head, modes, sub, touchNotice, room, board, footer, hudSize, controls);
     backdrop.append(modal, preview);
 
     return {

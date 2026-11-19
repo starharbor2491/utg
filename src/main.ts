@@ -236,6 +236,7 @@ async function bootstrap(): Promise<void> {
   let swapPlayerClassFn: ((cls: VehicleClass) => void) | null = null;
   let startRoomFn: ((host: boolean, code: string) => void) | null = null;
   let leaveRoomFn: (() => void) | null = null;
+  let room: DuelRoom | null = null;
 
   const hud = new HUD(hudRoot, {
     onEngageClick: () => {
@@ -249,6 +250,7 @@ async function bootstrap(): Promise<void> {
     },
     onDuelRequest: (host, code) => startRoomFn?.(host, code),
     onDuelLeave: () => leaveRoomFn?.(),
+    onDuelReady: () => room?.toggleReady(),
   });
 
   const markerLayer = document.createElement('div');
@@ -342,9 +344,9 @@ async function bootstrap(): Promise<void> {
   let friendlyFireEvents = 0;
 
   let desiredClass: VehicleClass = 'normal';
-  let room: DuelRoom | null = null;
   let duelActive = false;
-  let duelStarted = false;
+  let duelRoster = false;
+  let duelBattle = false;
   let remoteInput: number[] | null = null;
   let remoteAt = 0;
   let remoteClass: VehicleClass | null = null;
@@ -353,6 +355,9 @@ async function bootstrap(): Promise<void> {
   swapPlayerClassFn = (cls) => {
     desiredClass = cls;
     if (!duelActive || room?.host) match.selectHumanClass(cls);
+    if (!duelActive || duelBattle) return;
+    if (room?.host) sendDuelSnapshot();
+    else room?.send([9, DUEL_CLASSES.indexOf(cls)], true);
   };
 
   const controller = new PlayerController(camera, canvas);
@@ -383,9 +388,10 @@ async function bootstrap(): Promise<void> {
   const lockBannerEl = document.createElement('button');
   lockBannerEl.type = 'button';
   lockBannerEl.className = 'fcs-lock-banner';
+  lockBannerEl.hidden = true;
   lockBannerEl.textContent = 'Click to aim · Esc pauses';
-  lockBannerEl.addEventListener('mousedown', (e) => {
-    e.preventDefault();
+  lockBannerEl.addEventListener('click', () => {
+    if (duelRoster && !duelBattle) return;
     if (controller.pointerLockBlockedByHost) {
       window.open(window.location.href, '_blank');
     } else {
@@ -594,9 +600,23 @@ async function bootstrap(): Promise<void> {
     if (duelActive && room?.host) room.send([4, duelObstacles.indexOf(o)]);
   };
 
+  const sendDuelSnapshot = () => {
+    const packet = [1, match.score.blue, match.score.red];
+    for (const tank of match.tanks) packet.push(DUEL_CLASSES.indexOf(tank.stats.vehicleClass),
+      ...tank.duelSnapshot(), ...droneManager.duelSnapshot(tank));
+    room?.send(packet);
+  };
+
   const receiveRoomPacket = (data: unknown) => {
     if (!duelActive || !room || !Array.isArray(data)) return;
     if (room.host) {
+      if (!duelBattle) {
+        if (data[0] === 9 && numberPacket(data, 2) && DUEL_CLASSES[data[1]]) {
+          match.selectDuelClass(1, DUEL_CLASSES[data[1]]);
+          sendDuelSnapshot();
+        }
+        return;
+      }
       if (data[0] !== 0 || !numberPacket(data, 25) || !DUEL_CLASSES[data[1]]) return;
       remoteInput = data;
       remoteAt = performance.now();
@@ -619,13 +639,13 @@ async function bootstrap(): Promise<void> {
       droneManager.applyDuelSnapshot(host, data.slice(4 + Tank.duelSnapshotLength, 3 + block), scene);
       match.score.blue = data[1]; match.score.red = data[2];
       bots[0] = host;
-    } else if (data[0] === 2 && numberPacket(data, 11) && (data[1] === 0 || data[1] === 1)) {
+    } else if (duelBattle && data[0] === 2 && numberPacket(data, 11) && (data[1] === 0 || data[1] === 1)) {
       const shooter = match.tanks[data[1] === 0 ? 1 : 0], target = match.tanks[data[1] === 0 ? 0 : 1];
       netPos.set(data[4], data[5], data[6]); netDir.set(data[7], data[8], data[9]);
       const spec = data[3] === 2 ? DRONE_BELT : data[3] < 0 ? undefined : shooter.stats.shells[data[3] === 1 ? 1 : 0];
       if (data[2] === 1) ballistics.fireCoaxMG(shooter, netPos, netDir, spec);
       else if (spec?.muzzleSpeed) ballistics.fireCannon(shooter, netPos, netDir, spec, data[10] === 1 ? target : null);
-    } else if (data[0] === 3 && numberPacket(data, 9)) {
+    } else if (duelBattle && data[0] === 3 && numberPacket(data, 9)) {
       const victim = match.tanks[data[2] === 0 ? 1 : 0];
       const attacker = data[1] < 0 ? null : match.tanks[data[1] === 0 ? 1 : 0];
       handleDamage({ victim, attacker, weapon: data[3] ? 'mg' : 'cannon', killed: data[4] === 1,
@@ -640,19 +660,20 @@ async function bootstrap(): Promise<void> {
   };
 
   startRoomFn = (host, code) => {
-    if (duelStarted) return;
+    if (duelRoster) return;
     room?.close();
     const newRoom = new DuelRoom(host, host ? makeCode() : code, (state, detail) => {
       if (room !== newRoom) return;
       hud.setRoomStatus(state, host && (state === 'waiting' || state === 'connected') ? newRoom.code : '', detail);
       if (state === 'connected') {
-        duelActive = duelStarted = true;
+        duelActive = duelRoster = true;
         const localTeam = host ? 'blue' : 'red';
         droneManager.reset();
         droneManager.localTeam = localTeam;
         droneManager.botLaunchesEnabled = false;
         ballistics.visualOnly = !host;
         match.beginDuel(localTeam);
+        match.selectHumanClass(desiredClass);
         match.tanks.forEach(bindTank);
         bots.splice(0, bots.length, match.tanks[1]);
         markerLayer.replaceChildren();
@@ -662,22 +683,33 @@ async function bootstrap(): Promise<void> {
         if (host) for (let i = 0; i < duelObstacles.length; i++) {
           if (duelObstacles[i].destroyed) newRoom.send([4, i]);
         }
+        if (host) sendDuelSnapshot();
+        else newRoom.send([9, DUEL_CLASSES.indexOf(desiredClass)], true);
         kills = deaths = 0;
-        controller.setEngaged(false);
+        controller.setInputEnabled(false);
         document.exitPointerLock?.();
       } else if (state === 'closed') {
-        duelActive = false;
-        controller.setEngaged(false);
+        duelActive = duelBattle = false;
+        controller.setInputEnabled(false);
         document.exitPointerLock?.();
       }
-    }, receiveRoomPacket);
+    }, receiveRoomPacket, (state) => hud.setDuelLobby(state), () => {
+      if (room !== newRoom) return;
+      duelBattle = true;
+      qaFireCannonOnce = false;
+      controller.setInputEnabled(true);
+      controller.setEngaged(true);
+      hud.startDuelBattle();
+      hud.setBriefingVisible(false);
+      if (document.hasFocus()) canvas.focus();
+    });
     room = newRoom;
     newRoom.connect();
   };
   leaveRoomFn = () => {
     room?.close();
     room = null;
-    if (duelStarted) location.reload();
+    if (duelRoster) location.reload();
     else hud.setRoomStatus('idle');
   };
   window.addEventListener('pagehide', () => room?.close());
@@ -779,6 +811,7 @@ async function bootstrap(): Promise<void> {
 
   // All simulation work (no HUD/DOM/render) — steppable headlessly via __tankQA.fastForward
   const stepSimulation = (dt: number): void => {
+    if (duelRoster && !duelBattle) return;
     const human = match.human;
     const isDeployed = !document.hidden && (controller.pointerLocked || forceHideBriefing);
 
@@ -932,10 +965,7 @@ async function bootstrap(): Promise<void> {
       snapshotTimer -= dt;
       if (snapshotTimer <= 0) {
         snapshotTimer = Math.max(0, snapshotTimer + 1 / 30);
-        const packet = [1, match.score.blue, match.score.red];
-        for (const tank of match.tanks) packet.push(DUEL_CLASSES.indexOf(tank.stats.vehicleClass),
-          ...tank.duelSnapshot(), ...droneManager.duelSnapshot(tank));
-        room.send(packet);
+        sendDuelSnapshot();
       }
     }
     world.update(dt, human.position, camera.getPosition());
@@ -985,19 +1015,28 @@ async function bootstrap(): Promise<void> {
 
   // Keep the hosted battle moving when the host switches tabs, without rendering.
   window.setInterval(() => {
-    if (duelActive && room?.host && document.hidden) stepSimulation(0.05);
+    if (duelBattle && room?.host && document.hidden) stepSimulation(0.05);
   }, 50);
 
+  let lastDuelFrame = performance.now();
   function tick(now: number): void {
     requestAnimationFrame(tick);
 
     // Zero GPU burn when browser tab is hidden/minimized!
     if (document.hidden) {
-      lastFrameTime = now;
+      lastDuelFrame = lastFrameTime = now;
       return;
     }
 
     const isDeployed = controller.pointerLocked || forceHideBriefing;
+    if (duelBattle && !isDeployed) {
+      // Keep duel simulation at play cadence without rendering the open menu at 60 Hz.
+      const elapsed = now - lastDuelFrame;
+      if (elapsed >= 15.6) {
+        stepSimulation(Math.min(elapsed * .001, .05));
+        lastDuelFrame = now - (elapsed % 15.6);
+      }
+    } else lastDuelFrame = now;
     // Thermal frame limiter: 60 FPS max when playing (prevents 120Hz ProMotion double GPU load), 15 FPS when paused on menu!
     const minIntervalMs = isDeployed || cameraOverrideActive ? 15.6 : 64.0;
     const elapsedMs = now - lastFrameTime;
@@ -1023,12 +1062,12 @@ async function bootstrap(): Promise<void> {
     if (frameTimes.length > 900) frameTimes.splice(0, frameTimes.length - 900);
 
     if (!forceHideBriefing) {
-      hud.setBriefingVisible(!controller.pointerLocked);
+      hud.setBriefingVisible((duelRoster && !duelBattle) || !controller.pointerLocked);
     }
 
     const _perfS0 = perfProbe.active ? performance.now() : 0;
-    if (duelActive || (isDeployed && !duelStarted)) stepSimulation(dt);
-    else if (!cameraOverrideActive) controller.update(dt, match.human, world, allTanks, 0);
+    if (isDeployed && (!duelRoster || duelBattle)) stepSimulation(dt);
+    else if (!duelBattle && !cameraOverrideActive) controller.update(dt, match.human, world, allTanks, 0);
     if (perfProbe.active) perfProbe.simMs += performance.now() - _perfS0;
     const playerTank = match.human;
 
@@ -1181,18 +1220,18 @@ async function bootstrap(): Promise<void> {
       updateUnitMarkers(vw, vh, dt);
 
       if (isDeployed && !controller.hasTruePointerLock && !forceHideBriefing) {
-        lockBannerEl.style.display = 'block';
+        lockBannerEl.hidden = false;
         lockBannerEl.textContent = controller.pointerLockBlockedByHost
           ? 'Mouse lock is blocked here · click to open in a browser tab'
-          : 'Click to aim · Esc pauses';
+          : duelBattle ? 'Click to lock mouse · Esc opens menu' : 'Click to aim · Esc pauses';
       } else {
-        lockBannerEl.style.display = 'none';
+        lockBannerEl.hidden = true;
       }
 
       hitCam.update(dt);
     } else {
       markerLayer.style.display = 'none';
-      lockBannerEl.style.display = 'none';
+      lockBannerEl.hidden = true;
     }
 
     // Refresh directional shadow map every 2nd active frame (30 Hz) — cuts shadow GPU work by 50%!
@@ -1765,7 +1804,7 @@ async function bootstrap(): Promise<void> {
       return true;
     },
     stageDuelShotForTest: () => {
-      if (!duelActive || !room?.host) throw new Error('Requires a hosted duel');
+      if (!duelBattle || !room?.host) throw new Error('Requires a hosted duel in progress');
       const target = match.tanks[1];
       const p = target.position;
       target.getCenterMassWorld(_qaAimPoint);
