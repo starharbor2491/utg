@@ -35,6 +35,7 @@ import { EffectsManager } from './game/Effects';
 import { DestructionManager } from './game/Destruction';
 import { BallisticsManager, predictBarrelImpact } from './game/Ballistics';
 import { PlayerController } from './game/PlayerController';
+import { VehiclePreview } from './game/VehiclePreview';
 import { BotAIManager } from './game/BotAI';
 import { Match } from './game/Match';
 import { DRONE_BELT, DroneManager, type PilotInput } from './game/Drone';
@@ -276,6 +277,7 @@ async function bootstrap(): Promise<void> {
   const ballistics = new BallisticsManager(scene, effects);
   const destruction = new DestructionManager(scene, world, effects);
   const match = new Match(scene, world, assets);
+  const preview = new VehiclePreview(scene, assets, world, hud.previewPane, hud.previewProfile);
   const droneManager = new DroneManager();
   droneManager.world = world;
   droneManager.effects = effects;
@@ -348,7 +350,6 @@ async function bootstrap(): Promise<void> {
   let remoteClass: VehicleClass | null = null;
   let wirePitch = 0, wireRoll = 0, wireDx = 0, wireDy = 0, wireEdges = 0, wireSlot = -1, wireShot = false;
   let snapshotTimer = 0;
-  let hasEnteredBattle = false;
   swapPlayerClassFn = (cls) => {
     desiredClass = cls;
     if (!duelActive || room?.host) match.selectHumanClass(cls);
@@ -775,7 +776,6 @@ async function bootstrap(): Promise<void> {
 
   let activeEnemyCount = 0;
   let lastPlayerThrottle = 0;
-  const briefingViewPos = new Vec3(), briefingViewAim = new Vec3();
 
   // All simulation work (no HUD/DOM/render) — steppable headlessly via __tankQA.fastForward
   const stepSimulation = (dt: number): void => {
@@ -998,7 +998,6 @@ async function bootstrap(): Promise<void> {
     }
 
     const isDeployed = controller.pointerLocked || forceHideBriefing;
-    if (isDeployed && !forceHideBriefing) hasEnteredBattle = true;
     // Thermal frame limiter: 60 FPS max when playing (prevents 120Hz ProMotion double GPU load), 15 FPS when paused on menu!
     const minIntervalMs = isDeployed || cameraOverrideActive ? 15.6 : 64.0;
     const elapsedMs = now - lastFrameTime;
@@ -1035,17 +1034,7 @@ async function bootstrap(): Promise<void> {
 
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    if (!hasEnteredBattle && !isDeployed && !cameraOverrideActive && !duelActive) {
-      const p = playerTank.position, showFrom = playerTank.stats.vehicleClass === 'support' ? Math.PI - 0.71 : 0.66;
-      const angle = playerTank.hullYaw + showFrom;
-      const length = playerTank.stats.drive === 'air' || playerTank.stats.drive === 'wheeled' ? 13 : 11;
-      briefingViewPos.set(p.x + Math.sin(angle) * length, p.y + 4.8, p.z + Math.cos(angle) * length);
-      const shift = vw > 740 ? Math.min(7.0, length * vw / vh * 0.23) : 0;
-      briefingViewAim.set(p.x - Math.cos(angle) * shift, p.y + (vw > 740 ? 1.3 : -2.5), p.z + Math.sin(angle) * shift);
-      camera.setPosition(briefingViewPos);
-      camera.lookAt(briefingViewAim);
-      camera.camera!.fov = 51;
-    }
+    preview.update(!isDeployed && !cameraOverrideActive, desiredClass, playerTank.team, camera);
     projectWorldToScreen(controller.commanderAimWorld, camera, vw, vh, commanderAimScreen, _projScratch);
 
     if (playerTank.stats.drive === 'air' && playerTank.selectedShellIndex === 1) {

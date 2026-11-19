@@ -21,6 +21,8 @@ npm run dev
 
 ## Controls
 
+In the briefing or pause menu, drag the 3D vehicle preview to turn it or tilt the view. With the preview focused, the arrow keys rotate it and `Home` resets it. While playing, the controls in the upper right change to match your vehicle or drone. Press `H` to collapse or expand them.
+
 | Input | Action |
 |---|---|
 | `W / S` or `Up / Down` | Forward throttle / Reverse |

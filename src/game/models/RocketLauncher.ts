@@ -17,8 +17,7 @@ const DIMS = {
   length: 7.0, width: 2.4, wheelRadius: 0.57, wheelWidth: 0.36, trackX: 1.02, axleZ: [2.3, -0.9, -2.3],
   frameY: 0.86, deckTopY: 1.38, deckHalfW: 0.72, deckZFront: 1.9, deckZRear: -3.45,
   cabZFront: 3.45, cabZRear: 1.75, cabFloorY: 1.15, cabRoofY: 2.36,
-  turretY: 1.38, turretZ: -1.6, gunPivotY: 1.06, gunPivotZ: 0.7,
-  podLength: 3.3, podFrontZ: 3.25, podW: 0.95, podH: 0.72, tubeR: 0.135,
+  turretY: 1.38, turretZ: -1.48, gunPivotY: 0.90, gunPivotZ: -0.67,
 } as const;
 
 function mat(color: string | number, roughness: number, metalness: number, extra: Partial<StandardOptions> = {}): StandardMaterial {
@@ -261,74 +260,75 @@ export function buildRocketLauncherRig(team: Team): InstantiatedTankRig {
     const a = i / 16 * Math.PI * 2;
     deck.box(modDarkT, 0.09, 0.09, 0.14, Math.cos(a), 0.17, Math.sin(a), 0, -a);
   }
+  // Wide cheek plates capture the trunnions at the rear of the turntable.
+  const cheek = new Shape().moveTo(-0.99, 0.19).lineTo(0.69, 0.19).lineTo(0.47, 0.45)
+    .lineTo(-0.47, 0.94).lineTo(-0.70, 1.08).lineTo(-0.89, 0.90).closePath();
+  const cheekGeo = extrude(cheek, { depth: 0.09, bevelEnabled: false }).rotateY(-Math.PI / 2);
   for (const sx of [-1, 1]) {
-    deck.rbox(modPaintT, 0.1, 0.95, 0.55, 0.02, sx * 0.58, 0.62, 0.55);
-    deck.rbox(modPaintT, 0.1, 0.4, 0.4, 0.02, sx * 0.58, 0.3, 0.8, 0.5);
-    deck.cyl(modSteelT, 0.09, 0.09, 0.16, 10, sx * 0.58, DIMS.gunPivotY - 0.02, DIMS.gunPivotZ - 0.05, 0, 0, Math.PI / 2);
-    deck.rbox(modSteelT, 0.09, 0.8, 0.16, 0.02, sx * 0.4, 0.6, 0.85, -0.35);
-    deck.rbox(modSteelT, 0.3, 0.07, 0.2, 0.02, sx * 0.4, 1.0, 0.8);
-    deck.cyl(modSteelT, 0.065, 0.065, 0.6, 10, sx * 0.57, 0.37, 0.87, 1.03);
-    deck.put(modSteelT, sphere(0.05, 8, 8), sx * 0.62, 0.22, 0.62);
+    deck.put(modPaintT, cheekGeo, sx > 0 ? 0.97 : -0.88, 0, 0);
+    deck.rbox(modDarkT, 0.24, 0.12, 1.84, 0.025, sx * 0.83, 0.25, -0.12);
+    deck.cyl(modSteelT, 0.145, 0.145, 0.14, 20, sx * 0.96, DIMS.gunPivotY, DIMS.gunPivotZ, 0, 0, Math.PI / 2);
   }
   const gunPivot = group('rocket_gun_pivot', turretPivot);
   gunPivot.setLocalPosition(0, DIMS.gunPivotY, DIMS.gunPivotZ);
   const gunRecoilGroup = group('rocket_recoil_group', gunPivot);
   const pod = new GeoBucket();
-  const podW = DIMS.podW, podH = DIMS.podH, pr = 0.09, hw = podW / 2, hh = podH / 2;
-  const podShape = new Shape();
-  podShape.moveTo(-hw + pr, -hh).lineTo(hw - pr, -hh).quadraticCurveTo(hw, -hh, hw, -hh + pr)
-    .lineTo(hw, hh - pr).quadraticCurveTo(hw, hh, hw - pr, hh).lineTo(-hw + pr, hh)
-    .quadraticCurveTo(-hw, hh, -hw, hh - pr).lineTo(-hw, -hh + pr).quadraticCurveTo(-hw, -hh, -hw + pr, -hh);
-  const tubeXs = [-0.27, 0, 0.27], tubeYs = [-0.17, 0.17];
-  for (const ty of tubeYs) for (const tx of tubeXs) podShape.holes.push(new Path().absarc(tx, ty, DIMS.tubeR, 0, Math.PI * 2, true));
-  const podGeo = extrude(podShape, { depth: 0.11, bevelEnabled: true, bevelThickness: 0.025, bevelSize: 0.025, bevelSegments: 1, steps: 1 })
-    .translate(0, 0.40, -0.05);
-  pod.put(modPaintP, podGeo);
-  pod.put(modPaintP, podGeo.clone().translate(0, 0, DIMS.podLength - 0.17));
-  const linerGeo = cylinder(DIMS.tubeR - 0.012, DIMS.tubeR - 0.012, DIMS.podLength * 0.92, 14, 1, true).rotateX(Math.PI / 2);
-  for (const ty of tubeYs) for (const tx of tubeXs) {
-    pod.put(modDarkP, linerGeo, tx, ty + 0.40, DIMS.podFrontZ - DIMS.podLength * 0.55);
-    pod.put(modPaintP, cylinder(DIMS.tubeR + 0.016, DIMS.tubeR + 0.016, DIMS.podLength - 0.1, 16, 1, true),
-      tx, ty + 0.40, DIMS.podLength * 0.5 - 0.04, Math.PI / 2);
-    pod.put(modSteelP, torus(DIMS.tubeR - 0.008, 0.014, 6, 14), tx, ty + 0.40, DIMS.podFrontZ + 0.038);
+  const halfW = 0.90, midY = 0.41, halfH = 0.57;
+  const rear = -0.69, front = 3.19, length = front - rear, middle = (front + rear) * 0.5;
+  const tubeXs = [-0.51, 0, 0.51], tubeYs = [midY - 0.24, midY + 0.24];
+  const port = 0.208, trim = 0.11;
+  const stencil = mat('#c2b997', 0.84, 0.08);
+
+  // A single exchangeable cassette. Both bulkheads have real apertures, not painted circles.
+  const plate = new Shape().moveTo(-halfW + trim, midY - halfH).lineTo(halfW - trim, midY - halfH)
+    .lineTo(halfW, midY - halfH + trim).lineTo(halfW, midY + halfH - trim)
+    .lineTo(halfW - trim, midY + halfH).lineTo(-halfW + trim, midY + halfH)
+    .lineTo(-halfW, midY + halfH - trim).lineTo(-halfW, midY - halfH + trim).closePath();
+  for (const y of tubeYs) for (const x of tubeXs) plate.holes.push(new Path().absarc(x, y, port, 0, 2 * Math.PI, true));
+  const face = extrude(plate, { depth: 0.065, bevelEnabled: false });
+  pod.put(modPaintP, face, 0, 0, front - 0.065);
+  pod.put(modDarkP, face, 0, 0, rear);
+  const lip = torus(port, 0.016, 8, 32);
+  const tube = cylinder(port, port, length - 0.10, 24, 1, true).rotateX(Math.PI / 2);
+  // Inside a tube, the visible faces point toward its axis.
+  for (let i = 0; i < tube.indices.length; i += 3) [tube.indices[i + 1], tube.indices[i + 2]] = [tube.indices[i + 2], tube.indices[i + 1]];
+  tube.computeNormals();
+  const rockets: Entity[] = [];
+  const nose = Geo.merge([
+    cylinder(0.154, 0.154, 0.31, 20).rotateX(Math.PI / 2).translate(0, 0, -0.12),
+    cone(0.154, 0.23, 20).rotateX(Math.PI / 2).translate(0, 0, 0.15),
+  ])!;
+  for (const y of tubeYs) for (const x of tubeXs) {
+    pod.put(modDarkP, tube, x, y, middle);
+    pod.put(modSteelP, lip, x, y, front);
+    pod.put(modSteelP, lip, x, y, rear);
+    const round = group(`rocket_tube_${rockets.length}`, gunRecoilGroup);
+    round.setLocalPosition(x, y, front - 0.36);
+    meshNode(nose, rocketMat, round, { castShadows: true, receiveShadows: true });
+    rockets.push(round);
   }
-  const podY0 = 0.04, podY1 = podY0 + podH, podZ0 = -0.05, podZ1 = DIMS.podFrontZ;
-  for (const sx of [-1, 1]) {
-    pod.box(modSteelP, 0.07, 0.07, DIMS.podLength - 0.1, sx * (hw - 0.02), podY1 - 0.035, (podZ0 + podZ1) / 2);
-    pod.box(modSteelP, 0.07, 0.07, DIMS.podLength - 0.1, sx * (hw - 0.02), podY0 + 0.035, (podZ0 + podZ1) / 2);
-    pod.box(modSteelP, 0.07, podH - 0.06, 0.07, sx * (hw - 0.02), (podY0 + podY1) / 2, podZ0 + 0.06);
-    pod.box(modSteelP, 0.07, podH - 0.06, 0.07, sx * (hw - 0.02), (podY0 + podY1) / 2, podZ1 - 0.08);
-  }
-  for (const rz of [0.55, 1.55, 2.55]) {
-    pod.box(modSteelP, podW + 0.1, 0.08, 0.1, 0, podY1 + 0.02, rz);
-    pod.box(modSteelP, podW + 0.1, 0.08, 0.1, 0, podY0 - 0.02, rz);
-    pod.box(modSteelP, 0.08, podH + 0.1, 0.1, -hw - 0.03, (podY0 + podY1) / 2, rz);
-    pod.box(modSteelP, 0.08, podH + 0.1, 0.1, hw + 0.03, (podY0 + podY1) / 2, rz);
-  }
-  for (const sx of [-1, 1]) {
-    for (const z of [0.60, 1.58, 2.56]) {
-      pod.rbox(modPaintP, 0.035, 0.47, 0.69, 0.012, sx * (hw + 0.045), 0.40, z);
-      pod.box(modDarkP, 0.045, 0.055, 0.74, sx * (hw + 0.068), 0.40, z, 0.58);
-      for (const y of [0.19, 0.61]) pod.cyl(modSteelP, 0.018, 0.018, 0.028, 6, sx * (hw + 0.077), y, z, 0, 0, Math.PI / 2);
+
+  pod.rbox(modPaintP, 2 * (halfW - trim), 0.075, length, 0.025, 0, midY + halfH - 0.034, middle);
+  pod.rbox(modDarkP, 2 * (halfW - trim), 0.075, length, 0.025, 0, midY - halfH + 0.034, middle);
+  for (const sign of [-1, 1]) {
+    pod.rbox(modPaintP, 0.073, 2 * (halfH - trim), length, 0.025, sign * (halfW - 0.032), midY, middle);
+    for (const edge of [-1, 1]) {
+      pod.box(modPaintP, 0.154, 0.06, length, sign * (halfW - trim * 0.50), midY + edge * (halfH - trim * 0.50), middle, 0, 0, -sign * edge * Math.PI / 4);
     }
-    pod.rbox(modDarkP, 0.09, 0.17, 0.36, 0.015, sx * (hw + 0.07), 0.41, 3.05);
-  }
-  pod.rbox(modPaintP, podW * 0.88, 0.47, 0.055, 0.015, 0, 0.41, -0.16, 0.18);
-  for (const x of [-0.39, 0.39]) for (const y of [0.13, 0.67]) pod.cyl(modSteelP, 0.018, 0.018, 0.035, 6, x, y, 3.32, Math.PI / 2);
-  for (const lx of [-0.35, 0, 0.35]) pod.put(modSteelP, torus(0.06, 0.018, 8, 12, Math.PI), lx, podY1 + 0.12, 1.6, 0, 0, Math.PI);
-  pod.rbox(modDarkP, podW - 0.12, podH - 0.14, 0.05, 0.02, 0, (podY0 + podY1) / 2, podZ0 - 0.02);
-  pod.cyl(modSteelP, 0.03, 0.03, podW - 0.2, 8, 0, podY0 + 0.05, podZ0 - 0.06, 0, 0, Math.PI / 2);
-  const rocketMeshes: Entity[] = [];
-  const rocketGeo = Geo.merge([
-    cylinder(0.1, 0.1, 0.85, 12).rotateX(Math.PI / 2).translate(0, 0, -0.1),
-    cone(0.1, 0.28, 12).rotateX(Math.PI / 2).translate(0, 0, 0.5),
-  ])!.computeNormals();
-  let ri = 0;
-  for (const ty of tubeYs) for (const tx of tubeXs) {
-    const rg = group(`rocket_tube_${ri++}`, gunRecoilGroup);
-    meshNode(rocketGeo, rocketMat, rg, { castShadows: true, receiveShadows: true });
-    rg.setLocalPosition(tx, ty + 0.40, DIMS.podFrontZ - 0.75);
-    rocketMeshes.push(rg);
+    // Recessed side panels, lifting bands, and paired painted handling marks.
+    for (const z of [0.23, 2.14]) {
+      pod.rbox(modDarkP, 0.030, 0.64, 1.55, 0.012, sign * 0.907, midY, z);
+      pod.rbox(modPaintP, 0.041, 0.54, 1.42, 0.016, sign * 0.925, midY, z);
+      pod.box(modSteelP, 0.046, 0.48, 0.066, sign * 0.944, midY, z - 0.47, 0.27);
+    }
+    for (const z of [-0.53, 1.17, 3.02]) {
+      pod.rbox(modSteelP, 0.074, 0.88, 0.105, 0.022, sign * 0.915, midY, z);
+      pod.rbox(modSteelP, 0.29, 0.076, 0.105, 0.015, sign * 0.697, midY + halfH, z);
+      pod.rbox(modDarkP, 0.12, 0.15, 0.18, 0.018, sign * 0.933, midY - 0.28, z);
+    }
+    for (const z of [2.52, 2.67]) pod.box(stencil, 0.012, 0.24, 0.06, sign * 0.952, midY, z, -0.4);
+    pod.rbox(modSteelP, 0.16, 0.16, 2.02, 0.025, sign * 0.63, midY - halfH - 0.035, 0.60);
+    pod.cyl(modDarkT, 0.21, 0.21, 0.13, 20, sign * 0.87, 0.0, 0, 0, 0, Math.PI / 2);
   }
   pod.flush(gunRecoilGroup, hullMeshes);
   deck.flush(turretPivot, hullMeshes);
@@ -337,16 +337,18 @@ export function buildRocketLauncherRig(team: Team): InstantiatedTankRig {
   const ramRodGeo = cylinder(0.032, 0.032, 1, 10).rotateX(Math.PI / 2);
   for (const sx of [-1, 1]) {
     const ram = group(`lift_ram_${sx < 0 ? 'L' : 'R'}`, turretPivot);
-    const rod = meshNode(ramRodGeo, modDarkT, ram), pin = meshNode(sphere(0.045, 8, 8), modDarkT, ram);
+    const sleeve = meshNode(cylinder(0.084, 0.084, 0.60, 12).rotateX(Math.PI / 2), modPaintT, ram);
+    sleeve.setLocalPosition(0, 0, 0.30);
+    const rod = meshNode(ramRodGeo, modSteelT, ram), pin = meshNode(sphere(0.065, 10, 8), modDarkT, ram);
     rod.setLocalPosition(0, 0, 0.62); pin.setLocalPosition(0, 0, 1);
     rams.push({ root: ram, rod, pin });
     hullMeshes.push(rod);
   }
   const muzzleNode = group('muzzle_datum', gunRecoilGroup), coaxNode = group('coax_datum', gunRecoilGroup);
-  muzzleNode.setLocalPosition(0, 0.4, DIMS.podFrontZ + 0.1);
+  muzzleNode.setLocalPosition(0, midY, front + 0.08);
   coaxNode.setLocalPosition(muzzleNode.getLocalPosition());
-  const ramBaseLocal = [new Vec3(-0.62, 0.22, 0.62), new Vec3(0.62, 0.22, 0.62)];
-  const ramTopGun = [new Vec3(-0.35, 0.02, 1.35), new Vec3(0.35, 0.02, 1.35)];
+  const ramBaseLocal = [new Vec3(-0.58, 0.22, 0.70), new Vec3(0.58, 0.22, 0.70)];
+  const ramTopGun = [new Vec3(-0.63, -0.13, 1.71), new Vec3(0.63, -0.13, 1.71)];
   const top = new Vec3(), direction = new Vec3(), inv = new Mat4(), q = new Quat(), zAxis = new Vec3(0, 0, 1);
   const articulate = (_gunPitch: number) => {
     for (let i = 0; i < rams.length; i++) {
@@ -364,6 +366,7 @@ export function buildRocketLauncherRig(team: Team): InstantiatedTankRig {
       ram.pin.setLocalPosition(0, 0, 0.6 + rodLen);
     }
   };
+  articulate(0);
   return { root, hullTiltGroup, visualRoot, turretPivot, turretRestPos, gunPivot, gunRecoilGroup,
-    muzzleNode, coaxNode, rwsNode: null, wheels, steerNodes, rocketMeshes, articulate, hullMeshes };
+    muzzleNode, coaxNode, rwsNode: null, wheels, steerNodes, rocketMeshes: rockets, articulate, hullMeshes };
 }

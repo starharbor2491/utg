@@ -35,7 +35,7 @@ export class HitCam {
 
   constructor(parent: HTMLElement) {
     this.rootEl = document.createElement('div');
-    this.rootEl.className = 'hud-plate';
+    this.rootEl.className = 'hud-plate fcs-hit-review';
     this.rootEl.style.cssText = [
       'position:fixed',
       'top:18px',
@@ -109,6 +109,7 @@ export class HitCam {
     }
 
     this.activeReport = report;
+    this.rootEl.classList.add('is-active');
     this.displayTimer = report.killed ? 5.8 : this.TOTAL_DURATION;
     this.animElapsed = 0;
     this.rootEl.style.display = 'flex';
@@ -171,6 +172,7 @@ export class HitCam {
 
   public update(dt: number): void {
     if (!this.activeReport || this.displayTimer <= 0) {
+      this.rootEl.classList.remove('is-active');
       this.rootEl.style.display = 'none';
       return;
     }
@@ -179,6 +181,7 @@ export class HitCam {
     this.animElapsed += dt;
 
     if (this.displayTimer <= 0) {
+      this.rootEl.classList.remove('is-active');
       this.rootEl.style.display = 'none';
       this.activeReport = null;
       return;

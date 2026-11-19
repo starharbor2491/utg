@@ -77,6 +77,19 @@ const BRIEFING_CONTROLS: readonly { keys: readonly string[]; action: string }[] 
 ];
 
 const RADAR_CSS_SIZE = 196;
+type KeyRows = readonly (readonly [string, string])[];
+const DRIVE_KEYS: KeyRows = [['WASD', 'Drive'], ['Mouse', 'Aim']];
+const PILOT_KEYS: KeyRows = [['Mouse', 'Turn / pitch'], ['W / S', 'Pitch'], ['A / D', 'Bank'], ['R + mouse', 'Roll'], ['Shift / Ctrl', 'Throttle']];
+const DRONE_KEYS: KeyRows = [['Mouse', 'Aim / steer'], ['W / S', 'Speed'], ['A / D', 'Turn']];
+const CONTROL_GUIDES: Record<string, KeyRows> = {
+  tank: [...DRIVE_KEYS, ['LMB', 'Fire'], ['Space', 'Machine gun'], ['1 / 2', 'Ammo'], ['RMB', 'Optic']],
+  light: [...DRIVE_KEYS, ['LMB / Space', 'Fire gun'], ['1 / 2', 'Ammo belt'], ['RMB', 'Optic']],
+  rocket: [...DRIVE_KEYS, ['LMB', 'Fire salvo'], ['1 / 2', 'Rocket type'], ['RMB', 'Optic']],
+  carrier: [...DRIVE_KEYS, ['1', 'Gun drone'], ['2', 'Impact FPV'], ['LMB', 'Launch'], ['RMB', 'Optic']],
+  air: [...PILOT_KEYS, ['1 / 2', 'Missiles / gun'], ['LMB', 'Fire selected'], ['Space', 'Fire gun']],
+  fpv: [...DRONE_KEYS, ['Contact', 'Detonate'], ['RMB', 'Abort']],
+  gun: [...DRONE_KEYS, ['LMB / Space', 'Fire gun'], ['RMB', 'Abort']],
+};
 const RADAR_RANGE_METERS = 220;
 const RADAR_SCOPE_RADIUS = 84;
 
@@ -108,6 +121,16 @@ function wrapPi(rad: number): number {
 }
 
 export class HUD {
+  public readonly previewPane = document.createElement('div');
+  public readonly previewProfile: HTMLElement;
+  private readonly guide = document.createElement('aside');
+  private readonly guideRows = document.createElement('dl');
+  private guideKind = '';
+  private readonly toggleGuide = (e: KeyboardEvent) => {
+    if (e.code !== 'KeyH' || e.repeat || this.briefingVisible || e.ctrlKey || e.metaKey || e.altKey) return;
+    this.guideRows.hidden = !this.guideRows.hidden;
+    this.guide.classList.toggle('is-folded', this.guideRows.hidden);
+  };
   private readonly container: HTMLElement;
   private readonly callbacks: HUDCallbacks;
   private readonly root: HTMLDivElement;
@@ -274,6 +297,11 @@ export class HUD {
     this.radarCanvas = radar.canvas;
     this.radarCtx = radar.ctx;
     this.root.appendChild(radar.panel);
+    this.guide.className = 'fcs-control-guide';
+    this.guide.setAttribute('aria-label', 'Controls');
+    this.guide.innerHTML = '<header>Controls <kbd title="Toggle controls">H</kbd></header>';
+    this.guide.append(this.guideRows);
+    this.root.append(this.guide);
 
     this.root.appendChild(this.buildEventFeed());
 
@@ -307,6 +335,7 @@ export class HUD {
     // 10. Briefing / Asset Loading / Pause Overlay
     const briefing = this.buildBriefingOverlay();
     this.briefingBackdropEl = briefing.backdrop;
+    this.previewProfile = briefing.backdrop.querySelector('.fcs-profile')!;
     this.loaderFillEl = briefing.loaderFill;
     this.engageBtnEl = briefing.engageBtn;
     this.engageMainTextEl = briefing.engageMainText;
@@ -324,6 +353,7 @@ export class HUD {
 
     this.engageBtnEl.addEventListener('click', this.handleEngageClick);
     window.addEventListener('resize', this.handleResize);
+    window.addEventListener('keydown', this.toggleGuide);
 
     this.container.appendChild(this.root);
 
@@ -405,6 +435,20 @@ export class HUD {
     this.elapsedSec += safeDt;
 
     const fpv = telemetry.fpv ?? null;
+    this.guide.hidden = !telemetry.alive && !fpv;
+    const cls = telemetry.vehicleClass;
+    const kind = fpv?.kind ?? (cls === 'littlebird' || cls === 'apache' ? 'air' : cls === 'support' ? 'carrier' :
+      cls === 'rocket' ? 'rocket' : cls === 'ifv' || cls === 'humvee' ? 'light' : 'tank');
+    if (kind !== this.guideKind) {
+      this.guideKind = kind;
+      const rows = document.createDocumentFragment();
+      for (const [key, action] of [...CONTROL_GUIDES[kind], ['Alt', 'Free-look'], ['Esc / P', 'Menu']]) {
+        const dt = document.createElement('dt'), dd = document.createElement('dd');
+        dt.textContent = key; dd.textContent = action;
+        rows.append(dt, dd);
+      }
+      this.guideRows.replaceChildren(rows);
+    }
     if (this.fpvEl) {
       this.fpvEl.classList.toggle('is-active', fpv !== null);
       this.fpvEl.classList.toggle('is-free-look', telemetry.freeLooking);
@@ -450,8 +494,7 @@ export class HUD {
         <div class="fcs-fpv-row"><span>RNG</span><span class="fcs-fpv-val fcs-fpv-rng">0 m</span></div>
         <div class="fcs-fpv-row"><span class="fcs-fpv-payload">NEXT</span><span class="fcs-fpv-val fcs-fpv-cooldown">9 s</span></div>
       </div>
-      <div class="fcs-fpv-x"></div>
-      <div class="fcs-fpv-hint">DETONATES ON IMPACT · RMB ABORT · W/S THROTTLE · A/D TURN</div>`;
+      <div class="fcs-fpv-x"></div>`;
     return el;
   }
 
@@ -465,9 +508,6 @@ export class HUD {
     root.querySelector('.fcs-fpv-tag')!.textContent = gun ? 'GUN DRONE' : 'FPV';
     root.querySelector('.fcs-fpv-payload')!.textContent = gun ? 'HEALTH' : 'NEXT';
     root.querySelector('.fcs-fpv-cooldown')!.textContent = gun ? `${f.healthPercent}%` : f.cooldown > 0 ? `${Math.ceil(f.cooldown)} s` : 'Ready';
-    root.querySelector('.fcs-fpv-hint')!.textContent = gun
-      ? 'CLICK TO FIRE · RMB ABORT · W/S THROTTLE · A/D TURN'
-      : 'DETONATES ON IMPACT · RMB ABORT · W/S THROTTLE · A/D TURN';
 
   }
 
@@ -480,6 +520,7 @@ export class HUD {
   }
 
   public dispose(): void {
+    window.removeEventListener('keydown', this.toggleGuide);
     this.engageBtnEl.removeEventListener('click', this.handleEngageClick);
     window.removeEventListener('resize', this.handleResize);
     if (this.root.parentNode === this.container) {
@@ -2175,9 +2216,15 @@ export class HUD {
     }
     modelCredit.append(' | ', apacheSource);
     head.append(title);
-    modal.setAttribute('role', 'dialog');
-    modal.setAttribute('aria-modal', 'true');
-    modal.setAttribute('aria-labelledby', title.id);
+    backdrop.setAttribute('role', 'dialog');
+    backdrop.setAttribute('aria-modal', 'true');
+    backdrop.setAttribute('aria-labelledby', title.id);
+    const preview = this.previewPane;
+    preview.className = 'fcs-model-preview';
+    preview.tabIndex = 0;
+    preview.setAttribute('role', 'group');
+    preview.setAttribute('aria-description', 'Drag or use the arrow keys to rotate. Press Home to reset the view.');
+    preview.innerHTML = '<span class="fcs-orbit-hint"><svg width="24" height="16" viewBox="0 0 24 16" fill="none" aria-hidden="true"><path d="M7 4C4 5 2 6 2 8s4.5 4 10 4 10-1.8 10-4-4.5-4-10-4H8m2-2L7 4l3 2" stroke="currentColor" stroke-width="1.5"/></svg>Drag to rotate</span>';
     const modes = document.createElement('div');
     modes.className = 'fcs-mode-picker';
     modes.setAttribute('role', 'group');
@@ -2251,6 +2298,11 @@ export class HUD {
       const stats = TANK_STATS[spec.id];
       const speed = Math.round(stats.maxForwardSpeed * playerDriveScale(spec.id) * 3.6);
       detailName.textContent = spec.name;
+      preview.setAttribute('aria-label', `${spec.name} 3D preview`);
+      const profile = detail.querySelector<HTMLElement>('.fcs-profile')!;
+      profile.tabIndex = 0;
+      profile.setAttribute('role', 'group');
+      profile.setAttribute('aria-label', `Rotate the ${spec.name} preview`);
       loadout.textContent = `${spec.armament} / ${speed} km/h`;
       note.textContent = spec.note;
       outline.setAttribute('d', PROFILE[spec.id]);
@@ -2352,7 +2404,7 @@ export class HUD {
     controls.innerHTML = '<summary>Controls & credits</summary>';
     controls.append(kbSection, modelCredit);
     modal.append(head, modes, sub, room, board, footer, controls);
-    backdrop.appendChild(modal);
+    backdrop.append(modal, preview);
 
     return {
       backdrop,

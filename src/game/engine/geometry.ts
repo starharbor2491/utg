@@ -621,9 +621,11 @@ export class Path {
     return this;
   }
   absarc(x: number, y: number, radius: number, start: number, end: number, clockwise = false): this {
+    const turn = Math.PI * 2;
     let delta = end - start;
-    if (!clockwise && delta < 0) delta += Math.PI * 2;
-    if (clockwise && delta > 0) delta -= Math.PI * 2;
+    if (Math.abs(delta) >= turn) delta = clockwise ? -turn : turn;
+    else if (!clockwise && delta < 0) delta += turn;
+    else if (clockwise && delta > 0) delta -= turn;
     const steps = Math.max(2, Math.ceil(Math.abs(delta) / (Math.PI * 2) * 48));
     for (let i = 0; i <= steps; i++) {
       const a = start + delta * i / steps;
@@ -736,8 +738,8 @@ export function extrude(shapes: Shape | Shape[], options: ExtrudeOptions = {}): 
         for (let i = 0; i < len; i++) {
           const a = layerA + start + i, b = layerA + start + (i + 1) % len;
           const d = layerB + start + i, e = layerB + start + (i + 1) % len;
-          if (c === 0) out.indices.push(a, d, b, b, d, e);
-          else out.indices.push(a, b, d, b, e, d);
+          // Holes already have opposite winding. In either contour the solid is on the left.
+          out.indices.push(a, b, d, b, e, d);
         }
       }
     }
