@@ -115,13 +115,12 @@ const ROCKET_LAYOUT: ClassDamageLayout = {
   ],
 };
 
-/** Support reuses the rocket layout; the launcher module gains a rear
- *  drone-bay box (still reported under the 'launcher' module id). */
+/** Both launch bays are fixed to the carrier's hull. */
 const SUPPORT_LAYOUT: ClassDamageLayout = {
   ...ROCKET_LAYOUT,
   modules: ROCKET_LAYOUT.modules.map((m) =>
     m.id === 'launcher'
-      ? { ...m, boxes: [...m.boxes, nx(0.15, 0.0, -0.4, 0.85, 0.55, 0.05, TURRET, EXT)] }
+      ? { ...m, boxes: [nx(0.09, 0.48, 0.03, 0.91, 0.77, 0.43, HULL, EXT)] }
       : m
   ),
 };

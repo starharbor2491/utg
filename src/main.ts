@@ -37,7 +37,8 @@ import { BallisticsManager, predictBarrelImpact } from './game/Ballistics';
 import { PlayerController } from './game/PlayerController';
 import { BotAIManager } from './game/BotAI';
 import { Match } from './game/Match';
-import { DroneManager } from './game/Drone';
+import { DRONE_BELT, DroneManager, type PilotInput } from './game/Drone';
+import { DUEL_CLASSES, DuelRoom, makeCode, numberPacket } from './game/Duel';
 import { HUD } from './game/HUD';
 import { HitCam } from './game/HitCam';
 import { auditThreeObject, type AuditIssue } from './game/SceneAudit';
@@ -135,7 +136,7 @@ function markerCodeForClass(cls: VehicleClass): string {
   if (cls === 'ifv') return 'IFV';
   if (cls === 'humvee') return 'Humvee';
   if (cls === 'rocket') return 'Rocket';
-  if (cls === 'support') return 'Support';
+  if (cls === 'support') return 'Drone Carrier';
   if (cls === 'littlebird') return 'Little Bird';
   if (cls === 'apache') return 'Apache';
   return 'MBT';
@@ -232,6 +233,8 @@ async function bootstrap(): Promise<void> {
 
   let controllerRef: PlayerController | null = null;
   let swapPlayerClassFn: ((cls: VehicleClass) => void) | null = null;
+  let startRoomFn: ((host: boolean, code: string) => void) | null = null;
+  let leaveRoomFn: (() => void) | null = null;
 
   const hud = new HUD(hudRoot, {
     onEngageClick: () => {
@@ -243,6 +246,8 @@ async function bootstrap(): Promise<void> {
     onSelectVehicleClass: (cls) => {
       swapPlayerClassFn?.(cls);
     },
+    onDuelRequest: (host, code) => startRoomFn?.(host, code),
+    onDuelLeave: () => leaveRoomFn?.(),
   });
 
   const markerLayer = document.createElement('div');
@@ -283,7 +288,8 @@ async function bootstrap(): Promise<void> {
   hud.setLoadingProgress(1, 'Ready');
 
   // Persistent physical wrecks for every kill (current roster + prebuilt human vehicles)
-  match.forEachTankEver((t) => {
+  const bindTank = (t: Tank) => {
+    if (t.onDestroyed) return;
     t.onDestroyed = (info) => destruction.spawnWreck(info);
     // Internal kills (cook-off, fire) happen outside Ballistics' onDamage path.
     t.onKillEvent = (ev) => {
@@ -298,7 +304,8 @@ async function bootstrap(): Promise<void> {
         killReason: ev.killReason,
       });
     };
-  });
+  };
+  match.forEachTankEver(bindTank);
 
   // Bots = every tank except the human (tanks[0]); stable for the whole match
   const allTanks: Tank[] = match.tanks;
@@ -332,8 +339,19 @@ async function bootstrap(): Promise<void> {
   let deaths = 0;
   let friendlyFireEvents = 0;
 
-  swapPlayerClassFn = (cls: VehicleClass) => {
-    match.selectHumanClass(cls);
+  let desiredClass: VehicleClass = 'normal';
+  let room: DuelRoom | null = null;
+  let duelActive = false;
+  let duelStarted = false;
+  let remoteInput: number[] | null = null;
+  let remoteAt = 0;
+  let remoteClass: VehicleClass | null = null;
+  let wirePitch = 0, wireRoll = 0, wireDx = 0, wireDy = 0, wireEdges = 0, wireSlot = -1, wireShot = false;
+  let snapshotTimer = 0;
+  let hasEnteredBattle = false;
+  swapPlayerClassFn = (cls) => {
+    desiredClass = cls;
+    if (!duelActive || room?.host) match.selectHumanClass(cls);
   };
 
   const controller = new PlayerController(camera, canvas);
@@ -383,8 +401,8 @@ async function bootstrap(): Promise<void> {
   let incomingDamageYaw = 0;
   let incomingDamageTimer = 0;
 
-  const handleDamage = (ev: DamageEvent) => {
-    match.onDamage(ev);
+  const handleDamage = (ev: DamageEvent, replica = false) => {
+    if (!replica) match.onDamage(ev);
     if (ev.attacker && ev.attacker.team === ev.victim.team) {
       friendlyFireEvents++;
     }
@@ -393,7 +411,9 @@ async function bootstrap(): Promise<void> {
     const attacker = ev.attacker as Tank | null;
     const killedNow = ev.killed;
 
-    if (!victim.isHuman && ev.xrayReport && attacker?.isHuman) {
+    const localTarget = victim === match.human;
+    const localShooter = attacker?.team === match.human.team && !!attacker?.isHuman;
+    if (!localTarget && ev.xrayReport && localShooter) {
       xrayFlashCount++;
       hitCam.showHit(ev.xrayReport);
     }
@@ -405,10 +425,14 @@ async function bootstrap(): Promise<void> {
       botAI.notifyDamaged(victim.id, attacker?.id ?? null);
     }
 
-    if (attacker?.isHuman && victim.team !== 'blue') {
+    if (localShooter && victim.team !== match.human.team) {
       const xr = ev.xrayReport;
       if (xr) {
-        if (xr.ricochet) hitResultText = 'RICOCHET';
+        if (ev.weapon === 'mg' && !xr.penetrated && xr.hitModules.length) {
+          const part = xr.hitModules.find((m) => m.newState === 'destroyed') ?? xr.hitModules[0];
+          hitResultText = `${part.label} ${part.newState === 'destroyed' ? 'DESTROYED' :
+            part.newState === 'damaged' ? 'DAMAGED' : 'TAKING DAMAGE'}`;
+        } else if (xr.ricochet) hitResultText = 'RICOCHET';
         else if (xr.penetrated) {
           const broke = xr.hitModules
             .filter((h) => h.newState !== 'ok')
@@ -431,7 +455,7 @@ async function bootstrap(): Promise<void> {
         }
         hitMarkerTimer = Math.max(hitMarkerTimer, ev.weapon === 'cannon' ? 0.45 : 0.18);
       }
-    } else if (victim.isHuman) {
+    } else if (localTarget) {
       if (attacker) {
         incomingDamageYaw = Math.atan2(
           attacker.position.x - victim.position.x,
@@ -444,10 +468,30 @@ async function bootstrap(): Promise<void> {
         deaths++;
       }
     }
+    if (!replica && duelActive && room?.host) {
+      const xr = ev.xrayReport;
+      room.send([3, attacker ? Number(attacker.team === 'red') : -1, Number(victim.team === 'red'),
+        Number(ev.weapon === 'mg'), Number(killedNow), ev.hitPoint.x, ev.hitPoint.y, ev.hitPoint.z,
+        xr?.penetrated ? 1 : xr?.ricochet ? 2 : 0]);
+    }
   };
 
   const _muzzlePos = new Vec3();
   droneManager.onDamage = handleDamage;
+  const sendShot = (shooter: TankEntity, pos: Vec3, dir: Vec3, mg: boolean, slot: number, guided = false) => {
+    if (duelActive && room?.host) room.send([2, Number(shooter.team === 'red'), Number(mg), slot,
+      pos.x, pos.y, pos.z, dir.x, dir.y, dir.z, Number(guided)]);
+  };
+  droneManager.onFireMG = (shooter, pos, dir, spec) => {
+    ballistics.fireCoaxMG(shooter, pos, dir, spec);
+    sendShot(shooter, pos, dir, true, 2);
+  };
+  droneManager.onGunLost = (shotDown) => {
+    hitResultText = shotDown ? 'GUN DRONE SHOT DOWN' : 'GUN DRONE LOST';
+    hitResultTimer = 2;
+  };
+  ballistics.hitDrone = (team, origin, dir, limit, damage) =>
+    !ballistics.visualOnly && droneManager.hitByProjectile(team, origin, dir, limit, damage);
   const _muzzleDir = new Vec3();
   const _boreImpactWorld = new Vec3();
   const _projScratch = new Vec3();
@@ -507,12 +551,14 @@ async function bootstrap(): Promise<void> {
   const tankCallbacks = {
     onFireCannon: (shooter: Tank, pos: Vec3, dir: Vec3, shell: ShellSpec, guideTarget?: TankEntity | null) => {
       ballistics.fireCannon(shooter, pos, dir, shell, guideTarget);
+      sendShot(shooter, pos, dir, false, shell === shooter.stats.shells[1] ? 1 : 0, !!guideTarget);
       if (shooter === match.human) {
         controller.addShake(shooter.stats.vehicleClass === 'heavy' ? 0.52 : 0.34);
       }
     },
     onFireMG: (shooter: Tank, pos: Vec3, dir: Vec3, beltSpec?: ShellSpec) => {
       ballistics.fireCoaxMG(shooter, pos, dir, beltSpec);
+      sendShot(shooter, pos, dir, true, !beltSpec ? -1 : beltSpec === shooter.stats.shells[1] ? 1 : 0);
       if (shooter === match.human && beltSpec) {
         controller.addShake(0.035);
       }
@@ -537,6 +583,103 @@ async function bootstrap(): Promise<void> {
   const _lastFpvQuat = new Quat();
   let fpvExitT = -1;
   let wasFpv = false;
+  let wasGunDrone = false;
+  const remoteAim = new Vec3(), remoteOrigin = new Vec3(), netPos = new Vec3(), netDir = new Vec3();
+  const remoteKeys = new Set<string>();
+  const duelObstacles = world.getObstacles();
+  const obstacleDestroyed = world.onObstacleDestroyed;
+  world.onObstacleDestroyed = (o) => {
+    obstacleDestroyed?.(o);
+    if (duelActive && room?.host) room.send([4, duelObstacles.indexOf(o)]);
+  };
+
+  const receiveRoomPacket = (data: unknown) => {
+    if (!duelActive || !room || !Array.isArray(data)) return;
+    if (room.host) {
+      if (data[0] !== 0 || !numberPacket(data, 25) || !DUEL_CLASSES[data[1]]) return;
+      remoteInput = data;
+      remoteAt = performance.now();
+      wirePitch += clamp(data[16], -3, 3); wireRoll += clamp(data[17], -3, 3);
+      wireDx += clamp(data[19], -2000, 2000); wireDy += clamp(data[20], -2000, 2000);
+      if (data[14] === 0 || data[14] === 1) wireSlot = data[14];
+      wireEdges |= (data[24] | 0) & 3;
+      wireShot ||= data[12] === 1;
+      return;
+    }
+    const block = Tank.duelSnapshotLength + 11;
+    if (data[0] === 1 && numberPacket(data, 3 + 2 * block)) {
+      const hostClass = DUEL_CLASSES[data[3]], localClass = DUEL_CLASSES[data[3 + block]];
+      if (!hostClass || !localClass) return;
+      const local = match.mountDuelVehicle(0, localClass), host = match.mountDuelVehicle(1, hostClass);
+      bindTank(local); bindTank(host);
+      local.applyDuelSnapshot(data.slice(4 + block, 4 + block + Tank.duelSnapshotLength), host);
+      host.applyDuelSnapshot(data.slice(4, 4 + Tank.duelSnapshotLength), local);
+      droneManager.applyDuelSnapshot(local, data.slice(4 + block + Tank.duelSnapshotLength), scene);
+      droneManager.applyDuelSnapshot(host, data.slice(4 + Tank.duelSnapshotLength, 3 + block), scene);
+      match.score.blue = data[1]; match.score.red = data[2];
+      bots[0] = host;
+    } else if (data[0] === 2 && numberPacket(data, 11) && (data[1] === 0 || data[1] === 1)) {
+      const shooter = match.tanks[data[1] === 0 ? 1 : 0], target = match.tanks[data[1] === 0 ? 0 : 1];
+      netPos.set(data[4], data[5], data[6]); netDir.set(data[7], data[8], data[9]);
+      const spec = data[3] === 2 ? DRONE_BELT : data[3] < 0 ? undefined : shooter.stats.shells[data[3] === 1 ? 1 : 0];
+      if (data[2] === 1) ballistics.fireCoaxMG(shooter, netPos, netDir, spec);
+      else if (spec?.muzzleSpeed) ballistics.fireCannon(shooter, netPos, netDir, spec, data[10] === 1 ? target : null);
+    } else if (data[0] === 3 && numberPacket(data, 9)) {
+      const victim = match.tanks[data[2] === 0 ? 1 : 0];
+      const attacker = data[1] < 0 ? null : match.tanks[data[1] === 0 ? 1 : 0];
+      handleDamage({ victim, attacker, weapon: data[3] ? 'mg' : 'cannon', killed: data[4] === 1,
+        amount: 0, hitPoint: netPos.set(data[5], data[6], data[7]) }, true);
+      if (attacker === match.human) {
+        hitResultText = data[8] === 1 ? 'PENETRATION' : data[3] ? 'TARGET HIT' : data[8] === 2 ? 'RICOCHET' : 'NO PENETRATION';
+        hitResultTimer = 1.2;
+      }
+    } else if (data[0] === 4 && numberPacket(data, 2) && duelObstacles[data[1]]) {
+      world.damageObstacle(duelObstacles[data[1]], 100000);
+    }
+  };
+
+  startRoomFn = (host, code) => {
+    if (duelStarted) return;
+    room?.close();
+    const newRoom = new DuelRoom(host, host ? makeCode() : code, (state, detail) => {
+      if (room !== newRoom) return;
+      hud.setRoomStatus(state, host && (state === 'waiting' || state === 'connected') ? newRoom.code : '', detail);
+      if (state === 'connected') {
+        duelActive = duelStarted = true;
+        const localTeam = host ? 'blue' : 'red';
+        droneManager.reset();
+        droneManager.localTeam = localTeam;
+        droneManager.botLaunchesEnabled = false;
+        ballistics.visualOnly = !host;
+        match.beginDuel(localTeam);
+        match.tanks.forEach(bindTank);
+        bots.splice(0, bots.length, match.tanks[1]);
+        markerLayer.replaceChildren();
+        unitMarkers.splice(0, unitMarkers.length, buildUnitMarker(false, 'Opponent', 'normal'));
+        markerLayer.appendChild(unitMarkers[0].el);
+        minimapUnits.splice(0, minimapUnits.length, { x: 0, z: 0, yaw: 0, alive: true, spotted: false, ally: false });
+        if (host) for (let i = 0; i < duelObstacles.length; i++) {
+          if (duelObstacles[i].destroyed) newRoom.send([4, i]);
+        }
+        kills = deaths = 0;
+        controller.setEngaged(false);
+        document.exitPointerLock?.();
+      } else if (state === 'closed') {
+        duelActive = false;
+        controller.setEngaged(false);
+        document.exitPointerLock?.();
+      }
+    }, receiveRoomPacket);
+    room = newRoom;
+    newRoom.connect();
+  };
+  leaveRoomFn = () => {
+    room?.close();
+    room = null;
+    if (duelStarted) location.reload();
+    else hud.setRoomStatus('idle');
+  };
+  window.addEventListener('pagehide', () => room?.close());
   let shadowTickToggle = 0;
 
   // Adaptive quality: L0 = full, L1 = DPR 1.0 + medium world, L2 = L1 + 15 Hz
@@ -632,17 +775,18 @@ async function bootstrap(): Promise<void> {
 
   let activeEnemyCount = 0;
   let lastPlayerThrottle = 0;
+  const briefingViewPos = new Vec3(), briefingViewAim = new Vec3();
 
   // All simulation work (no HUD/DOM/render) — steppable headlessly via __tankQA.fastForward
   const stepSimulation = (dt: number): void => {
     const human = match.human;
-    const isDeployed = controller.pointerLocked || forceHideBriefing;
+    const isDeployed = !document.hidden && (controller.pointerLocked || forceHideBriefing);
 
     const shakeImpulse = effects.consumeCameraShake(camera.getPosition());
     let playerIntent = null;
     if (qaIntentOverride) {
       playerIntent = qaIntentOverride;
-    } else if (!cameraOverrideActive) {
+    } else if (!cameraOverrideActive && !document.hidden) {
       playerIntent = controller.update(dt, human, world, allTanks, shakeImpulse);
     }
     if (playerIntent && qaFireCannonOnce) {
@@ -651,41 +795,94 @@ async function bootstrap(): Promise<void> {
     }
     lastPlayerThrottle = playerIntent?.throttle ?? 0;
 
-    const aiIntents = isDeployed ? botAI.update(dt, bots, allTanks, world) : null;
-
-    human.stepKinematics(dt, isDeployed ? playerIntent : null, world, allTanks, tankCallbacks);
-    for (const bot of bots) {
-      bot.stepKinematics(dt, aiIntents?.get(bot.id) ?? null, world, allTanks, tankCallbacks);
-    }
-
-    // ---- F5b FPV drone: player input, launches, detonation, camera ----
     const dmx = controller.takeDroneDelta();
     const dEdges = controller.takeDroneEdges();
+    const keys = controller.pressedKeys;
+    const droneInput: PilotInput = {
+      dmx: dmx.dx, dmy: dmx.dy, keys,
+      up: keys.has('KeyW') || keys.has('ArrowUp'), down: keys.has('KeyS') || keys.has('ArrowDown'),
+      fire: !controller.freeLooking && (controller.primaryHeld || dEdges.lmb || keys.has('Space') || keys.has('KeyC')),
+    };
+    const guest = duelActive && !room?.host;
+    if (guest) {
+      const a = playerIntent?.aimPoint, o = playerIntent?.aimRayOrigin;
+      const side = Number(keys.has('KeyA') || keys.has('ArrowLeft')) - Number(keys.has('KeyD') || keys.has('ArrowRight'));
+      room?.send([0, DUEL_CLASSES.indexOf(desiredClass), Number(isDeployed),
+        playerIntent?.throttle ?? 0, playerIntent?.steer ?? 0, Number(!!playerIntent?.brake),
+        a?.x ?? 0, a?.y ?? 0, a?.z ?? 0, o?.x ?? 0, o?.y ?? 0, o?.z ?? 0,
+        Number(!!playerIntent?.fireCannon), Number(!!playerIntent?.fireMG), playerIntent?.selectShell ?? -1,
+        playerIntent?.flightYaw ?? 10, playerIntent?.flightPitchDelta ?? 0, playerIntent?.flightRollDelta ?? 0,
+        playerIntent?.collectiveAdjust ?? 0, dmx.dx, dmx.dy, side, Number(droneInput.up) - Number(droneInput.down),
+        Number(droneInput.fire), Number(dEdges.lmb) | (Number(dEdges.rmb) << 1)]);
+      for (const tank of allTanks) tank.animateDuelReplica(dt);
+    } else {
+      human.stepKinematics(dt, isDeployed ? playerIntent : null, world, allTanks, tankCallbacks);
+      if (duelActive) {
+        const latest = remoteInput && performance.now() - remoteAt < 650 ? remoteInput : null;
+        const cls = latest ? DUEL_CLASSES[latest[1]] : null;
+        if (cls && cls !== remoteClass) {
+          remoteClass = cls;
+          match.selectDuelClass(1, cls);
+        }
+        const opponent = match.tanks[1];
+        bindTank(opponent);
+        const intent: TankIntent | null = latest?.[2] === 1 ? {
+          throttle: clamp(latest[3], -1, 1), steer: clamp(latest[4], -1, 1), brake: latest[5] === 1,
+          aimPoint: remoteAim.set(latest[6], latest[7], latest[8]), aimRayOrigin: remoteOrigin.set(latest[9], latest[10], latest[11]),
+          fireCannon: wireShot, fireMG: latest[13] === 1, selectShell: wireSlot === 0 || wireSlot === 1 ? wireSlot : null,
+          flightYaw: Math.abs(latest[15]) <= Math.PI ? latest[15] : undefined,
+          flightPitchDelta: clamp(wirePitch, -3, 3), flightRollDelta: clamp(wireRoll, -3, 3),
+          collectiveAdjust: clamp(latest[18], -1, 1),
+        } : null;
+        const airborne = droneManager.drones.find((d) => d.team === opponent.team && d.alive && d.health > 0);
+        opponent.stepKinematics(dt, airborne ? null : intent, world, allTanks, tankCallbacks);
+        droneManager.opponentInput = null;
+        if (intent && latest) {
+          if (airborne) {
+            remoteKeys.clear();
+            if (latest[21] > 0) remoteKeys.add('KeyA');
+            if (latest[21] < 0) remoteKeys.add('KeyD');
+            droneManager.opponentInput = { dmx: clamp(wireDx, -2000, 2000), dmy: clamp(wireDy, -2000, 2000),
+              up: latest[22] > 0, down: latest[22] < 0, fire: latest[23] === 1, keys: remoteKeys };
+            if (wireEdges & 2) airborne.phase = 'fall';
+          } else if ((wireEdges & 1) && opponent.alive && opponent.stats.vehicleClass === 'support' &&
+            !droneManager.drones.some((d) => d.team === opponent.team && d.alive)) {
+            droneManager.launch(opponent, { kind: opponent.selectedShellIndex === 1 ? 'fpv' : 'gun' });
+          }
+        }
+        wirePitch = wireRoll = wireDx = wireDy = wireEdges = 0;
+        wireShot = false;
+        wireSlot = -1;
+      } else {
+        const aiIntents = isDeployed ? botAI.update(dt, bots, allTanks, world) : null;
+        for (const bot of bots) bot.stepKinematics(dt, aiIntents?.get(bot.id) ?? null, world, allTanks, tankCallbacks);
+      }
+    }
+
+    // Drone pilot camera and local controls.
     const playerDrone = droneManager.playerDrone;
-    const fpvSlotSelected = human.stats.vehicleClass === 'support' && human.selectedShellIndex === 1;
+    const onCarrier = human.stats.vehicleClass === 'support';
     if (playerDrone) {
-      droneManager.playerInput = isDeployed ? {
-        dmx: dmx.dx,
-        dmy: dmx.dy,
-        up: controller.pressedKeys.has('KeyW') || controller.pressedKeys.has('ArrowUp'),
-        down: controller.pressedKeys.has('KeyS') || controller.pressedKeys.has('ArrowDown'),
-        keys: controller.pressedKeys,
-      } : null;
+      if (!wasFpv && !wasGunDrone && guest) controller.saveChaseState();
+      droneManager.playerInput = isDeployed ? droneInput : null;
       controller.droneMode = true;
-      if (isDeployed && dEdges.rmb) playerDrone.phase = 'fall';
+      if (!guest && isDeployed && dEdges.rmb) playerDrone.phase = 'fall';
       playerDrone.getCameraPose(_fpvPos, _fpvQuat);
       controller.fpvCamPos = _fpvPos;
       controller.fpvCamQuat = _fpvQuat;
       fpvExitT = -1;
-      wasFpv = true;
+      wasFpv = playerDrone.kind === 'fpv';
+      wasGunDrone = playerDrone.kind === 'gun';
     } else {
       droneManager.playerInput = null;
+      if (wasGunDrone) controller.restoreChaseState();
+      wasGunDrone = false;
       const exiting = wasFpv && fpvExitT < 0;
       if (exiting) {
         fpvExitT = 3.2;
         _fpvPos.copy(_lastFpvPos);
         _fpvQuat.copy(_lastFpvQuat);
-        if (droneManager.lastDetonation.shooter?.isHuman) {
+        if (droneManager.lastDetonation.shooter?.team === human.team && droneManager.lastDetonation.shooter.isHuman) {
           const hit = droneManager.lastDetonation.pos;
           applyQuat(_fpvDirTmp.set(0, 0, -1), _fpvQuat);
           _fpvPos.copy(hit).addScaled(_fpvDirTmp, -6);
@@ -711,20 +908,36 @@ async function bootstrap(): Promise<void> {
         controller.fpvCamQuat = null;
       }
       wasFpv = false;
-      // launch on latched LMB edge while the FPV slot is selected and ready
-      if (isDeployed && human.alive && !controller.droneMode && fpvSlotSelected && dEdges.lmb && droneManager.cooldownLeft(human) <= 0) {
+      if (!guest && isDeployed && human.alive && !controller.droneMode && onCarrier && dEdges.lmb && droneManager.cooldownLeft(human) <= 0) {
         controller.saveChaseState();
-        if (droneManager.launch(human, { autopilot: false })) controller.droneMode = true;
+        if (droneManager.launch(human, { autopilot: false, kind: human.selectedShellIndex === 1 ? 'fpv' : 'gun' })) {
+          controller.droneMode = true;
+        }
       }
     }
-    if (playerDrone) {
+    if (!guest) droneManager.update(dt, scene, isDeployed || duelActive);
+    if (playerDrone?.alive) {
+      // Follow the integrated position, not the previous frame's pose inside the moving drone.
+      playerDrone.getCameraPose(_fpvPos, _fpvQuat);
+      if (!cameraOverrideActive) controller.applyDroneCamera();
       _lastFpvPos.copy(_fpvPos);
       _lastFpvQuat.copy(_fpvQuat);
     }
-    droneManager.update(dt, scene, isDeployed);
 
     ballistics.update(dt, world, allTanks, handleDamage, destruction.getDecoyPoints());
-    match.update(dt);
+    if (!guest) match.update(dt);
+    if (duelActive && room?.host) {
+      bots[0] = match.tanks[1];
+      match.tanks.forEach(bindTank);
+      snapshotTimer -= dt;
+      if (snapshotTimer <= 0) {
+        snapshotTimer = Math.max(0, snapshotTimer + 1 / 30);
+        const packet = [1, match.score.blue, match.score.red];
+        for (const tank of match.tanks) packet.push(DUEL_CLASSES.indexOf(tank.stats.vehicleClass),
+          ...tank.duelSnapshot(), ...droneManager.duelSnapshot(tank));
+        room.send(packet);
+      }
+    }
     world.update(dt, human.position, camera.getPosition());
     effects.update(dt, camera);
     destruction.update(dt, camera.getPosition());
@@ -738,13 +951,13 @@ async function bootstrap(): Promise<void> {
       u.z = e.position.z;
       u.yaw = e.hullYaw;
       u.alive = e.alive;
-      if (e.team === 'red') {
+      if (e.team !== human.team) {
         if (e.alive) {
           activeEnemyCount++;
           u.spotted = false;
           for (let a = 0; a < allTanks.length; a++) {
             const ally = allTanks[a];
-            if (!ally.alive || ally.team !== 'blue') continue;
+            if (!ally.alive || ally.team !== human.team) continue;
             const sdx = ally.position.x - e.position.x;
             const sdz = ally.position.z - e.position.z;
             if (sdx * sdx + sdz * sdz <= 48400) {
@@ -770,6 +983,11 @@ async function bootstrap(): Promise<void> {
     }
   };
 
+  // Keep the hosted battle moving when the host switches tabs, without rendering.
+  window.setInterval(() => {
+    if (duelActive && room?.host && document.hidden) stepSimulation(0.05);
+  }, 50);
+
   function tick(now: number): void {
     requestAnimationFrame(tick);
 
@@ -780,6 +998,7 @@ async function bootstrap(): Promise<void> {
     }
 
     const isDeployed = controller.pointerLocked || forceHideBriefing;
+    if (isDeployed && !forceHideBriefing) hasEnteredBattle = true;
     // Thermal frame limiter: 60 FPS max when playing (prevents 120Hz ProMotion double GPU load), 15 FPS when paused on menu!
     const minIntervalMs = isDeployed || cameraOverrideActive ? 15.6 : 64.0;
     const elapsedMs = now - lastFrameTime;
@@ -809,13 +1028,24 @@ async function bootstrap(): Promise<void> {
     }
 
     const _perfS0 = perfProbe.active ? performance.now() : 0;
-    if (isDeployed) stepSimulation(dt);
+    if (duelActive || (isDeployed && !duelStarted)) stepSimulation(dt);
     else if (!cameraOverrideActive) controller.update(dt, match.human, world, allTanks, 0);
     if (perfProbe.active) perfProbe.simMs += performance.now() - _perfS0;
     const playerTank = match.human;
 
     const vw = window.innerWidth;
     const vh = window.innerHeight;
+    if (!hasEnteredBattle && !isDeployed && !cameraOverrideActive && !duelActive) {
+      const p = playerTank.position, showFrom = playerTank.stats.vehicleClass === 'support' ? Math.PI - 0.71 : 0.66;
+      const angle = playerTank.hullYaw + showFrom;
+      const length = playerTank.stats.drive === 'air' || playerTank.stats.drive === 'wheeled' ? 13 : 11;
+      briefingViewPos.set(p.x + Math.sin(angle) * length, p.y + 4.8, p.z + Math.cos(angle) * length);
+      const shift = vw > 740 ? Math.min(7.0, length * vw / vh * 0.23) : 0;
+      briefingViewAim.set(p.x - Math.cos(angle) * shift, p.y + (vw > 740 ? 1.3 : -2.5), p.z + Math.sin(angle) * shift);
+      camera.setPosition(briefingViewPos);
+      camera.lookAt(briefingViewAim);
+      camera.camera!.fov = 51;
+    }
     projectWorldToScreen(controller.commanderAimWorld, camera, vw, vh, commanderAimScreen, _projScratch);
 
     if (playerTank.stats.drive === 'air' && playerTank.selectedShellIndex === 1) {
@@ -931,7 +1161,7 @@ async function bootstrap(): Promise<void> {
       deaths,
       activeEnemies: activeEnemyCount,
       score: match.score,
-      playerTeam: 'blue',
+      playerTeam: playerTank.team,
       fps: Math.round(fpsSmooth),
       hitMarker: {
         kind: hitMarkerKind,
@@ -1282,6 +1512,7 @@ async function bootstrap(): Promise<void> {
       textures: renderer.info.memory.textures,
       activeClass: match.human.stats.vehicleClass,
       activeShell: match.human.activeShell.shortCode,
+      mgHeat: match.human.mgHeat,
       rocketsLeft: match.human.rocketsLeft,
       salvoActive: match.human.salvoInProgress,
     }),
@@ -1484,7 +1715,6 @@ async function bootstrap(): Promise<void> {
     getMatchState: () => ({
       score: { blue: match.score.blue, red: match.score.red },
       classKills: { ...match.classKills },
-      samLaunched: ballistics.samLaunched,
       drones: {
         active: droneManager.drones.filter((d) => d.alive).length,
         launched: droneManager.stats.launched,
@@ -1544,6 +1774,19 @@ async function bootstrap(): Promise<void> {
     firePlayerCannonForTest: () => {
       qaFireCannonOnce = true;
       return true;
+    },
+    stageDuelShotForTest: () => {
+      if (!duelActive || !room?.host) throw new Error('Requires a hosted duel');
+      const target = match.tanks[1];
+      const p = target.position;
+      target.getCenterMassWorld(_qaAimPoint);
+      const origin = _qaAimOrigin.copy(_qaAimPoint).addScaled(Vec3.FORWARD, 7);
+      const dir = netDir.sub2(_qaAimPoint, origin).normalize();
+      const spec = TANK_STATS.heavy.shells[1];
+      for (let i = 0; i < 6; i++) {
+        origin.y = p.y + 0.65 + i * 0.17;
+        ballistics.fireCannon(match.human, origin, dir, spec);
+      }
     },
     /** Guided-munition QA: a red tank drives a 40 m circle at 12 m/s, 300 m
      *  from the player's rocket launcher. Runs guided (locked), unguided
@@ -1685,13 +1928,13 @@ async function bootstrap(): Promise<void> {
         { name: 'MBT-HE', spec: TANK_STATS.normal.shells[1], dmg: TANK_STATS.normal.shells[1].directDamage, weapon: 'cannon' },
         { name: 'APCBC', spec: TANK_STATS.heavy.shells[0], dmg: TANK_STATS.heavy.shells[0].directDamage, weapon: 'cannon' },
         { name: 'Hvy-HE', spec: TANK_STATS.heavy.shells[1], dmg: TANK_STATS.heavy.shells[1].directDamage, weapon: 'cannon' },
-        { name: 'APDS-T', spec: TANK_STATS.ifv.shells[0], dmg: TANK_STATS.ifv.shells[0].directDamage, weapon: 'cannon' },
-        { name: 'IFV-HEI', spec: TANK_STATS.ifv.shells[1], dmg: TANK_STATS.ifv.shells[1].directDamage, weapon: 'cannon' },
-        { name: 'M2-.50', spec: TANK_STATS.humvee.shells[0], dmg: TANK_STATS.humvee.shells[0].directDamage, weapon: 'cannon' },
-        { name: '7.62', spec: undefined, dmg: 2.8, weapon: 'mg' },
+        { name: 'APDS-T', spec: TANK_STATS.ifv.shells[0], dmg: TANK_STATS.ifv.shells[0].directDamage, weapon: 'mg' },
+        { name: 'IFV-HEI', spec: TANK_STATS.ifv.shells[1], dmg: TANK_STATS.ifv.shells[1].directDamage, weapon: 'mg' },
+        { name: 'M2-.50', spec: TANK_STATS.humvee.shells[0], dmg: TANK_STATS.humvee.shells[0].directDamage, weapon: 'mg' },
+        { name: '7.62', spec: undefined, dmg: 9, weapon: 'mg' },
         { name: 'Rkt-HE', spec: TANK_STATS.rocket.shells[0], dmg: TANK_STATS.rocket.shells[0].directDamage, weapon: 'cannon' },
         { name: 'Rkt-AT', spec: TANK_STATS.rocket.shells[1], dmg: TANK_STATS.rocket.shells[1].directDamage, weapon: 'cannon' },
-        { name: 'SAM', spec: TANK_STATS.support.shells[0], dmg: TANK_STATS.support.shells[0].directDamage, weapon: 'cannon' },
+        { name: 'Drone MG', spec: DRONE_BELT, dmg: DRONE_BELT.directDamage, weapon: 'mg' },
       ];
       const victimClasses: VehicleClass[] = ['normal', 'heavy', 'ifv', 'humvee', 'rocket', 'support'];
       const aspects = ['front', 'side', 'rear', 'top'] as const;
@@ -1790,58 +2033,6 @@ async function bootstrap(): Promise<void> {
       return { trials: TRIALS, maxShots: MAX_SHOTS, rows };
     },
 
-    /** SAM ripple check: player support vs a circling red humvee 300 m out.
-     *  Fires one 8-missile ripple when locked; reports hits/8. */
-    samTest: () => {
-      swapPlayerClassFn?.('support');
-      const human = match.human;
-      const target =
-        bots.find((b) => b.team === 'red' && b.stats.vehicleClass === 'humvee') ??
-        bots.find((b) => b.team === 'red' && b.stats.vehicleClass !== 'support') ??
-        null;
-      if (!target) return { error: 'no red bot available' };
-      ballistics.resetGuidedStats();
-      ballistics.missProbeTarget = target;
-      ballistics.missProbeMin = Infinity;
-      setupGuidedScene(target);
-      qaIntentOverride = _qaIntent;
-      let steps = 0;
-      const maxSteps = 1100;
-      let salvosStarted = 0;
-      let lastSalvoStep = -1;
-      let wasSalvo = false;
-      while (steps < maxSteps) {
-        steps++;
-        target.getCenterMassWorld(_qaAimPoint);
-        _qaAimOrigin.set(human.position.x, human.position.y + 2.2, human.position.z);
-        _qaIntent.throttle = 0;
-        _qaIntent.steer = 0;
-        _qaIntent.brake = false;
-        _qaIntent.fireMG = false;
-        _qaIntent.selectShell = null;
-        const locked = Boolean(human.seekerLock?.locked);
-        const canTrigger =
-          human.cannonCooldown <= 0 && human.rocketsLeft > 0 && !human.salvoInProgress;
-        _qaIntent.fireCannon = locked && canTrigger && salvosStarted === 0;
-        stepSimulation(1 / 30);
-        const isSalvo = human.salvoInProgress;
-        if (isSalvo && !wasSalvo) {
-          salvosStarted++;
-          lastSalvoStep = steps;
-        }
-        wasSalvo = isSalvo;
-        if (salvosStarted >= 1 && steps > lastSalvoStep + 260) break;
-      }
-      qaIntentOverride = null;
-      target.qaDriveCircle = null;
-      return {
-        hits: ballistics.guidedHits,
-        launches: ballistics.samLaunched,
-        minMiss: Math.round(ballistics.missProbeMin * 10) / 10,
-        targetCrew: target.crewAlive,
-        rippleSec: Math.round((lastSalvoStep / 30) * 10) / 10,
-      };
-    },
     /** F5b: 10 autopilot top-attack runs vs a stationary red MBT at 250 m,
      *  then 10 vs a moving humvee. Reports hit rate / face / pen / KO. */
     droneTest: () => {

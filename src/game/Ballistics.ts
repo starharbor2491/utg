@@ -416,6 +416,8 @@ interface MgSlot {
 }
 
 export class BallisticsManager {
+  public hitDrone?: (team: TankEntity['team'] | undefined, origin: Vec3, direction: Vec3, limit: number, damage: number) => boolean;
+  public visualOnly = false;
   public readonly GRAVITY = GRAVITY;
 
   private readonly scene: Entity;
@@ -463,7 +465,6 @@ export class BallisticsManager {
   // QA metrics for guidedTest()
   public guidedHits = 0;
   public guidedDecoys = 0;
-  public samLaunched = 0;
   public guidedMinMiss = Infinity;
   /** When set, every rocket shell tracks closest approach to this entity (miss metric). */
   public missProbeTarget: TankEntity | null = null;
@@ -472,7 +473,6 @@ export class BallisticsManager {
   public resetGuidedStats(): void {
     this.guidedHits = 0;
     this.guidedDecoys = 0;
-    this.samLaunched = 0;
     this.guidedMinMiss = Infinity;
     this.missProbeMin = Infinity;
   }
@@ -614,7 +614,6 @@ export class BallisticsManager {
     slot.active = true;
     slot.shooter = shooter;
     slot.shellSpec = spec;
-    if (spec.id === 'sam') this.samLaunched++;
     slot.originX = muzzlePos.x;
     slot.originY = muzzlePos.y;
     slot.originZ = muzzlePos.z;
@@ -725,7 +724,7 @@ export class BallisticsManager {
     slot.age = 0;
     slot.maxAge = 1.45;
     slot.isPlayer = shooter.isHuman;
-    const mgBaseDamage = beltSpec ? beltSpec.directDamage : 5.4;
+    const mgBaseDamage = beltSpec ? beltSpec.directDamage : 9;
     slot.directDamage = shooter.isHuman ? mgBaseDamage : mgBaseDamage * 0.6;
     slot.splashDamage = beltSpec ? beltSpec.splashDamage : 0;
     slot.splashRadius = beltSpec ? beltSpec.splashRadius : 0;
@@ -1006,6 +1005,10 @@ export class BallisticsManager {
 
       const worldDist = worldHit ? worldHit.distance : Infinity;
       const impactIsWater = waterDist <= worldDist;
+      if (this.hitDrone?.(s.shooter?.team, this._prevPos, this._segDir, Math.min(segLen, bestTankDist, worldDist, waterDist), s.directDamage)) {
+        s.active = false;
+        continue;
+      }
 
       if (hitTank !== null || worldHit !== null || waterDist < Infinity) {
         s.active = false;
@@ -1031,7 +1034,7 @@ export class BallisticsManager {
 
           const dmg = s.directDamage;
           if (s.guide?.entity === directVictim && s.shooter?.isHuman) this.guidedHits++;
-          const killed = directVictim.takeDamage(
+          const killed = !this.visualOnly && directVictim.takeDamage(
             dmg,
             this._hitPoint.clone(),
             this._attackerPos,
@@ -1040,7 +1043,7 @@ export class BallisticsManager {
             s.shellSpec ?? undefined,
             { attacker: s.shooter }
           );
-          onDamage({
+          if (!this.visualOnly) onDamage({
             victim: directVictim,
             attacker: s.shooter,
             amount: dmg,
@@ -1068,7 +1071,7 @@ export class BallisticsManager {
           this._hitPoint.copy(worldHit.point);
           this._hitNormal.copy(worldHit.normal);
 
-          if (worldHit.obstacle) {
+          if (worldHit.obstacle && !this.visualOnly) {
             world.damageObstacle(worldHit.obstacle, s.directDamage, this._segDir.x, this._segDir.z);
           }
 
@@ -1078,7 +1081,7 @@ export class BallisticsManager {
         // HE-FRAG Splash Radius: knock down destructible obstacles & deal radial falloff damage
         // Water impacts burst half as far and flatter.
         const R = impactIsWater && !directVictim ? s.splashRadius * 0.5 : s.splashRadius;
-        if (R > 0) {
+        if (R > 0 && !this.visualOnly) {
           world.blastObstacles(this._hitPoint.x, this._hitPoint.y, this._hitPoint.z, R, s.splashDamage);
 
           for (let tIdx = 0; tIdx < tanks.length; tIdx++) {
@@ -1201,6 +1204,10 @@ export class BallisticsManager {
         }
       }
       const mgWaterHit = mgWaterDist <= worldDist && mgWaterDist < Infinity;
+      if (this.hitDrone?.(m.shooter?.team, this._prevPos, this._segDir, Math.min(segLen, bestTankDist, worldDist, mgWaterDist), m.directDamage)) {
+        m.active = false;
+        continue;
+      }
 
       if (hitTank !== null || worldHit !== null || mgWaterHit) {
         m.active = false;
@@ -1221,7 +1228,7 @@ export class BallisticsManager {
           }
 
           const chipDamage = m.directDamage;
-          const killed = hitTank.takeDamage(
+          const killed = !this.visualOnly && hitTank.takeDamage(
             chipDamage,
             this._hitPoint.clone(),
             this._attackerPos,
@@ -1230,7 +1237,7 @@ export class BallisticsManager {
             m.beltSpec ?? undefined,
             { attacker: m.shooter }
           );
-          onDamage({
+          if (!this.visualOnly) onDamage({
             victim: hitTank,
             attacker: m.shooter,
             amount: chipDamage,
@@ -1256,6 +1263,7 @@ export class BallisticsManager {
           if (m.splashRadius > 0) {
             this.effects.spawnWaterSplash(this._hitPoint, 0.9);
             this.effects.spawnExplosion(this._hitPoint, this._hitNormal, 0.3, 'he_ground');
+            if (this.visualOnly) continue;
             world.blastObstacles(wHitX, mgWaterY, wHitZ, m.splashRadius * 0.5, m.splashDamage);
             for (let tIdx = 0; tIdx < tanks.length; tIdx++) {
               const tank = tanks[tIdx];
@@ -1294,6 +1302,7 @@ export class BallisticsManager {
 
           if (m.splashRadius > 0) {
             this.effects.spawnExplosion(worldHit.point, worldHit.normal, 0.34, 'he_ground');
+            if (this.visualOnly) continue;
             world.blastObstacles(worldHit.point.x, worldHit.point.y, worldHit.point.z, m.splashRadius, m.splashDamage);
             // 30mm HEI-T splash damage to nearby living tanks
             for (let tIdx = 0; tIdx < tanks.length; tIdx++) {
@@ -1324,7 +1333,7 @@ export class BallisticsManager {
             this.effects.spawnSparkImpact(worldHit.point, worldHit.normal, isHardSurface);
           }
 
-          if (obs) world.damageObstacle(obs, m.directDamage, this._segDir.x, this._segDir.z);
+          if (obs && !this.visualOnly) world.damageObstacle(obs, m.directDamage, this._segDir.x, this._segDir.z);
         }
 
         continue;

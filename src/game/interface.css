@@ -1,0 +1,184 @@
+/* Deployment screen: keep the vehicle and the live battlefield on display. */
+.fcs-briefing-backdrop {
+  justify-content: flex-start;
+  padding: 0;
+  background: linear-gradient(90deg, #102228 0%, #102228 36%, rgba(16, 34, 40, .96) 47%, rgba(16, 34, 40, .20) 68%, transparent 100%);
+}
+
+.fcs-briefing-modal {
+  --briefing-panel: #102228;
+  --briefing-rule: #496168;
+  --briefing-muted: #bfd0d1;
+  --briefing-sheet: #d7e6df;
+  --briefing-ink: #102228;
+  width: clamp(440px, 48vw, 690px);
+  max-height: 100dvh;
+  padding: clamp(22px, 4vw, 72px);
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  scrollbar-color: #809b9c #102228;
+  color: var(--briefing-sheet);
+}
+
+.fcs-briefing-head {
+  border: 0;
+  padding: 0 0 18px;
+}
+
+.fcs-briefing-title {
+  margin: 0;
+  font: 850 clamp(42px, 6.3vw, 90px) / .88 var(--hud-font-display);
+  letter-spacing: -.038em;
+  text-wrap: balance;
+  text-transform: uppercase;
+  color: #f5ecda;
+  text-shadow: 1px 4px 18px rgba(4, 13, 15, .56);
+}
+
+.fcs-mode-picker {
+  display: flex;
+  gap: 20px;
+  align-self: flex-start;
+  border-bottom: 1px solid var(--briefing-rule);
+  margin: 8px 0 0;
+}
+
+.fcs-mode-picker button {
+  appearance: none;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  color: var(--briefing-muted);
+  background: none;
+  font: 700 18px / 1.2 var(--hud-font-display);
+  padding: 8px 15px 8px 0;
+  cursor: pointer;
+}
+.fcs-mode-picker button[aria-pressed="true"] {
+  color: #f5ecda;
+  border-bottom-color: #f4bc62;
+}
+
+.fcs-briefing-sub { margin: 9px 0 0; line-height: 1.4; }
+.fcs-briefing-board { gap: 20px; grid-template-columns: minmax(0, 1fr) minmax(0, .86fr); }
+.fcs-briefing-detail {
+  border: 0;
+  padding: 0 0 0 1px;
+  align-self: end;
+}
+.fcs-profile {
+  color: #e6c990;
+  background: transparent;
+  clip-path: none;
+}
+.fcs-profile-label, .fcs-profile-datum { display: none; }
+.fcs-profile-outline { fill: rgba(230, 201, 144, .16); stroke-width: 2; }
+.fcs-briefing-detail h2 { font-weight: 750; font-size: clamp(21px, 3vw, 34px); }
+.fcs-vlist { gap: 2px; }
+.fcs-vrow {
+  min-height: 29px;
+  border: 0;
+  background: transparent;
+  border-bottom: 1px solid #344e54;
+}
+.fcs-vrow:hover { background: #273f45; }
+.fcs-vrow.is-selected {
+  background: #e5c384;
+  color: #15272a;
+}
+.fcs-vrow.is-selected .fcs-vname, .fcs-vrow.is-selected .fcs-vspec { color: #15272a; }
+.fcs-briefing-footer { border: 0; padding-top: 4px; }
+.fcs-engage-btn {
+  background: #f4bc62;
+  color: #182a2d;
+  font-size: 16px;
+  font-weight: 800;
+  border: 0;
+  min-height: 46px;
+  clip-path: polygon(0 0, calc(100% - 13px) 0, 100% 13px, 100% 100%, 0 100%);
+}
+.fcs-engage-btn:not(:disabled):hover { background: #ffce7f; color: #102228; }
+.fcs-engage-btn:disabled { background: #425a5f; color: #e2e8e4; }
+.fcs-controls-drawer { margin-top: 14px; color: var(--briefing-muted); font-size: 12px; }
+.fcs-controls-drawer summary { width: max-content; cursor: pointer; }
+.fcs-controls-drawer a { text-underline-offset: 3px; }
+.fcs-room { margin-top: 12px; padding: 10px 0; border-block: 1px solid var(--briefing-rule); }
+.fcs-room form { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.fcs-room [hidden], .fcs-mode-picker[hidden] { display: none; }
+.fcs-room-status { font-size: 13px; line-height: 1.4; color: #dfebea; }
+.fcs-room input, .fcs-room button {
+  padding: 7px 9px;
+  border: 1px solid #708987;
+  color: #edf2e7;
+  background: #1d353a;
+  font: 650 13px / 1.25 system-ui, sans-serif;
+  min-height: 34px;
+}
+.fcs-room button { cursor: pointer; }
+.fcs-room button:hover { background: #344e54; }
+.fcs-room input {
+  width: 111px;
+  caret-color: #f4bc62;
+  font-family: var(--hud-font-mono);
+}
+.fcs-room input::placeholder { color: #b6c9c6; }
+.fcs-room-code {
+  display: inline-block;
+  font: 750 25px / 1.35 var(--hud-font-mono);
+  color: #f4bc62;
+  letter-spacing: .12em;
+  user-select: all;
+  margin: 4px 12px 0 0;
+}
+.fcs-room-exit { margin-top: 5px; }
+.fcs-briefing-modal :focus-visible { outline: 2px solid #f5ecda; outline-offset: 2px; }
+#hud-root.is-briefing :is(.fcs-commander-aim, .fcs-gunner-bore, .fcs-lockbox, .fcs-fpv) { visibility: hidden; }
+
+/* In action, a light instrument face and open corners keep the field in view. */
+:root {
+  --fcs-surface: rgba(13, 31, 34, .90);
+  --fcs-surface-solid: #101f22;
+  --fcs-text: #edf2e8;
+  --fcs-text-2: #c0d0cb;
+  --fcs-text-3: #9cb5b0;
+  --fcs-accent: #f4bc62;
+  --fcs-danger: #ff8771;
+  --fcs-team-blue: #a1d1dd;
+  --fcs-team-red: #ff9d8a;
+}
+.fcs-vehicle-panel, .fcs-radar-panel {
+  background: linear-gradient(0deg, rgba(12, 29, 32, .98), rgba(17, 37, 40, .88));
+  border: 0;
+  box-shadow: 0 10px 25px rgba(6, 18, 22, .28);
+  border-radius: 0 12px 0 0;
+}
+.fcs-radar-panel { border-radius: 12px 0 0 0; }
+.fcs-speed-num { font-size: 34px; font-weight: 750; }
+.fcs-bar-header { font-size: 11px; }
+.fcs-part-row { font-size: 10px; }
+.fcs-scoreboard {
+  border: 0;
+  padding: 8px 29px;
+  gap: 12px;
+  line-height: 1;
+  font-size: 16px;
+  background: #172e34;
+  clip-path: polygon(0 0, 100% 0, calc(100% - 14px) 100%, 14px 100%);
+}
+.fcs-score-num { font-size: 22px; }
+.fcs-linear-track { border: 0; height: 4px; }
+
+@media (max-width: 740px) {
+  .fcs-briefing-backdrop { align-items: flex-end; background: linear-gradient(0deg, #102228 43%, rgba(16, 34, 40, .96) 64%, rgba(16, 34, 40, .14) 100%); }
+  .fcs-briefing-modal { width: 100%; max-height: 94dvh; padding: 22px; }
+  .fcs-briefing-title { text-align: left; max-width: 12ch; }
+}
+@media (max-width: 430px) {
+  .fcs-briefing-board { gap: 12px; }
+  .fcs-vrow { padding-inline: 4px; }
+  .fcs-vspec { display: none; }
+  .fcs-briefing-footer { grid-template-columns: 1fr minmax(125px, 40%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fcs-badge-overheat { animation: none; }
+}

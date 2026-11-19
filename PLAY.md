@@ -1,6 +1,6 @@
 # untitled tank game
 
-Offline 3D browser tank game built with PlayCanvas, Vite, and TypeScript. All 3D models, PlayCanvas Basis & Meshopt decoders, PBR terrain textures, and HDRI sky are bundled locally in `dist/` for 100% offline play. Rendering uses WebGL2 and GLSL.
+3D browser tank game built with PlayCanvas, Vite, and TypeScript. Models, decoders, textures and lighting are bundled locally, so Free Play works entirely offline. Rendering uses WebGL2 and GLSL.
 
 Play online at [starharbor2491.github.io/utg](https://starharbor2491.github.io/utg/).
 
@@ -9,6 +9,8 @@ Play online at [starharbor2491.github.io/utg](https://starharbor2491.github.io/u
 Double-click **`untitled-tank-game.html`** in Finder / File Explorer to open it directly in any modern browser (`file://`) — **no server, no internet connection, no installation, and no other files required**. You can send that single `.html` file by itself to anyone.
 
 *(To rebuild the standalone single-file HTML after code edits, run `npm run build:single`.)*
+
+Choose **Free Play** for a 6v6 match with bots. For **1v1**, choose **Host room** and send the six-character code to a friend. Your friend selects **1v1**, enters the code, and chooses **Join room**. Once connected, each player chooses a vehicle and presses **Play**. Only the two players are in the battle, and opening the menu doesn't pause the duel. Both browsers need internet access for public signaling; restrictive networks can block peer-to-peer connections.
 
 ### Optional Local Dev Server
 If editing source code in `src/`:
@@ -33,8 +35,8 @@ npm run dev
 | `Scroll Wheel` | Adjust camera follow distance or zoom the optic down to a 4° field of view |
 | `ESC` / `P` | Pause, view controls and loadouts, and choose a vehicle |
 
-In the **Support** vehicle, press `2` and click to launch your FPV. Aim with the mouse, steer with `A / D`, speed up with `W`, or hold `S` to hover. The FPV detonates on impact. Right click aborts and lets it fall. Enemy fire can’t shoot the drone down, and battery, distance, or loss of the launch vehicle won’t cut your control.
+In the **Drone Carrier**, select `1` for the gun drone or `2` for the FPV, then click to launch. Aim with the mouse, steer with `A / D`, speed up with `W`, or hold `S` to hover. Hold left click or `Space` to fire the gun drone. It has a health readout, can be shot down, and does not explode on impact. The FPV still detonates on impact and cannot be shot down. Right click aborts either drone. You can fly one at a time; the nine-second reload starts at launch.
 
-**Little Bird** and **Apache** are player-only. Hold `Shift` to raise throttle or `Ctrl` to lower it. Move the mouse up/down to pitch and left/right to turn. Hold `R` and move the mouse left/right to roll instead of turning. The normal camera can orbit all the way around and look straight up or down. `W / S` or `↑ / ↓` also pitch the helicopter, all the way to vertical, and `A / D` or `← / →` bank. Throttle, pitch and bank stay where you leave them. Use opposite input to level out; there is no automatic hover, air brake, or altitude ceiling. Hold `Alt` to look around without steering. Right click or `V` toggles the optic.
+**Little Bird** and **Apache** are player-only. Hold `Shift` to raise throttle or `Ctrl` to lower it. Move the mouse up/down to pitch and left/right to turn. Hold `R` and move the mouse left/right to roll instead of turning. `W / S` or `↑ / ↓` also pitch the helicopter, and `A / D` or `← / →` roll it. Pitch and roll can go all the way around, so build altitude before flipping: the rotor pushes downward while inverted. Throttle and attitude stay where you leave them. Use opposite input to level out. Hold `Alt` to look around without steering. Right click or `V` toggles the optic.
 
 Press `1` to select missiles or `2` to select the gun, then left click to fire. `Space` fires the gun regardless of the selected slot. The Little Bird carries two guided missiles and reloads in 1.75 seconds. The Apache fires all 16 high-yield missiles in one volley, reloads in 4.5 seconds, and carries a heavy Gatling.

@@ -12,6 +12,7 @@
   "dependencies": {
     "earcut": "3.2.4",
     "meshoptimizer": "1.3.0",
+    "peerjs": "1.5.5",
     "playcanvas": "2.24.1"
   },
   "devDependencies": {

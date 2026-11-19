@@ -39,7 +39,10 @@ export class Match {
   private feedId = 0;
   private readonly _avoid: Vec3[] = [];
 
-  constructor(scene: Entity, world: TerrainQuery, assets: LoadedGameAssets) {
+  private duelVehicles: [Map<VehicleClass, Tank>, Map<VehicleClass, Tank>] | null = null;
+  private duelPending: [VehicleClass | null, VehicleClass | null] = [null, null];
+
+  constructor(scene: Entity, world: TerrainQuery, private readonly assets: LoadedGameAssets) {
     this.scene = scene;
     this.world = world;
 
@@ -68,6 +71,43 @@ export class Match {
     return this.tanks[0];
   }
 
+  public beginDuel(localTeam: Team): void {
+    for (const tank of this.tanks) this.scene.removeChild(tank.root);
+    this.tanks.length = 0;
+    this.score.blue = this.score.red = 0;
+    this.feed.length = 0;
+    this.duelVehicles = [new Map(), new Map()];
+    this.mountDuelVehicle(0, this.humanClass, localTeam);
+    this.mountDuelVehicle(1, 'normal', localTeam === 'blue' ? 'red' : 'blue');
+  }
+
+  public mountDuelVehicle(index: 0 | 1, cls: VehicleClass, team = this.tanks[index].team, pos?: Vec3, yaw?: number): Tank {
+    const previous = this.tanks[index];
+    if (previous?.stats.vehicleClass === cls) return previous;
+    const cache = this.duelVehicles![index];
+    const spawn = pos ?? this._spawnPoint(team, null);
+    const facing = yaw ?? this._yawTowardEnemyBase(team);
+    let tank = cache.get(cls);
+    if (!tank) {
+      tank = index === 0 && team === 'blue' ? this.humanVehicles[cls] :
+        new Tank(`${team}_${cls}`, team, cls, this.assets, spawn, facing, true, index === 0 ? 'You' : 'Opponent');
+      cache.set(cls, tank);
+    }
+    tank.respawnAt(spawn, facing);
+    if (previous) this.scene.removeChild(previous.root);
+    this.scene.addChild(tank.root);
+    this.tanks[index] = tank;
+    return tank;
+  }
+
+  public selectDuelClass(index: 0 | 1, cls: VehicleClass): void {
+    const tank = this.tanks[index], base = this.baseCenter(tank.team);
+    const nearBase = tank.alive && Math.hypot(tank.position.x - base.x, tank.position.z - base.z) <= 35 &&
+      (tank.stats.drive !== 'air' || tank.position.y <= this.world.getHeightAt(tank.position.x, tank.position.z) + 0.8);
+    this.duelPending[index] = nearBase ? null : cls;
+    if (nearBase) this.mountDuelVehicle(index, cls, tank.team, tank.position, tank.hullYaw);
+  }
+
   /** Every Tank instance that can ever be killed: current roster + prebuilt human vehicles. */
   public forEachTankEver(fn: (t: Tank) => void): void {
     const seen = new Set<Tank>();
@@ -90,6 +130,7 @@ export class Match {
    * immediately when the human is alive and within 35m of the blue base.
    */
   selectHumanClass(cls: VehicleClass): void {
+    if (this.duelVehicles) { this.selectDuelClass(0, cls); return; }
     const human = this.human;
     const base = BASE_BLUE;
     const nearBase =
@@ -125,7 +166,8 @@ export class Match {
     this.classKills[vc] = (this.classKills[vc] ?? 0) + 1;
     if (!attacker || attacker.team === victim.team) return;
     this.score[attacker.team]++;
-    const accent = attacker.isHuman ? 'kill' : victim.isHuman ? 'death' : 'info';
+    const accent = attacker.team === this.human.team && attacker.isHuman ? 'kill' :
+      victim.team === this.human.team && victim.isHuman ? 'death' : 'info';
     this._pushFeed(`${attacker.callsign} destroyed ${victim.callsign}`, accent, attacker, victim);
   }
 
@@ -135,7 +177,14 @@ export class Match {
     for (let i = 0; i < this.tanks.length; i++) {
       const tank = this.tanks[i];
       if (!tank.alive && tank.respawnTimer <= 0.01) {
-        this._respawnTank(tank);
+        if (this.duelVehicles) {
+          const index = i as 0 | 1;
+          const cls = this.duelPending[index] ?? tank.stats.vehicleClass;
+          const pos = this._spawnPoint(tank.team, null), yaw = this._yawTowardEnemyBase(tank.team);
+          if (cls === tank.stats.vehicleClass) tank.respawnAt(pos, yaw);
+          else this.mountDuelVehicle(index, cls, tank.team, pos, yaw);
+          this.duelPending[index] = null;
+        } else this._respawnTank(tank);
       }
     }
 

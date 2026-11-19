@@ -35,7 +35,7 @@ export interface RocketChassisParts {
   mats: Record<string, StandardMaterial>;
 }
 
-/** Shared 6x6 chassis for the rocket launcher and SAM support vehicle. */
+/** Shared 6x6 chassis for the rocket launcher and Drone Carrier. */
 export function buildRocketChassis(team: Team): RocketChassisParts {
   const isBlue = team === 'blue';
   const root = group(`rocket_${team}`);

@@ -1,6 +1,8 @@
 import './hud.css';
+import './interface.css';
 import { assetUrl } from './AssetLoader';
 import { playerDriveScale, TANK_STATS } from './Tank';
+import { validCode, type DuelStatus } from './Duel';
 import type {
   HUDTelemetry,
   MinimapObstacle,
@@ -12,6 +14,8 @@ import type {
 export interface HUDCallbacks {
   onEngageClick: () => void;
   onSelectVehicleClass?: (cls: VehicleClass) => void;
+  onDuelRequest?: (host: boolean, code: string) => void;
+  onDuelLeave?: () => void;
 }
 
 interface FeedSlot {
@@ -45,7 +49,7 @@ const BRIEFING_VEHICLES: readonly { id: VehicleClass; name: string; armament: st
   { id: 'ifv', name: 'IFV', armament: '30 mm autocannon', note: 'Fast on tracks. Switch between armour-piercing and explosive ammunition.' },
   { id: 'humvee', name: 'Humvee', armament: 'M2 .50 cal', note: 'Quick on roads, lightly protected. Keep moving and avoid heavier guns.' },
   { id: 'rocket', name: 'Rocket artillery', armament: 'Six-round rocket pod', note: 'Choose between guided and unguided rockets. Leave room to reload.' },
-  { id: 'support', name: 'Support', armament: 'SAM and FPV drone', note: 'Press 2 to select the FPV, then click to launch. It detonates on impact.' },
+  { id: 'support', name: 'Drone Carrier', armament: 'Gun drone and FPV', note: '1 selects the gun drone; 2 selects the impact FPV. Click to launch. Hold click to fire the gun drone.' },
   { id: 'littlebird', name: 'Little Bird', armament: 'Guided missiles and machine gun', note: 'Shift / Ctrl adjust throttle. Mouse turns and pitches. Hold R and move the mouse sideways to roll, or use A/D.' },
   { id: 'apache', name: 'Apache', armament: '16-missile volley and heavy Gatling', note: 'Shift / Ctrl adjust throttle. Mouse turns and pitches. Hold R and move the mouse sideways to roll, or use A/D.' },
 ];
@@ -56,7 +60,7 @@ const PROFILE: Record<VehicleClass, string> = {
   ifv: 'M31 76 42 50h65l8-16h31l10 9h64v5h-64l-9 10 27 18 1 17-13 10H44L31 93Z M43 83h122M50 95h108',
   humvee: 'M30 78h15l21-15 18-20h55l17 23 29 7 10 13-3 11h-26a15 15 0 1 0-30 0H86a15 15 0 1 0-30 0H33Z M89 49h43l11 16H78Z M105 43V33h65 M59 97a12 12 0 1 0 24 0 12 12 0 1 0-24 0 M139 97a12 12 0 1 0 24 0 12 12 0 1 0-24 0',
   rocket: 'M23 91V64h126V44h31l14 15 20 9v23h-21a14 14 0 1 0-28 0h-48a14 14 0 1 0-28 0h-5a14 14 0 1 0-28 0Z M29 30l102-13 5 24L34 55Z M44 36l72-10 M154 49h23l12 14h-35Z M58 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0 M91 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0 M167 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0',
-  support: 'M23 91V64h126V44h31l14 15 20 9v23h-21a14 14 0 1 0-28 0h-48a14 14 0 1 0-28 0h-5a14 14 0 1 0-28 0Z M39 51V35l84-8v22Z M63 23V13h39v12 M154 49h23l12 14h-35Z M58 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0 M91 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0 M167 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0',
+  support: 'M23 91V62h112V47h44l15 15 20 6v23h-21a14 14 0 1 0-28 0h-48a14 14 0 1 0-28 0h-5a14 14 0 1 0-28 0Z M27 62V49h55v13m0-13V33h49v29m-39-29 4-19m22 19 5-24 M33 45h33m-24 0 4-6h10l4 6 M154 50h23l12 13h-35Z M58 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0 M91 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0 M167 93a12 12 0 1 0 24 0 12 12 0 1 0-24 0',
   littlebird: 'M29 55 113 62Q130 43 163 43 195 43 209 63 222 84 194 88h-46l-25-14-94-12Z M28 60l-8-21h10l17 20 M146 46V32h25 M76 32h164 M178 47q20 8 24 22h-28Z M148 86l-7 17m46-17 8 17m-69 0h79l10-7 M137 72h80v8h-80Z',
   apache: 'M23 57 19 41l11 1 11 15 80 4 18-20 24 1 11 8h25l16 20 26 8-7 11h-79l-34-12-82-9Z M131 36v-8h28v8M61 35h166 M151 49l13 1 8 15h-28Z M177 55h18l13 15h-29Z M127 67h65v13h-65Z M139 82l-2 15m65-12 6 13m-21-8v4h46v5 M128 98a8 8 0 1 0 16 0 8 8 0 1 0-16 0 M201 99a8 8 0 1 0 16 0 8 8 0 1 0-16 0',
 };
@@ -198,6 +202,13 @@ export class HUD {
   private readonly briefingBackdropEl: HTMLDivElement;
   private readonly loaderFillEl: HTMLSpanElement;
   private readonly engageBtnEl: HTMLButtonElement;
+  private mode: 'free' | 'duel' = 'free';
+  private roomState: DuelStatus | 'idle' = 'idle';
+  private assetsReady = false;
+  private roomOutput?: HTMLElement;
+  private roomForm?: HTMLFormElement;
+  private roomExit?: HTMLButtonElement;
+  private roomCode?: HTMLOutputElement;
   private readonly engageMainTextEl: HTMLSpanElement;
   private readonly engageSubTextEl: HTMLSpanElement;
 
@@ -323,12 +334,13 @@ export class HUD {
   public setLoadingProgress(progress01: number, statusText: string): void {
     this.loadingEverCalled = true;
     const p = clamp01(progress01);
+    this.assetsReady = p >= 0.999;
     const pct = Math.round(p * 100);
 
     this.loaderFillEl.style.width = `${(p * 100).toFixed(1)}%`;
     const loaderBar = this.loaderFillEl.parentElement;
     if (p >= 0.999) {
-      this.engageBtnEl.disabled = false;
+      this.engageBtnEl.disabled = this.mode === 'duel' && this.roomState !== 'connected';
       this.engageMainTextEl.textContent = 'Play';
       this.engageSubTextEl.textContent = '';
       if (loaderBar) loaderBar.style.display = 'none';
@@ -340,11 +352,39 @@ export class HUD {
     }
   }
 
+  public setRoomStatus(state: DuelStatus | 'idle', code = '', detail = ''): void {
+    this.roomState = state;
+    if (this.roomOutput) this.roomOutput.textContent = detail || ({
+      idle: 'Create a room or enter your opponent’s code.',
+      connecting: 'Connecting…', waiting: 'Share this code with your opponent.',
+      connected: 'Opponent connected. Choose a vehicle and play.', error: '', closed: '',
+    })[state];
+    if (this.roomCode) {
+      this.roomCode.value = code;
+      this.roomCode.hidden = !code;
+    }
+    if (this.roomForm) this.roomForm.hidden = state !== 'idle' && state !== 'error';
+    if (this.roomExit) {
+      this.roomExit.hidden = state === 'idle' || state === 'error';
+      this.roomExit.textContent = state === 'closed' ? 'Return to start' : state === 'connected' ? 'Leave duel' : 'Cancel';
+    }
+    if (this.mode === 'duel') this.engageBtnEl.disabled = !this.assetsReady || state !== 'connected';
+    if (state === 'closed') {
+      this.setBriefingVisible(true);
+      this.briefingBackdropEl.querySelector('h1')!.textContent = 'Duel ended';
+      this.roomExit?.focus();
+    }
+  }
+
   public setBriefingVisible(visible: boolean): void {
+    if (this.roomState === 'closed') visible = true;
     if (!visible) this.hasDeployed = true;
     if (this.briefingVisible !== visible && visible && this.hasDeployed) {
       this.engageMainTextEl.textContent = 'Resume battle';
-      this.briefingBackdropEl.querySelector('h1')!.textContent = 'Battle paused';
+      this.briefingBackdropEl.querySelector('h1')!.textContent = this.roomState === 'closed' ? 'Duel ended'
+        : this.mode === 'duel' ? 'Duel menu' : 'Battle paused';
+      this.briefingBackdropEl.classList.add('is-pause');
+      if (this.mode === 'free') this.briefingBackdropEl.querySelector<HTMLElement>('.fcs-mode-picker')!.hidden = true;
     }
     this.briefingVisible = visible;
     this.briefingBackdropEl.classList.toggle('is-visible', visible);
@@ -408,7 +448,7 @@ export class HUD {
         <div class="fcs-fpv-row"><span>SPD</span><span class="fcs-fpv-val fcs-fpv-spd">0 km/h</span></div>
         <div class="fcs-fpv-row"><span>ALT</span><span class="fcs-fpv-val fcs-fpv-alt">0 m</span></div>
         <div class="fcs-fpv-row"><span>RNG</span><span class="fcs-fpv-val fcs-fpv-rng">0 m</span></div>
-        <div class="fcs-fpv-row"><span>NEXT</span><span class="fcs-fpv-val fcs-fpv-cooldown">9 s</span></div>
+        <div class="fcs-fpv-row"><span class="fcs-fpv-payload">NEXT</span><span class="fcs-fpv-val fcs-fpv-cooldown">9 s</span></div>
       </div>
       <div class="fcs-fpv-x"></div>
       <div class="fcs-fpv-hint">DETONATES ON IMPACT · RMB ABORT · W/S THROTTLE · A/D TURN</div>`;
@@ -421,7 +461,13 @@ export class HUD {
     (root.querySelector('.fcs-fpv-spd') as HTMLElement).textContent = `${f.speedKmh} km/h`;
     (root.querySelector('.fcs-fpv-alt') as HTMLElement).textContent = `${f.altM} m`;
     (root.querySelector('.fcs-fpv-rng') as HTMLElement).textContent = `${f.rangeM} m`;
-    (root.querySelector('.fcs-fpv-cooldown') as HTMLElement).textContent = f.cooldown > 0 ? `${Math.ceil(f.cooldown)} s` : 'Ready';
+    const gun = f.kind === 'gun';
+    root.querySelector('.fcs-fpv-tag')!.textContent = gun ? 'GUN DRONE' : 'FPV';
+    root.querySelector('.fcs-fpv-payload')!.textContent = gun ? 'HEALTH' : 'NEXT';
+    root.querySelector('.fcs-fpv-cooldown')!.textContent = gun ? `${f.healthPercent}%` : f.cooldown > 0 ? `${Math.ceil(f.cooldown)} s` : 'Ready';
+    root.querySelector('.fcs-fpv-hint')!.textContent = gun
+      ? 'CLICK TO FIRE · RMB ABORT · W/S THROTTLE · A/D TURN'
+      : 'DETONATES ON IMPACT · RMB ABORT · W/S THROTTLE · A/D TURN';
 
   }
 
@@ -820,7 +866,8 @@ export class HUD {
     const isAir = t.altitudeM !== undefined;
     const airGunSelected = isAir && t.activeShellIndex === 1;
     if (cannonTitleEl) {
-      cannonTitleEl.textContent = airGunSelected ? t.shell1Code : isAir ? 'Missile pod' : t.vehicleClass === 'rocket' ? 'Rocket pod' : 'Main gun';
+      cannonTitleEl.textContent = t.vehicleClass === 'support' ? 'Launch deck' :
+        airGunSelected ? t.shell1Code : isAir ? 'Missile pod' : t.vehicleClass === 'rocket' ? 'Rocket pod' : 'Main gun';
     }
 
     const cannonP = t.hasMainCannon && !airGunSelected ? clamp01(t.cannonReloadProgress) : 1;
@@ -836,15 +883,15 @@ export class HUD {
 
     let cannonBadge: 'ready' | 'reload' | 'neutral' = 'neutral';
     let cannonStr: string;
-    if (t.vehicleClass === 'support' && t.activeShellIndex === 1) {
-      cannonStr = t.fpvSlotStatus ?? 'FPV · NEXT UPDATE';
+    if (t.vehicleClass === 'support') {
+      cannonStr = t.fpvSlotStatus ?? '';
       cannonBadge = 'neutral';
     } else if (airGunSelected) {
       cannonStr = t.mgOverheated ? 'Cooling' : 'Ready';
       cannonBadge = t.mgOverheated ? 'reload' : 'ready';
     } else if (t.salvoSize) {
-      const ordnance = t.vehicleClass === 'support' ? 'SAM' : isAir ? 'Missiles' : 'Rockets';
-      const emptyLabel = t.vehicleClass === 'support' ? 'SAM empty' : 'Pod empty';
+      const ordnance = isAir ? 'Missiles' : 'Rockets';
+      const emptyLabel = 'Pod empty';
       if (t.rocketsLeft > 0) {
         cannonStr = `${ordnance} ${t.rocketsLeft} / ${t.salvoSize ?? 6}`;
         cannonBadge = 'ready';
@@ -2098,10 +2145,10 @@ export class HUD {
     const title = document.createElement('h1');
     title.className = 'fcs-briefing-title';
     title.id = 'briefing-title';
-    title.textContent = 'Field briefing';
+    title.textContent = 'Untitled Tank Game';
     const sub = document.createElement('p');
     sub.className = 'fcs-briefing-sub';
-    sub.textContent = '6 vs 6 team deathmatch. No score limit.';
+    sub.textContent = '6 vs 6 against AI. No internet required.';
     const modelCredit = document.createElement('p');
     modelCredit.className = 'fcs-briefing-sub';
     modelCredit.append('Little Bird airframe: ');
@@ -2127,10 +2174,60 @@ export class HUD {
       void assetUrl(apacheSourcePath, 'application/zip').then((url) => { apacheSource.href = url; });
     }
     modelCredit.append(' | ', apacheSource);
-    head.append(title, sub, modelCredit);
+    head.append(title);
     modal.setAttribute('role', 'dialog');
     modal.setAttribute('aria-modal', 'true');
     modal.setAttribute('aria-labelledby', title.id);
+    const modes = document.createElement('div');
+    modes.className = 'fcs-mode-picker';
+    modes.setAttribute('role', 'group');
+    modes.setAttribute('aria-label', 'Game mode');
+    modes.innerHTML = '<button type="button" aria-pressed="true">Free Play</button><button type="button" aria-pressed="false">1v1</button>';
+    const [freeBtn, duelBtn] = Array.from(modes.querySelectorAll('button'));
+    const room = document.createElement('div');
+    room.className = 'fcs-room';
+    room.hidden = true;
+    room.innerHTML = `<p class="fcs-room-status" role="status"></p>
+      <output class="fcs-room-code" aria-label="Your room code" hidden></output>
+      <form><button type="button" class="fcs-host-room">Host room</button>
+        <input aria-label="Room code" placeholder="ROOM CODE" maxlength="6" autocomplete="off" spellcheck="false">
+        <button type="submit">Join room</button>
+      </form><button type="button" class="fcs-room-exit" hidden>Cancel</button>`;
+    this.roomOutput = room.querySelector('.fcs-room-status')!;
+    this.roomForm = room.querySelector('form')!;
+    this.roomExit = room.querySelector('.fcs-room-exit')!;
+    this.roomCode = room.querySelector('output')!;
+    const input = room.querySelector('input')!;
+    input.addEventListener('input', () => { input.value = input.value.toUpperCase(); input.setCustomValidity(''); });
+    room.querySelector('.fcs-host-room')!.addEventListener('click', () => this.callbacks.onDuelRequest?.(true, ''));
+    this.roomExit.addEventListener('click', () => this.callbacks.onDuelLeave?.());
+    this.roomForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const code = input.value.trim().toUpperCase();
+      if (!validCode(code)) {
+        input.setCustomValidity('Enter the six-character room code.');
+        input.reportValidity();
+      } else this.callbacks.onDuelRequest?.(false, code);
+    });
+    freeBtn.addEventListener('click', () => {
+      if (this.mode === 'free') return;
+      this.callbacks.onDuelLeave?.();
+      this.mode = 'free';
+      freeBtn.setAttribute('aria-pressed', 'true');
+      duelBtn.setAttribute('aria-pressed', 'false');
+      room.hidden = true;
+      sub.textContent = '6 vs 6 against AI. No internet required.';
+      this.engageBtnEl.disabled = !this.assetsReady;
+    });
+    duelBtn.addEventListener('click', () => {
+      if (this.mode === 'duel') return;
+      this.mode = 'duel';
+      freeBtn.setAttribute('aria-pressed', 'false');
+      duelBtn.setAttribute('aria-pressed', 'true');
+      room.hidden = false;
+      sub.textContent = 'Two players online. Share a room code with a friend.';
+      this.setRoomStatus('idle');
+    });
 
     // Vehicle Class Selector
     const classSection = document.createElement('div');
@@ -2250,7 +2347,11 @@ export class HUD {
     const footer = document.createElement('div');
     footer.className = 'fcs-briefing-footer';
     footer.append(changeNote, engageBtn);
-    modal.append(head, board, kbSection, footer);
+    const controls = document.createElement('details');
+    controls.className = 'fcs-controls-drawer';
+    controls.innerHTML = '<summary>Controls & credits</summary>';
+    controls.append(kbSection, modelCredit);
+    modal.append(head, modes, sub, room, board, footer, controls);
     backdrop.appendChild(modal);
 
     return {

@@ -8,7 +8,6 @@ const DEFAULT_TP_DISTANCE = 11.5;
 const MIN_TP_DISTANCE = 7.5;
 const MAX_TP_DISTANCE = 18.0;
 const MAX_AIM_RAY_DIST = 550;
-const VERTICAL_PITCH = Math.PI / 2;
 
 function wrapAnglePi(a: number): number {
   let r = (a + Math.PI) % (Math.PI * 2);
@@ -247,7 +246,8 @@ export class PlayerController {
 
       if (this.freeLooking) {
         this.orbitYaw = wrapAnglePi(this.orbitYaw - dx * 0.007);
-        this.orbitPitch = clamp(this.orbitPitch - dy * 0.005, -1.52, 1.52);
+        const nextPitch = this.orbitPitch - dy * 0.005;
+        this.orbitPitch = this.aircraftControls ? wrapAnglePi(nextPitch) : clamp(nextPitch, -1.52, 1.52);
         return;
       }
 
@@ -269,13 +269,9 @@ export class PlayerController {
       }
       if (this.aircraftControls) this.flightPitchDelta += dy * sens;
 
-      const minPitch = this.aircraftControls ? -VERTICAL_PITCH : this._sniperZoom ? -0.34 : -0.48;
-      const maxPitch = this.aircraftControls ? VERTICAL_PITCH : this._sniperZoom ? 0.46 : 0.62;
-      this._cameraPitch = clamp(
-        this._cameraPitch - dy * sens,
-        minPitch,
-        maxPitch
-      );
+      const nextPitch = this._cameraPitch - dy * sens;
+      this._cameraPitch = this.aircraftControls ? wrapAnglePi(nextPitch)
+        : clamp(nextPitch, this._sniperZoom ? -0.34 : -0.48, this._sniperZoom ? 0.46 : 0.62);
     };
 
     this._onWheel = (e: WheelEvent) => {
@@ -379,7 +375,7 @@ export class PlayerController {
 
   public setViewAngles(yaw: number, pitch: number): void {
     this._cameraYaw = wrapAnglePi(yaw);
-    this._cameraPitch = this.aircraftControls ? clamp(pitch, -VERTICAL_PITCH, VERTICAL_PITCH) : clamp(pitch, -0.55, 0.65);
+    this._cameraPitch = this.aircraftControls ? wrapAnglePi(pitch) : clamp(pitch, -0.55, 0.65);
   }
 
   public setSniperZoom(enabled: boolean): void {
@@ -560,24 +556,13 @@ export class PlayerController {
       shakeRoll = s3 * 0.020 * shakeAmt;
     }
 
-    if (this.fpvCamPos && this.fpvCamQuat) {
-      this.camera.setPosition(this.fpvCamPos);
-      this.fpvCombinedRotation.copy(this.fpvCamQuat);
-      if (freeLook) {
-        // Orbit the view relative to the FPV nose without feeding the pilot any mouse delta.
-        quatFromEuler(this.fpvLookRotation, this.orbitPitch, this.orbitYaw, 0, 'YXZ');
-        this.fpvCombinedRotation.mul(this.fpvLookRotation);
-      }
-      this.camera.setRotation(this.fpvCombinedRotation);
-      if (Math.abs(this.camera.camera!.fov - 95) > 0.01) this.camera.camera!.fov = 95;
-    } else {
+    if (!this.applyDroneCamera()) {
       this.camera.setPosition(this._finalCamPos);
       if (freeLook) {
         this.camera.lookAt(this._anchor, this.aircraftControls ? this._camUp : Vec3.UP);
       } else if (this.aircraftControls) {
         // Build from yaw and pitch so the camera basis stays defined at the poles.
-        const pitch = clamp(viewPitch + shakePitch, -VERTICAL_PITCH, VERTICAL_PITCH);
-        this.camera.setRotation(quatFromEuler(this.airCameraRotation, pitch, viewYaw + shakeYaw + Math.PI, 0, 'YXZ'));
+        this.camera.setRotation(quatFromEuler(this.airCameraRotation, viewPitch + shakePitch, viewYaw + shakeYaw + Math.PI, 0, 'YXZ'));
       } else {
         const effYaw = viewYaw + shakeYaw;
         const effPitch = clamp(viewPitch + shakePitch, -1.35, 1.35);
@@ -717,6 +702,21 @@ export class PlayerController {
     const edges = { lmb: this.frameLmb, rmb: this.frameRmb };
     this.frameLmb = this.frameRmb = false;
     return edges;
+  }
+
+  public get primaryHeld(): boolean { return this.mouseLeftDown; }
+
+  public applyDroneCamera(): boolean {
+    if (!this.fpvCamPos || !this.fpvCamQuat) return false;
+    this.camera.setPosition(this.fpvCamPos);
+    this.fpvCombinedRotation.copy(this.fpvCamQuat);
+    if (this.freeLooking) {
+      quatFromEuler(this.fpvLookRotation, this.orbitPitch, this.orbitYaw, 0, 'YXZ');
+      this.fpvCombinedRotation.mul(this.fpvLookRotation);
+    }
+    this.camera.setRotation(this.fpvCombinedRotation);
+    if (Math.abs(this.camera.camera!.fov - 95) > 0.01) this.camera.camera!.fov = 95;
+    return true;
   }
 
   // ---- chase-camera state save/restore across FPV ----

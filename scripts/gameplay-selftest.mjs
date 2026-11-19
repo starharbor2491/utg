@@ -135,8 +135,48 @@ try {
     await page.mouse.move(560, 350);
     await page.evaluate(() => window.__tankQA.fastForward(0.1));
     await page.keyboard.up('r');
+
+    async function mousePitchStroke(from, to) {
+      await page.keyboard.down('Alt');
+      await page.mouse.move(560, from);
+      await page.keyboard.up('Alt');
+      await page.mouse.move(560, to, { steps: 4 });
+      await page.evaluate(() => window.__tankQA.fastForward(0.05));
+    }
+    const mouseNeutral = (await player()).flight.pitch;
+    for (let i = 0; i < 4; i++) await mousePitchStroke(160, 520);
+    assert.ok(Math.cos((await player()).flight.pitch) < -0.8 && Math.cos((await cam()).pitch) < -0.8,
+      `${up.cls}: sustained mouse pitch takes the airframe and chase view past vertical`);
+    for (let i = 0; i < 4; i++) await mousePitchStroke(520, 160);
+    assert.ok(Math.abs(angleDelta((await player()).flight.pitch, mouseNeutral)) < 0.06,
+      `${up.cls}: opposite mouse pitch brings the airframe back`);
+  }
+  async function flipFlight() {
+    const advance = (seconds) => page.evaluate((t) => window.__tankQA.fastForward(t), seconds);
+    await page.evaluate(() => window.__tankQA.teleportForTest(0, -420, 0));
+    await page.keyboard.down('Shift');
+    await advance(7);
+    await page.keyboard.up('Shift');
+    const start = await player();
+    await page.keyboard.down('w');
+    let total = 0, last = start.flight.pitch;
+    for (let i = 0; i < 8; i++) {
+      await advance(start.cls === 'apache' ? 1.1 : 0.8);
+      const next = await player();
+      total += angleDelta(next.flight.pitch, last);
+      last = next.flight.pitch;
+      if (i === 3) {
+        assert.ok(Math.cos(last) < -0.8, `${next.cls} pitches upside down`);
+        assert.ok(next.flight.climb < 0, `${next.cls} loses altitude under inverted thrust`);
+      }
+    }
+    await page.keyboard.up('w');
+    assert.ok(total > 5.8 && Math.cos(last) > 0.85, `${start.cls} completes a forward flip (${total.toFixed(2)} rad)`);
+    assert.equal((await player()).flight.throttle, start.flight.throttle, 'flip does not change collective');
+    await page.evaluate(() => window.__tankQA.teleportForTest(0, -420, 0));
   }
   await mouseFlight();
+  await flipFlight();
   assert.equal(await page.evaluate(() => window.__tankQA.getRenderStats().rocketsLeft), 2, 'free-look clicks do not fire missiles');
   // Reset aim after moving to the edge of the viewport in the pointer test.
   await page.evaluate(() => window.__tankQA.teleportForTest(0, -420, 0));
@@ -174,6 +214,7 @@ try {
   const render = () => page.evaluate(() => window.__tankQA.getRenderStats());
   assert.equal((await render()).rocketsLeft, 16);
   await mouseFlight();
+  await flipFlight();
   await page.keyboard.press('2');
   await page.waitForFunction(() => window.__tankQA.getRenderStats().activeShell === 'GATLING');
   await page.mouse.down();
@@ -189,7 +230,7 @@ try {
   await page.keyboard.press('p');
   await page.getByRole('heading', { name: 'Battle paused' }).waitFor();
   await page.evaluate(() => window.__tankQA.teleportForTest(0, -420, 0));
-  await page.getByRole('button', { name: 'Support Wheeled' }).click();
+  await page.getByRole('button', { name: 'Drone Carrier Wheeled' }).click();
   assert.equal((await page.locator('.fcs-engage-main').textContent()).trim(), 'Resume battle');
   await page.locator('.fcs-engage-btn').click();
   await orbit();
@@ -201,11 +242,13 @@ try {
     qa.fastForward(0.1);
   });
   await page.keyboard.down('Alt');
-  await page.mouse.move(560, 28);
+  await page.mouse.move(560, 680);
+  await page.mouse.move(560, 20);
   await page.evaluate(() => window.__tankQA.fastForward(0.1));
   const { camPos: [cx, cy, cz], pitch } = await cam();
   const riverSurface = await page.evaluate(([x, z]) => window.__tankQA.waterAtForTest(x, z), [cx, cz]);
-  assert.ok(pitch > 1.4 && riverSurface.depth > 0.6 && cy > riverSurface.level + 0.9, 'low orbit stays above river surface');
+  assert.ok(pitch > 1.4 && riverSurface.depth > 0.6 && cy > riverSurface.level + 0.9,
+    `low orbit stays above river surface (pitch=${pitch}, camera=${cy}, depth=${riverSurface.depth}, surface=${riverSurface.level})`);
   await page.mouse.move(560, 350);
   await page.keyboard.up('Alt');
   await page.evaluate(() => {
@@ -378,10 +421,13 @@ try {
       check(craft.flightThrottle === 0 && craft.velocity.y < -3, `${cls}: reducing throttle descends`);
       craft.respawnAt(v(0, 600), 0);
       for (const pitchSign of [1, -1]) {
-        for (let i = 0; i < 300; i++) craft.stepKinematics(dt, { ...neutral, throttle: pitchSign }, flat, []);
+        const rate = 0.95 * Math.min(1, craft.stats.hullTurnRate / 3);
+        const steps = Math.round(Math.PI / (2 * dt * rate));
+        for (let i = 0; i < steps; i++) craft.stepKinematics(dt, { ...neutral, throttle: pitchSign }, flat, []);
         const nose = applyQuat(v(0, 0, 1), craft.rig.hullTiltGroup.getRotation());
-        check(near(nose.y, -pitchSign) && Math.hypot(nose.x, nose.z) < 0.001,
+        check(Math.abs(nose.y + pitchSign) < 0.001 && Math.hypot(nose.x, nose.z) <= dt * rate,
           `${cls}: manual cyclic points the nose straight ${pitchSign === 1 ? 'down' : 'up'}`);
+        craft.respawnAt(v(0, 600), 0);
       }
     }
     const apache = mkTank('apache', true);
@@ -421,6 +467,15 @@ try {
     const chipTotal = snapshot().reduce((sum, integrity, i) => sum + initial[i] - integrity, 0);
     check(victim.alive && victim.crewAlive === victim.crewTotal && chipTotal > 0.35,
       'buffed small bullets wear external modules without killing the crew');
+    const fresh = mkTank('heavy', false, v(0, 0, 10));
+    for (let i = 0; i < 240; i++) fresh.stepKinematics(dt, null, flat, []);
+    const chipAtSameSpot = () => fresh.takeDamage(9, v(0, 1, 8), v(0, 1, 1), v(0, 0, 1), 'mg');
+    chipAtSameSpot();
+    const wornPart = fresh.lastXRayReport?.hitModules[0]?.id;
+    check(wornPart && !fresh.lastXRayReport.penetrated, 'an armored MG hit reports affected hardware without penetration');
+    for (let i = 0; i < 28; i++) chipAtSameSpot();
+    check(fresh.moduleHealth(wornPart) === 'destroyed' && fresh.crewAlive === fresh.crewTotal &&
+      !fresh.lastXRayReport.penetrated, 'repeating a hit disables the same external part, not the protected crew');
 
     const manager = new DroneManager();
     manager.world = flat;
@@ -428,16 +483,41 @@ try {
     const manual = new DroneEntity('blue', shooter, false, false, v(451, 45), 0);
     manual.phase = 'fly';
     shooter.alive = false;
-    const input = { dmx: 0, dmy: 0, up: false, down: false, keys: new Set() };
+    const input = { dmx: 0, dmy: 0, up: false, down: false, fire: false, keys: new Set() };
     for (let i = 0; i < 3000; i++) manual.step(dt, input, manager);
     check(manual.phase === 'fly', 'FPV remains piloted past 450 m, 40 seconds, and operator death');
     manual.step(dt, { ...input, dmy: -70 }, manager);
     const q = new Quat();
     manual.getCameraPose(v(), q);
     check(applyQuat(v(0, 0, -1), q).dot(manual.forward(v())) > 0.999, 'nose camera matches flight direction');
+    ballistics.hitDrone = (...args) => manager.hitByProjectile(...args);
+    manager.drones.push(manual);
     for (let i = 0; i < 8; i++) ballistics.fireCoaxMG(victim, v(manual.pos.x, manual.pos.y, manual.pos.z - 5), v(0, 0, 1));
     for (let i = 0; i < 3; i++) ballistics.update(dt, flat, [], () => {});
     check(manual.phase === 'fly', 'FPV is not damaged by projectiles');
+    const gun = new DroneEntity('blue', shooter, false, false, v(40, 8, 40), 0, 'gun');
+    gun.phase = 'fly';
+    manager.drones.push(gun);
+    let bursts = 0;
+    manager.onFireMG = (operator, _pos, _dir, spec) => {
+      check(operator === shooter && spec.id === 'drone_mg' && spec.splashRadius === 0, 'gun drone fires non-explosive MG rounds');
+      bursts++;
+    };
+    for (let i = 0; i < 20; i++) gun.step(dt, { ...input, fire: true }, manager);
+    check(bursts > 1, 'gun drone fires repeatedly while held');
+    const launchHealth = gun.health;
+    const fireAtGun = (attacker) => {
+      ballistics.fireCoaxMG(attacker, v(gun.pos.x, gun.pos.y, gun.pos.z - 3), v(0, 0, 1));
+      ballistics.update(dt, flat, [], () => {});
+    };
+    fireAtGun(victim);
+    check(gun.health < launchHealth && gun.health > 0, 'an enemy projectile removes some gun drone health');
+    for (let i = 0; i < 20; i++) fireAtGun(victim);
+    check(gun.health === 0 && gun.phase === 'fall' && manager.stats.shotDown === 1, 'repeated enemy fire shoots down the gun drone');
+    const lastBlast = manager.lastDetonation.t;
+    for (let i = 0; i < 240 && gun.alive; i++) gun.step(dt, null, manager);
+    check(!gun.alive && manager.lastDetonation.t === lastBlast, 'a destroyed gun drone crashes without detonating');
+    manager.reset();
 
     shooter.alive = true;
     const bomb = manager.launch(shooter);
@@ -467,9 +547,10 @@ try {
     check(manager.cooldownLeft(shooter) === 7, 'impact does not restart the FPV cooldown');
     const waterLanding = new DroneEntity('blue', shooter, false, false, v(0, -0.9), 0);
     waterLanding.phase = 'fall';
+    const lostBeforeWater = manager.stats.lost;
     manager.world = { ...flat, getHeightAt: () => -2, getWaterDepthAt: () => 1 };
     waterLanding.step(dt, null, manager);
-    check(!waterLanding.alive && manager.stats.lost === 1 && manager.lastDetonation.pos.y === -1, 'water impact detonates even below sea level');
+    check(!waterLanding.alive && manager.stats.lost === lostBeforeWater + 1 && manager.lastDetonation.pos.y === -1, 'water impact detonates even below sea level');
 
     assertNoEmpty('after drones');
     const world = new World(scene, assets);

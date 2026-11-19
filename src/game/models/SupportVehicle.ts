@@ -10,12 +10,6 @@ import { group, meshNode, userData } from '../engine/scene';
 import { GeoBucket } from './GeoBucket';
 import { applySurfaceFinish } from './SurfaceFinish';
 
-const BED = {
-  ringR: 1.02, ringH: 0.16, drumR: 0.92, drumH: 0.3, gunY: 0.42, gunZ: 0.15,
-  canW: 0.62, canH: 0.52, canD: 1.72, canX: 0.65, canZ: 0.68,
-  headW: 0.5, headH: 0.42, headD: 0.6, headZ: 0.15, mastZ: -0.55, bayZ: -1.5,
-} as const;
-
 function bedMat(color: string, roughness: number, metalness: number, heightRef = 1.9) {
   const m = standard({ color, roughness, metalness, envIntensity: 1 });
   applyRealisticArmorShader(m, 'support-bed', { grain: 0.5, heightRef });
@@ -29,8 +23,8 @@ const propProfile = new Shape([
 const fpvProp = extrude(propProfile, { depth: 0.003, bevelEnabled: false }).rotateX(Math.PI / 2);
 
 /** FPV quadcopter, nose and camera facing +Z. */
-export function buildFpvDrone(): Entity {
-  const g = group('fpv_drone');
+export function buildFpvDrone(armed = false): Entity {
+  const g = group(armed ? 'gun_drone' : 'fpv_drone');
   userData(g).keepMeshChildren = true;
   const frameMat = standard({ color: '#2b2e33', roughness: 0.88, metalness: 0.25 });
   applySurfaceFinish(frameMat, 'carbon');
@@ -57,12 +51,21 @@ export function buildFpvDrone(): Entity {
     for (const sz of [-1, 1]) mesh(cylinder(0.007, 0.007, 0.058, 6), accentMat, sx * 0.053, 0.052, sz * 0.089);
     mesh(roundedBox(0.017, 0.068, 0.085, 2, 0.007), frameMat, sx * 0.056, 0.066, 0.13);
   }
-  setLocalEulerRad(mesh(cylinder(0.039, 0.039, 0.27, 12), accentMat, 0, -0.056, 0.005), Math.PI / 2, 0, 0);
+  if (armed) {
+    const pale = standard({ color: '#a6aa96', roughness: 0.68, metalness: 0.27 });
+    mesh(roundedBox(0.24, 0.11, 0.30, 2, 0.03), pale, 0, 0.09, -0.030);
+    mesh(roundedBox(0.15, 0.09, 0.22, 2, 0.02), hardware, 0, -0.037, 0.05);
+    setLocalEulerRad(mesh(cylinder(0.019, 0.025, 0.34, 10), frameMat, 0, -0.06, 0.22), Math.PI / 2, 0, 0);
+    const muzzle = group('drone_muzzle', g);
+    muzzle.setLocalPosition(0, -0.06, 0.40);
+  } else {
+    setLocalEulerRad(mesh(cylinder(0.039, 0.039, 0.27, 12), accentMat, 0, -0.056, 0.005), Math.PI / 2, 0, 0);
+  }
   mesh(roundedBox(0.092, 0.075, 0.07, 2, 0.008), frameMat, 0, 0.068, 0.134);
   setLocalEulerRad(mesh(cylinder(0.030, 0.032, 0.027, 20), hardware, 0, 0.068, 0.174), Math.PI / 2, 0, 0);
   mesh(sphere(0.024, 16, 10), lensMat, 0, 0.068, 0.183).setLocalScale(1, 1, 0.43);
   const camera = group('fpv_camera', g);
-  camera.setLocalPosition(0, 0.068, 0.198);
+  camera.setLocalPosition(0, armed ? 0.16 : 0.068, armed ? 0.43 : 0.198);
   setLocalEulerRad(camera, 0, Math.PI, 0);
   for (const sx of [-1, 1]) setLocalEulerRad(mesh(cylinder(0.005, 0.006, 0.132, 6), frameMat, sx * 0.054, 0.12, -0.137), 0, 0, -sx * 0.33);
   const powerLead = new CatmullRomCurve3([
@@ -94,114 +97,63 @@ export function buildFpvDrone(): Entity {
     mesh(hubGeo, frameMat, 0, 0, 0, rotor);
     userData(rotor).spin = sx * sz;
   }
-  g.setLocalScale(0.76, 0.76, 0.76);
+  g.setLocalScale(armed ? 1.35 : 0.76, armed ? 1.35 : 0.76, armed ? 1.35 : 0.76);
   return g;
 }
 
 export function buildSupportVehicleRig(team: Team): InstantiatedTankRig {
-  const isBlue = team === 'blue';
   const ch = buildRocketChassis(team);
   const { root, hullTiltGroup, visualRoot, wheels, steerNodes, hullMeshes } = ch;
-  const paint = bedMat(isBlue ? '#48554b' : '#6b5e4b', 0.6, 0.28);
-  const dark = bedMat(isBlue ? '#333a26' : '#4c3f2a', 0.66, 0.24);
-  const steel = bedMat('#2c2f2c', 0.45, 0.72), black = bedMat('#141517', 0.7, 0.4);
-  const eb = new GeoBucket(), deckY = 1.38;
-  eb.rbox(dark, 0.85, 0.62, 1.0, 0.04, -0.55, deckY + 0.31, 0.9);
-  eb.box(black, 0.5, 0.06, 0.7, -0.55, deckY + 0.6, 1.0);
-  eb.cyl(steel, 0.34, 0.34, 0.34, 18, 0.45, deckY + 0.36, 1.35, 0, 0, Math.PI / 2);
-  eb.cyl(black, 0.36, 0.36, 0.05, 18, 0.45, deckY + 0.36, 1.35, 0, 0, Math.PI / 2);
-  eb.cyl(dark, 0.1, 0.1, 0.42, 10, 0.45, deckY + 0.36, 1.35, 0, 0, Math.PI / 2);
-  for (const rz of [0.35, 1.15]) eb.box(steel, 0.06, 0.85, 0.06, 0.78, deckY + 0.43, rz);
-  eb.box(steel, 0.06, 0.85, 0.06, 1.12, deckY + 0.43, 0.75);
-  eb.box(dark, 0.4, 0.05, 0.95, 0.95, deckY + 0.82, 0.75);
-  eb.rbox(paint, 0.3, 0.24, 0.4, 0.02, 0.95, deckY + 0.97, 0.55);
-  eb.rbox(dark, 0.26, 0.2, 0.34, 0.02, 0.95, deckY + 0.95, 0.95);
-  eb.flush(hullTiltGroup, hullMeshes);
-
-  const turretPivot = group('support_turret_pivot', hullTiltGroup);
-  turretPivot.setLocalPosition(0, 1.38, -1.6);
-  const turretRestPos = turretPivot.getLocalPosition().clone();
-  const tb = new GeoBucket();
-  tb.cyl(steel, BED.ringR, BED.ringR + 0.04, BED.ringH, 28, 0, BED.ringH / 2, 0);
-  tb.cyl(dark, BED.drumR, BED.drumR, BED.drumH, 24, 0, BED.ringH + BED.drumH / 2 - 0.02, 0);
-  for (let i = 0; i < 8; i++) {
-    const a = i / 8 * Math.PI * 2;
-    tb.cyl(black, 0.025, 0.025, 0.03, 6, Math.cos(a) * (BED.ringR - 0.06), BED.ringH + 0.005, Math.sin(a) * (BED.ringR - 0.06));
-  }
+  const paint = bedMat(team === 'blue' ? '#55675c' : '#796353', 0.62, 0.28);
+  const steel = bedMat('#333d3c', 0.48, 0.68);
+  const rubber = bedMat('#1b2323', 0.86, 0.14);
+  const stencil = bedMat('#d9ac65', 0.7, 0.2);
+  const lens = standard({ color: '#172322', emissive: '#8cbea2', emissiveIntensity: 1.1 });
+  const deck = new GeoBucket();
+  deck.rbox(paint, 2.22, 0.37, 4.35, 0.09, 0, 1.57, -1.03);
+  deck.rbox(steel, 2.13, 0.16, 3.96, 0.05, 0, 1.78, -1.09);
+  // Forward battery/operations cabinet and twin recessed launch pads aft.
+  deck.rbox(paint, 2.11, 0.92, 1.34, 0.14, 0, 2.23, 0.33);
+  deck.rbox(rubber, 1.96, 0.10, 1.15, 0.04, 0, 2.70, 0.36);
+  deck.rbox(steel, 1.48, 0.57, 0.08, 0.04, 0, 2.25, -0.36);
   for (const sx of [-1, 1]) {
-    tb.box(steel, 0.12, 0.3, 0.5, sx * 0.45, BED.gunY - 0.28, BED.gunZ);
-    tb.cyl(steel, 0.07, 0.07, 0.34, 10, sx * 0.45, BED.gunY - 0.1, BED.gunZ, 0, 0, Math.PI / 2);
-  }
-  tb.cyl(steel, 0.035, 0.045, 0.5, 8, 0, BED.ringH + BED.drumH + 0.22, BED.mastZ);
-  tb.box(steel, 0.1, 0.08, 0.1, 0, BED.ringH + BED.drumH + 0.47, BED.mastZ);
-  tb.rbox(paint, 1.02, 0.23, 0.93, 0.045, 0, 0.15, BED.bayZ);
-  tb.box(dark, 0.91, 0.023, 0.82, 0, 0.278, BED.bayZ);
-  for (const sx of [-1, 1]) {
-    tb.rbox(steel, 0.12, 0.085, 0.84, 0.025, sx * 0.41, 0.314, BED.bayZ);
-    tb.box(black, 0.16, 0.025, 0.58, sx * 0.29, 0.296, BED.bayZ);
-    for (const z of [BED.bayZ - 0.30, BED.bayZ + 0.30]) tb.rbox(dark, 0.08, 0.055, 0.12, 0.012, sx * 0.46, 0.29, z);
-  }
-  tb.box(steel, 0.78, 0.035, 0.045, 0, 0.32, BED.bayZ - 0.44);
-  for (const x of [-0.26, 0.26]) tb.rbox(dark, 0.11, 0.055, 0.07, 0.012, x, 0.32, BED.bayZ + 0.43);
-  tb.flush(turretPivot, hullMeshes);
-  const drone = buildFpvDrone();
-  drone.setLocalPosition(0, 0.377, BED.bayZ);
-  turretPivot.addChild(drone);
-
-  const radarPanel = group('support_radar_panel', turretPivot);
-  radarPanel.setLocalPosition(0, BED.ringH + BED.drumH + 0.62, BED.mastZ);
-  const rb = new GeoBucket();
-  rb.rbox(steel, 0.91, 0.43, 0.1, 0.045, 0, 0, -0.015);
-  rb.rbox(dark, 0.83, 0.345, 0.07, 0.035, 0, 0, 0.045);
-  const antenna = bedMat('#829286', 0.54, 0.37);
-  for (let ix = -3; ix <= 3; ix++) for (let iy = -1; iy <= 1; iy++) rb.box(antenna, 0.049, 0.031, 0.012, ix * 0.105, iy * 0.096, 0.087);
-  // Rear truss, receiver modules and edge fasteners remain readable from the chase view.
-  for (const y of [-0.16, 0.16]) rb.box(steel, 0.82, 0.025, 0.035, 0, y, -0.085);
-  for (const sx of [-1, 1]) {
-    rb.box(steel, 0.035, 0.50, 0.035, sx * 0.36, -0.25, -0.075, 0, 0, sx * 0.62);
-    rb.rbox(dark, 0.16, 0.12, 0.09, 0.018, sx * 0.25, -0.07, -0.105);
-    rb.cyl(antenna, 0.009, 0.012, 0.48, 6, sx * 0.52, 0.06, -0.02, 0, 0, sx * 0.18);
-    for (const y of [-0.17, 0.17]) rb.cyl(steel, 0.014, 0.014, 0.025, 6, sx * 0.40, y, -0.115, Math.PI / 2);
-  }
-  rb.flush(radarPanel, hullMeshes);
-  let radarAngle = 0;
-
-  const gunPivot = group('support_gun_pivot', turretPivot);
-  gunPivot.setLocalPosition(0, BED.gunY, BED.gunZ);
-  const gunRecoilGroup = group('support_recoil_group', gunPivot);
-  const bb = new GeoBucket();
-  bb.rbox(dark, BED.headW, BED.headH, BED.headD, 0.05, 0, 0.18, BED.headZ);
-  const sensor = bedMat('#273e49', 0.16, 0.63, 2);
-  bb.cyl(black, 0.114, 0.13, 0.13, 14, 0, 0.22, 0.475, Math.PI / 2);
-  bb.cyl(sensor, 0.081, 0.092, 0.016, 14, 0, 0.22, 0.548, Math.PI / 2);
-  bb.cyl(steel, 0.05, 0.05, 0.16, 8, 0, BED.headH * 0.5 + 0.05, BED.headZ);
-  const tubeLocal: Vec3[] = [];
-  for (const sx of [-1, 1]) {
-    const cx = sx * BED.canX;
-    bb.rbox(steel, BED.canW, BED.canH, 0.22, 0.035, cx, 0.02, BED.canZ - 0.42);
-    bb.rbox(steel, BED.canW, BED.canH, 0.19, 0.035, cx, 0.02, BED.canZ + 0.49);
-    for (const [ty, tz] of [[-1, -1], [-1, 1], [1, -1], [1, 1]] as const) {
-      const mx = cx + ty * BED.canW / 5, my = 0.02 + tz * BED.canH / 5, mz = BED.canZ + BED.canD / 2 + 0.005;
-      bb.cyl(paint, 0.102, 0.102, BED.canD, 12, mx, my, BED.canZ, Math.PI / 2);
-      bb.cyl(black, 0.082, 0.082, 0.036, 12, mx, my, mz, Math.PI / 2);
-      bb.put(steel, torus(0.091, 0.01, 6, 12), mx, my, mz + 0.017);
-      tubeLocal.push(new Vec3(mx, my, mz));
+    const x = sx * 0.53;
+    deck.rbox(paint, 0.17, 0.42, 2.85, 0.04, sx * 1.02, 1.99, -1.71);
+    deck.rbox(rubber, 0.86, 0.065, 1.30, 0.04, x, 1.89, -2.24);
+    deck.rbox(steel, 0.72, 0.07, 0.38, 0.025, x, 1.94, -2.27);
+    deck.box(lens, 0.37, 0.032, 0.05, x, 1.96, -2.93);
+    for (const sz of [-1, 1]) {
+      deck.box(stencil, 0.68, 0.012, 0.052, x, 1.934, -2.24 + sz * 0.60);
+      deck.box(stencil, 0.052, 0.012, 0.32, x + sz * 0.35, 1.934, -2.24);
     }
+    for (let i = 0; i < 6; i++) {
+      deck.box(steel, 0.035, 0.10, 0.25, sx * 1.066, 2.25 + (i % 2) * 0.14, 0.72 - Math.floor(i / 2) * 0.29);
+      deck.box(stencil, 0.097, 0.048, 0.01, sx * (0.76 + (i % 3) * 0.106), 1.97 + Math.floor(i / 3) * 0.065, -3.142, 0, 0, -0.51);
+    }
+    deck.cyl(steel, 0.034, 0.044, 0.69, 8, sx * 0.84, 2.94, 0.65, 0, 0, sx * -0.17);
+    deck.cyl(rubber, 0.014, 0.025, 0.31, 6, sx * 0.92, 3.40, 0.65, 0, 0, sx * -0.17);
+    deck.rbox(steel, 0.31, 0.32, 0.40, 0.045, x, 2.03, -0.69);
+    deck.box(lens, 0.16, 0.04, 0.016, x, 2.12, -0.90);
   }
-  bb.flush(gunRecoilGroup, hullMeshes);
-  const rocketMeshes = tubeLocal.map((p) => {
-    const cap = meshNode(cylinder(0.08, 0.08, 0.035, 12), black, gunRecoilGroup);
-    setLocalEulerRad(cap, Math.PI / 2, 0, 0);
-    cap.setLocalPosition(p.x, p.y, p.z + 0.012);
-    return cap;
-  });
+  deck.rbox(steel, 1.73, 0.21, 0.17, 0.025, 0, 1.66, -3.18, 0.25);
+  deck.box(steel, 0.07, 0.21, 2.13, 0, 1.92, -1.91);
+  for (let i = 0; i < 4; i++) deck.box(steel, 1.78, 0.024, 0.07, 0, 1.87, -1.06 - i * 0.14);
+  deck.flush(hullTiltGroup, hullMeshes);
+
+  const fpv = buildFpvDrone(), gun = buildFpvDrone(true);
+  fpv.setLocalPosition(0.53, 2.02, -2.26);
+  gun.setLocalPosition(-0.53, 2.18, -2.26);
+  hullTiltGroup.addChild(fpv);
+  hullTiltGroup.addChild(gun);
+
+  // The damage model still expects an aim pivot; the carrier has no moving launcher.
+  const turretPivot = group('carrier_turret_pivot', hullTiltGroup);
+  turretPivot.setLocalPosition(0, 2.34, 0.35);
+  const turretRestPos = turretPivot.getLocalPosition().clone();
+  const gunPivot = group('carrier_gun_pivot', turretPivot);
+  const gunRecoilGroup = group('carrier_recoil_group', gunPivot);
   const muzzleNode = group('muzzle_datum', gunRecoilGroup), coaxNode = group('coax_datum', gunRecoilGroup);
-  muzzleNode.setLocalPosition(0, 0.1, BED.canZ + BED.canD / 2 + 0.15);
-  coaxNode.setLocalPosition(muzzleNode.getLocalPosition());
-  const articulate = () => {
-    radarAngle += 0.018;
-    setLocalEulerRad(radarPanel, 0, radarAngle, 0);
-  };
+  muzzleNode.setLocalPosition(0, 0.2, 0.7);
   return { root, hullTiltGroup, visualRoot, turretPivot, turretRestPos, gunPivot, gunRecoilGroup,
-    muzzleNode, coaxNode, rwsNode: null, wheels, steerNodes, rocketMeshes, articulate, hullMeshes };
+    muzzleNode, coaxNode, rwsNode: null, wheels, steerNodes, rocketMeshes: [], hullMeshes };
 }

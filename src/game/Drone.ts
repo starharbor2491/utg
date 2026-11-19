@@ -18,6 +18,16 @@ const BOT_FLIGHT_TIME = 65, PLAYER_COOLDOWN = 9, BOT_COOLDOWN = 25, BOT_SPEED = 
 const PLAYER_MIN_SPEED = 0, PLAYER_MAX_SPEED = 34, PLAYER_DEFAULT_SPEED = 24;
 
 export type DronePhase = 'launch' | 'fly' | 'fall' | 'dead';
+export type DroneKind = 'gun' | 'fpv';
+export type PilotInput = { dmx: number; dmy: number; up: boolean; down: boolean; fire: boolean; keys: ReadonlySet<string> };
+
+const GUN_HEALTH = 45;
+export const DRONE_BELT: ShellSpec = {
+  ...FPV_WARHEAD_SPEC, id: 'drone_mg', shortCode: 'MG', displayName: 'DRONE MACHINE GUN',
+  muzzleSpeed: 540, directDamage: 12, splashDamage: 0, splashRadius: 0, explosionScale: 0,
+  penetrationDepth: 0.5, penMm: 13, moduleDamage: { slug: 0.22, spall: 0.06, spallCount: 2 },
+  spallCount: 2, dispersionRad: 0.012, tracerColorRGB: [6.4, 5, 2.4],
+};
 
 let droneSeq = 0;
 const _fwd = new Vec3(), _tmp = new Vec3(), _tmp2 = new Vec3(), _tmp3 = new Vec3();
@@ -29,7 +39,7 @@ export class DroneEntity {
   public readonly operator: TankEntity | null;
   public readonly isBot: boolean;
   public phase: DronePhase = 'launch';
-  public readonly group = buildFpvDrone();
+  public readonly group: Entity;
   public readonly pos: Vec3;
   public readonly vel = new Vec3();
   public yaw = 0;
@@ -45,16 +55,21 @@ export class DroneEntity {
   private aimYaw: number;
   private aimPitch = 0;
   private readonly cameraMount: Entity;
+  private readonly muzzle: Entity | null;
+  private gunDelay = 0;
+  public health = GUN_HEALTH;
 
-  constructor(team: Team, operator: TankEntity | null, isBot: boolean, autopilot: boolean, spawnPos: Vec3, yaw: number) {
+  constructor(team: Team, operator: TankEntity | null, isBot: boolean, autopilot: boolean, spawnPos: Vec3, yaw: number, public readonly kind: DroneKind = 'fpv') {
     this.team = team;
     this.operator = operator;
     this.isBot = isBot;
     this.autopilot = autopilot;
     this.pos = spawnPos.clone();
+    this.group = buildFpvDrone(kind === 'gun');
     this._prevPos.copy(spawnPos);
     this.yaw = this.aimYaw = yaw;
     this.cameraMount = findByName(this.group, 'fpv_camera')!;
+    this.muzzle = findByName(this.group, 'drone_muzzle');
     this.group.forEach((node) => {
       if (userData(node).spin) {
         this.rotors.push(node as Entity);
@@ -73,7 +88,7 @@ export class DroneEntity {
 
   public dispose(): void {
     this.group.destroy();
-    const docked = this.operator ? findByName(this.operator.root, 'fpv_drone') : null;
+    const docked = this.operator ? findByName(this.operator.root, `${this.kind}_drone`) : null;
     if (docked) setVisible(docked, true);
   }
 
@@ -83,7 +98,7 @@ export class DroneEntity {
 
   public step(
     dt: number,
-    input: { dmx: number; dmy: number; up: boolean; down: boolean; keys: ReadonlySet<string> } | null,
+    input: PilotInput | null,
     mgr: DroneManager
   ): void {
     if (this.phase === 'dead') return;
@@ -124,6 +139,11 @@ export class DroneEntity {
       this.vel.y = Math.min(this.vel.y, 0);
     }
     this.syncMesh();
+    this.gunDelay -= dt;
+    if (this.phase === 'fly' && this.muzzle && this.operator && input?.fire && this.gunDelay <= 0) {
+      this.gunDelay = 0.086;
+      mgr.onFireMG?.(this.operator, this.muzzle.getPosition(), this.forward(_fwd), DRONE_BELT);
+    }
   }
 
   private checkImpact(mgr: DroneManager): boolean {
@@ -145,7 +165,8 @@ export class DroneEntity {
     }
     if (!Number.isFinite(contactDist)) return false;
     this.pos.copy(this._prevPos).addScaled(dir, contactDist);
-    if (hitTank) mgr.detonate(this, undefined, hitTank);
+    if (this.kind === 'gun') mgr.crash(this, depth > 0.03 && surfaceDist <= contactDist ? surface : undefined);
+    else if (hitTank) mgr.detonate(this, undefined, hitTank);
     else if (worldHit && worldHit.distance < surfaceDist) mgr.detonate(this, worldHit.obstacle);
     else if (depth > 0.03) mgr.splash(this, surface);
     else mgr.detonate(this);
@@ -205,7 +226,7 @@ export class DroneEntity {
   private _autopilotTarget: TankEntity | null = null;
   public setAutopilotTarget(t: TankEntity | null): void { this._autopilotTarget = t; }
 
-  private syncMesh(): void {
+  public syncMesh(): void {
     this.group.setLocalPosition(this.pos);
     setLocalEulerRad(this.group, -this.pitch, this.yaw, this.roll, 'YXZ');
   }
@@ -218,7 +239,11 @@ export class DroneManager {
   public world!: World;
   public effects!: EffectsManager;
   public onDamage?: (event: DamageEvent) => void;
-  public playerInput: { dmx: number; dmy: number; up: boolean; down: boolean; keys: ReadonlySet<string> } | null = null;
+  public onFireMG?: (shooter: TankEntity, pos: Vec3, dir: Vec3, spec: ShellSpec) => void;
+  public onGunLost?: (shotDown: boolean) => void;
+  public playerInput: PilotInput | null = null;
+  public opponentInput: PilotInput | null = null;
+  public localTeam: Team = 'blue';
   public readonly stats = { launched: 0, hits: 0, shotDown: 0, lost: 0 };
   public botLaunchesEnabled = true;
   public lastDetonation = { pos: new Vec3(), vel: new Vec3(), shooter: null as TankEntity | null, t: -99 };
@@ -228,15 +253,18 @@ export class DroneManager {
     for (const d of this.drones) if (d.operator === t && d.alive) return d;
     return null;
   }
-  public get playerDrone(): DroneEntity | null { return this.drones.find((d) => !d.isBot && d.alive) ?? null; }
+  public get playerDrone(): DroneEntity | null {
+    return this.drones.find((d) => !d.isBot && d.team === this.localTeam && d.alive && d.health > 0) ?? null;
+  }
 
-  public launch(t: TankEntity, opts: { autopilot?: boolean; target?: TankEntity | null } = {}): DroneEntity | null {
+  public launch(t: TankEntity, opts: { autopilot?: boolean; target?: TankEntity | null; kind?: DroneKind } = {}): DroneEntity | null {
     if (this.cooldownLeft(t) > 0 || this.activeFor(t)) return null;
+    const kind = opts.kind ?? 'fpv';
     const bay = applyAxisAngle(_tmp.set(0, 0.7, -3.1), Vec3.UP, t.hullYaw).add(t.position);
     bay.y = this.world.getHeightAt(bay.x, bay.z) + 1.6;
-    const docked = findByName(t.root, 'fpv_drone');
+    const docked = findByName(t.root, `${kind}_drone`);
     if (docked) bay.copy(docked.getPosition());
-    const d = new DroneEntity(t.team, t, !t.isHuman, opts.autopilot ?? !t.isHuman, bay, t.turretWorldYaw);
+    const d = new DroneEntity(t.team, t, !t.isHuman, opts.autopilot ?? !t.isHuman, bay, t.turretWorldYaw, kind);
     if (docked) setVisible(docked, false);
     if (opts.target) d.setAutopilotTarget(opts.target);
     this.drones.push(d);
@@ -251,12 +279,12 @@ export class DroneManager {
       const nc = c - dt;
       if (nc <= 0) this.cooldowns.delete(t); else this.cooldowns.set(t, nc);
     }
-    const inp = this.playerInput;
     for (let i = this.drones.length - 1; i >= 0; i--) {
       const d = this.drones[i];
       if (d.phase === 'dead') { d.dispose(); this.drones.splice(i, 1); continue; }
       if (!d.group.parent) scene.addChild(d.group);
-      if (d.autopilot || inp) d.step(dt, d.isBot ? null : inp, this);
+      const inp = d.isBot ? null : d.team === this.localTeam ? this.playerInput : this.opponentInput;
+      if (d.autopilot || inp || d.phase === 'fall') d.step(dt, d.isBot ? null : inp, this);
     }
     for (const t of this.botLaunchesEnabled ? this.allTanks : []) {
       if (!t.alive || t.isHuman || t.stats.vehicleClass !== 'support') continue;
@@ -269,6 +297,89 @@ export class DroneManager {
       }
       if (best) this.launch(t, { autopilot: true, target: best });
     }
+  }
+
+  /** Tests the swept shot only up to the nearest terrain, water or vehicle hit. */
+  public hitByProjectile(team: Team | undefined, origin: Vec3, direction: Vec3, limit: number, damage: number): boolean {
+    let best: DroneEntity | null = null;
+    for (const d of this.drones) {
+      if (d.kind !== 'gun' || !d.alive || d.health <= 0 || d.team === team) continue;
+      const offset = _tmp.sub2(d.pos, origin);
+      const along = offset.dot(direction);
+      const lateralSq = offset.lengthSq() - along * along;
+      if (lateralSq > 0.39 * 0.39) continue;
+      const halfChord = Math.sqrt(0.39 * 0.39 - lateralSq);
+      const t = Math.max(0, along - halfChord);
+      if (along + halfChord < 0 || t > limit) continue;
+      best = d;
+      limit = t;
+    }
+    if (!best) return false;
+    this.effects.spawnSparkImpact(_tmp.copy(origin).addScaled(direction, limit), _up, true);
+    best.health = Math.max(0, best.health - damage);
+    if (best.health === 0) {
+      best.phase = 'fall';
+      this.stats.shotDown++;
+      if (!best.isBot && best.team === this.localTeam) this.onGunLost?.(true);
+    }
+    return true;
+  }
+
+  public crash(d: DroneEntity, waterLevel?: number): void {
+    d.phase = 'dead';
+    this.stats.lost++;
+    if (waterLevel !== undefined) {
+      d.pos.y = waterLevel;
+      this.effects.spawnWaterSplash(d.pos);
+    } else {
+      this.effects.spawnSparkImpact(d.pos, _up, false);
+      this.effects.spawnWreckSmoke(d.pos);
+    }
+    if (!d.isBot && d.team === this.localTeam && d.health > 0) this.onGunLost?.(false);
+  }
+
+  public reset(): void {
+    for (const d of this.drones) d.dispose();
+    this.drones.length = 0;
+    this.cooldowns.clear();
+  }
+
+  public duelSnapshot(t: TankEntity): number[] {
+    const d = this.drones.find((entry) => entry.team === t.team && entry.alive);
+    if (!d) return [this.cooldownLeft(t), 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    return [this.cooldownLeft(t), d.kind === 'gun' ? 1 : 2, d.pos.x, d.pos.y, d.pos.z, d.yaw, d.pitch, d.roll, d.health, d.speed];
+  }
+
+  public applyDuelSnapshot(t: TankEntity, s: readonly number[], scene: Entity): void {
+    if (s[0] > 0) this.cooldowns.set(t, s[0]); else this.cooldowns.delete(t);
+    const existing = this.drones.find((d) => d.team === t.team);
+    if (existing && (s[1] === 0 || existing.operator !== t || existing.kind !== (s[1] === 1 ? 'gun' : 'fpv'))) {
+      if (!s[1] && existing.kind === 'fpv') {
+        this.effects.spawnExplosion(existing.pos, _up, 1.35, 'he_armor');
+        this.lastDetonation.pos.copy(existing.pos);
+        this.lastDetonation.shooter = existing.operator;
+      } else if (!s[1] && existing.kind === 'gun') {
+        this.effects.spawnWreckSmoke(existing.pos);
+      }
+      existing.dispose();
+      this.drones.splice(this.drones.indexOf(existing), 1);
+    }
+    if (s[1] !== 1 && s[1] !== 2) return;
+    const kind = s[1] === 1 ? 'gun' : 'fpv';
+    const pos = _tmp.set(s[2], s[3], s[4]);
+    let d = this.drones.find((entry) => entry.team === t.team);
+    if (!d) {
+      d = new DroneEntity(t.team, t, false, false, pos, s[5], kind);
+      const dock = findByName(t.root, `${kind}_drone`);
+      if (dock) setVisible(dock, false);
+      scene.addChild(d.group);
+      this.drones.push(d);
+    }
+    if (d.health > 0 && s[8] <= 0 && t.team === this.localTeam) this.onGunLost?.(true);
+    d.pos.copy(pos);
+    d.yaw = s[5]; d.pitch = s[6]; d.roll = s[7]; d.health = s[8]; d.speed = s[9];
+    d.phase = d.health > 0 ? 'fly' : 'fall';
+    d.syncMesh();
   }
 
   public detonate(d: DroneEntity, obstacle?: ObstacleCollider, contact?: TankEntity): void {
@@ -321,19 +432,21 @@ export class DroneManager {
     return best;
   }
 
-  public fpvTelemetry(): { speedKmh: number; altM: number; rangeM: number; cooldown: number } | null {
+  public fpvTelemetry() {
     const d = this.playerDrone;
     if (!d || !d.operator) return null;
     const rangeM = d.pos.distance(d.operator.position);
     const agl = d.pos.y - (this.world?.getHeightAt(d.pos.x, d.pos.z) ?? 0);
-    return { speedKmh: Math.round(d.speed * 3.6), altM: Math.round(agl), rangeM: Math.round(rangeM), cooldown: this.cooldownLeft(d.operator) };
+    return { kind: d.kind, healthPercent: Math.round(d.health * 100 / GUN_HEALTH), speedKmh: Math.round(d.speed * 3.6),
+      altM: Math.round(agl), rangeM: Math.round(rangeM), cooldown: this.cooldownLeft(d.operator) };
   }
 
   public slotStatus(t: TankEntity): { text: string; airborne: boolean } {
     const d = this.activeFor(t);
-    if (d) return { text: 'FPV AIRBORNE', airborne: true };
+    const name = d?.kind === 'gun' || (!d && t.activeShell.id === 'gun_drone') ? 'GUN DRONE' : 'FPV';
+    if (d) return { text: `${name} AIRBORNE`, airborne: true };
     const cd = this.cooldownLeft(t);
-    if (cd > 0) return { text: `FPV ${Math.ceil(cd)} S`, airborne: false };
-    return { text: 'FPV READY', airborne: false };
+    if (cd > 0) return { text: `${name} ${Math.ceil(cd)} S`, airborne: false };
+    return { text: `${name} READY`, airborne: false };
   }
 }

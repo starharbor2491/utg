@@ -119,12 +119,12 @@ const IFV_BELTS: readonly [ShellSpec, ShellSpec] = [
     shortCode: '30MM APDS',
     displayName: '30MM APDS-T SABOT',
     muzzleSpeed: 560,
-    directDamage: 40,
+    directDamage: 58,
     splashDamage: 0,
     splashRadius: 0,
     penetrationDepth: 2.35,
     penMm: 90,
-    moduleDamage: { slug: 0.72, spall: 0.20, spallCount: 5 },
+    moduleDamage: { slug: 0.94, spall: 0.25, spallCount: 5 },
     spallCount: 5,
     spallWeight: 0.34,
     explosionScale: 0.25,
@@ -136,12 +136,12 @@ const IFV_BELTS: readonly [ShellSpec, ShellSpec] = [
     shortCode: '30MM HEI',
     displayName: '30MM HEI-T EXPLOSIVE',
     muzzleSpeed: 450,
-    directDamage: 27,
-    splashDamage: 24,
+    directDamage: 39,
+    splashDamage: 34,
     splashRadius: 3.2,
     penetrationDepth: 0.95,
     penMm: 15,
-    moduleDamage: { slug: 0.43, spall: 0.14, spallCount: 2 },
+    moduleDamage: { slug: 0.56, spall: 0.18, spallCount: 2 },
     spallCount: 6,
     spallWeight: 0.25,
     explosionScale: 0.36,
@@ -156,12 +156,12 @@ const HUMVEE_50CAL: readonly [ShellSpec, ShellSpec] = [
     shortCode: '12.7 AP',
     displayName: '12.7MM M2 AP',
     muzzleSpeed: 890,
-    directDamage: 14,
+    directDamage: 21,
     splashDamage: 0,
     splashRadius: 0,
     penetrationDepth: 1.2,
     penMm: 22,
-    moduleDamage: { slug: 0.34, spall: 0.11, spallCount: 2 },
+    moduleDamage: { slug: 0.44, spall: 0.14, spallCount: 2 },
     spallCount: 3,
     spallWeight: 0.3,
     explosionScale: 0.18,
@@ -173,12 +173,12 @@ const HUMVEE_50CAL: readonly [ShellSpec, ShellSpec] = [
     shortCode: '12.7 API-T',
     displayName: '12.7MM M2 API-T INCENDIARY',
     muzzleSpeed: 890,
-    directDamage: 11,
-    splashDamage: 9,
+    directDamage: 17,
+    splashDamage: 13,
     splashRadius: 2.4,
     penetrationDepth: 0.9,
     penMm: 8,
-    moduleDamage: { slug: 0.15, spall: 0, spallCount: 0 },
+    moduleDamage: { slug: 0.20, spall: 0, spallCount: 0 },
     spallCount: 4,
     spallWeight: 0.28,
     explosionScale: 0.3,
@@ -228,7 +228,6 @@ const SAM_SHELLS: readonly [ShellSpec, ShellSpec] = [
     guidance: SAM_GUIDANCE,
   },
   {
-    // F5b stub: selectable slot, cannot fire yet.
     id: 'fpv_drone',
     shortCode: 'FPV',
     displayName: 'FPV DRONE',
@@ -243,6 +242,10 @@ const SAM_SHELLS: readonly [ShellSpec, ShellSpec] = [
     tracerColorRGB: [9, 9, 9],
     dispersionRad: 0,
   },
+];
+const DRONE_SLOTS: readonly [ShellSpec, ShellSpec] = [
+  { ...SAM_SHELLS[1], id: 'gun_drone', shortCode: 'GUN DRONE', displayName: 'GUN DRONE' },
+  SAM_SHELLS[1],
 ];
 
 const ROCKET_SHELLS: readonly [ShellSpec, ShellSpec] = [
@@ -456,7 +459,7 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
   },
   support: {
     vehicleClass: 'support',
-    displayName: 'SAM SUPPORT',
+    displayName: 'DRONE CARRIER',
     maxForwardSpeed: 18.5, // ~67 km/h same truck as the launcher
     maxReverseSpeed: 5.5,
     forwardAccel: 6.2,
@@ -467,15 +470,13 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
     gunElevateRate: 0.35,
     gunMinPitch: 0,
     gunMaxPitch: 1.0,
-    hasMainCannon: true,
-    cannonReloadTime: 10, // full 8-round ripple reload
-    salvoSize: 8,
-    salvoInterval: 0.3,
-    shellMuzzleSpeed: SAM_SHELLS[0].muzzleSpeed,
-    shellDirectDamage: SAM_SHELLS[0].directDamage,
-    shellSplashDamage: SAM_SHELLS[0].splashDamage,
-    shellSplashRadius: SAM_SHELLS[0].splashRadius,
-    shells: SAM_SHELLS,
+    hasMainCannon: false,
+    cannonReloadTime: 9,
+    shellMuzzleSpeed: 0,
+    shellDirectDamage: 0,
+    shellSplashDamage: 0,
+    shellSplashRadius: 0,
+    shells: DRONE_SLOTS,
     recoilImpulse: 0.08,
     hitRadius: 2.9,
     collisionRadius: 2.6,
@@ -497,13 +498,13 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
     hasMainCannon: true, hasCoaxMG: true, infiniteMG: false,
     cannonReloadTime: 3.5, mgFireInterval: 0.085, recoilImpulse: 0.02,
     salvoSize: 2, salvoInterval: 0.65,
-    shellMuzzleSpeed: SAM_SHELLS[0].muzzleSpeed,
-    shellDirectDamage: SAM_SHELLS[0].directDamage,
-    shellSplashDamage: SAM_SHELLS[0].splashDamage,
-    shellSplashRadius: SAM_SHELLS[0].splashRadius,
+    shellMuzzleSpeed: LITTLE_BIRD_MISSILE.muzzleSpeed,
+    shellDirectDamage: LITTLE_BIRD_MISSILE.directDamage,
+    shellSplashDamage: LITTLE_BIRD_MISSILE.splashDamage,
+    shellSplashRadius: LITTLE_BIRD_MISSILE.splashRadius,
     shells: [LITTLE_BIRD_MISSILE, {
       ...HUMVEE_50CAL[0], id: 'littlebird_mg', shortCode: 'MG', displayName: 'MACHINE GUN',
-      directDamage: 5.5, muzzleSpeed: 720, penMm: 14, moduleDamage: { slug: 0.12, spall: 0.04, spallCount: 2 },
+      directDamage: 10, muzzleSpeed: 720, penMm: 14, moduleDamage: { slug: 0.17, spall: 0.05, spallCount: 2 },
     }],
     hitRadius: 1.31, collisionRadius: 1.18,
     drive: 'air', hullHalfWidth: 0.94, hullHalfLength: 1.5,
@@ -524,8 +525,8 @@ export const TANK_STATS: Record<VehicleClass, TankStats> = {
     shellSplashRadius: APACHE_MISSILE.splashRadius,
     shells: [APACHE_MISSILE, {
       ...IFV_BELTS[0], id: 'apache_gatling', shortCode: 'GATLING', displayName: 'HEAVY GATLING',
-      muzzleSpeed: 660, directDamage: 52, penMm: 112,
-      moduleDamage: { slug: 0.88, spall: 0.23, spallCount: 5 }, tracerColorRGB: [9, 5.5, 2],
+      muzzleSpeed: 660, directDamage: 72, penMm: 112,
+      moduleDamage: { slug: 1.12, spall: 0.30, spallCount: 5 }, tracerColorRGB: [9, 5.5, 2],
     }],
     hitRadius: 2.25, collisionRadius: 2.1,
     drive: 'air', hullHalfWidth: 1.1, hullHalfLength: 2.5,
@@ -797,6 +798,62 @@ export class Tank implements TankEntity {
 
   public get activeShell(): ShellSpec {
     return this.stats.shells[this.selectedShellIndex];
+  }
+
+  public duelSnapshot(): number[] {
+    return [
+      this.position.x, this.position.y, this.position.z, this.velocity.x, this.velocity.y, this.velocity.z,
+      this.hullYaw, this.hullTilt.x, this.hullTilt.y, this.hullTilt.z, this.turretRelYaw, this.gunPitch, this.speed,
+      Number(this.alive), this.respawnTimer, this.cannonCooldown, this.mgHeat, Number(this.mgOverheated),
+      this.selectedShellIndex, this._rocketsLeft, this.flightThrottle, this.fireT,
+      this.seekerProgress, Number(this.seekerLocked),
+      ...ALL_MODULE_IDS.map((id) => this.modules.get(id)?.integrity ?? 1),
+    ];
+  }
+
+  public static get duelSnapshotLength(): number { return 24 + ALL_MODULE_IDS.length; }
+
+  public applyDuelSnapshot(s: readonly number[], opponent: Tank): void {
+    const wasAlive = this.alive;
+    this.position.set(s[0], s[1], s[2]);
+    this.velocity.set(s[3], s[4], s[5]);
+    this.hullYaw = s[6];
+    [this.hullTilt.x, this.hullTilt.y, this.hullTilt.z] = [s[7], s[8], s[9]];
+    this.turretRelYaw = s[10];
+    this.gunPitch = s[11];
+    this.speed = s[12];
+    this.respawnTimer = clamp(s[14], 0, 60);
+    this.cannonCooldown = clamp(s[15], 0, 60);
+    this.mgHeat = clamp(s[16], 0, 1);
+    this.mgOverheated = s[17] === 1;
+    this.selectedShellIndex = s[18] === 1 ? 1 : 0;
+    this._rocketsLeft = clamp(s[19], 0, this.stats.salvoSize ?? 0);
+    this.flightThrottle = clamp(s[20], 0, 1);
+    this.fireT = clamp(s[21], 0, 90);
+    this.seekerProgress = clamp(s[22], 0, 1);
+    this.seekerLocked = s[23] === 1;
+    this.seekerTarget = this.seekerProgress > 0 ? opponent : null;
+    ALL_MODULE_IDS.forEach((id, i) => {
+      const rt = this.modules.get(id);
+      if (rt) rt.integrity = clamp(s[24 + i], 0, rt.maxIntegrity);
+    });
+    this._recountCrew();
+    this.root.setLocalPosition(this.position);
+    setLocalEulerRad(this.root, 0, this.hullYaw, 0);
+    setLocalEulerRad(this.rig.hullTiltGroup, s[7], s[8], s[9], 'YXZ');
+    setLocalEulerRad(this.rig.turretPivot, 0, this.turretRelYaw, 0);
+    setLocalEulerRad(this.rig.gunPivot, -this.gunPitch, 0, 0);
+    this.rig.rocketMeshes.forEach((mesh, i) => setVisible(mesh, i >= this.rig.rocketMeshes.length - this._rocketsLeft));
+    if (wasAlive && s[13] === 0) this.debugKill(false);
+    this.alive = s[13] === 1;
+    this.respawnTimer = clamp(s[14], 0, 60);
+    setVisible(this.root, this.alive);
+  }
+
+  public animateDuelReplica(dt: number): void {
+    if (!this.alive) return;
+    this.rig.spinRotors?.(dt * (0.42 + this.flightThrottle * 0.7));
+    this.rig.articulate?.(this.gunPitch);
   }
 
   /** Rocket pods: rounds remaining in the current pod (0 once empty until reload finishes). */
@@ -1218,7 +1275,7 @@ export class Tank implements TankEntity {
       this.stats.salvoSize &&
       this.activeShell.guidance &&
       intent &&
-      (!this.salvoActive || this.stats.vehicleClass === 'support')
+      !this.salvoActive
     ) {
       this._updateSeeker(intent, world, allTanks, safeDt, seekerExtras);
     }
@@ -1251,8 +1308,7 @@ export class Tank implements TankEntity {
           intent?.fireCannon && !mgIsPrimary &&
           this.cannonCooldown <= 0 &&
           this._rocketsLeft > 0 &&
-          canFireCannon &&
-          this.activeShell.id !== 'fpv_drone'
+          canFireCannon
         ) {
           this.salvoActive = true;
           this.salvoTimer = 0;
@@ -1320,8 +1376,8 @@ export class Tank implements TankEntity {
     const control = pilotOut || engineOut ? 0 : Math.sqrt(mobility);
     const cyclicStep = Math.min(1, this.stats.hullTurnRate / 3) * dt;
     // Cyclic settings stay where the pilot leaves them; opposite input levels the craft.
-    pose.x = clamp(pose.x + ((intent?.throttle ?? 0) * 0.95 * cyclicStep + (intent?.flightPitchDelta ?? 0)) * control, -Math.PI / 2, Math.PI / 2);
-    pose.z = clamp(pose.z + ((intent?.flightRollDelta ?? 0) - (intent?.steer ?? 0) * 0.9 * cyclicStep) * control, -0.58, 0.58);
+    pose.x = wrapAnglePi(pose.x + ((intent?.throttle ?? 0) * 0.95 * cyclicStep + (intent?.flightPitchDelta ?? 0)) * control);
+    pose.z = wrapAnglePi(pose.z + ((intent?.flightRollDelta ?? 0) - (intent?.steer ?? 0) * 0.9 * cyclicStep) * control);
 
     // The rotor pushes along the aircraft's tilted up vector. Drag and thrust,
     // not key state, determine velocity. Nothing adjusts throttle to hold altitude.
@@ -1710,20 +1766,12 @@ export class Tank implements TankEntity {
       setVisible(mesh, false);
     } else this.getMuzzleWorld(_tmpVecA, _tmpVecB);
     this._rocketsLeft = Math.max(0, this._rocketsLeft - 1);
-    // SAM ripple: each missile snapshots the CURRENT lock at launch so the
-    // player can walk the ripple onto a new target mid-salvo.
-    const guide =
-      this.stats.vehicleClass === 'support'
-        ? this.seekerLocked
-          ? this.seekerTarget
-          : null
-        : this.salvoGuideTarget;
     callbacks?.onFireCannon?.(
       this,
       _tmpVecA,
       _tmpVecB,
       this.salvoSpec ?? this.activeShell,
-      guide
+      this.salvoGuideTarget
     );
   }
 
@@ -2125,8 +2173,8 @@ export class Tank implements TankEntity {
       const lx = _tmpVecA.x, ly = _tmpVecA.y, lz = _tmpVecA.z;
 
       // ---------- external modules: direct box hits regardless of armour ----------
-      const smallArms = weapon === 'mg' && (!spec || spec.id.startsWith('humvee_') || spec.id === 'littlebird_mg');
-      const chip = smallArms ? Math.min(0.065, amount * 0.005) : 0;
+      const smallArms = weapon === 'mg' && penMm <= 22;
+      const chip = weapon === 'mg' ? clamp(amount * 0.008, 0, smallArms ? 0.125 : 0.22) : 0;
       const extSlug = smallArms ? chip : (md?.slug ?? amount * 0.004) * Math.min(1, penMm / 40);
       if (extSlug > 0) {
         for (const rt of this.modules.values()) {
@@ -2221,11 +2269,10 @@ export class Tank implements TankEntity {
           penEnd[1] = ly + _hD.y * pathLen;
           penEnd[2] = lz + _hD.z * pathLen;
         } else if (chip > 0 && hitModules.size === 0) {
-          // A non-penetrating burst wears exposed hardware, not crew behind the plate.
+          // Worn hardware stays tied to this impact location; it does not spill into another module.
           let closestId: ModuleId | null = null;
           let closestSq = Infinity;
           for (const rt of this.modules.values()) {
-            if (rt.integrity <= 0) continue;
             for (const bx of rt.boxes) {
               if (!bx.external) continue;
               const o = bx.part === 'hull' ? _hO : _tO;
@@ -2240,7 +2287,7 @@ export class Tank implements TankEntity {
               if (distSq < closestSq) { closestSq = distSq; closestId = rt.id; }
             }
           }
-          if (closestId) hitModules.set(closestId, { dmg: chip * 0.65, dist: entryT });
+          if (closestId) hitModules.set(closestId, { dmg: chip * 0.8, dist: entryT });
         }
       }
 
@@ -2340,7 +2387,7 @@ export class Tank implements TankEntity {
       ricochet,
       killed: !this.alive,
       killReason: this.alive ? null : this._dkKillReason,
-      weapon: spec ? 'cannon' : weapon,
+      weapon,
       entryLocal: [ex, ey, ez],
       penEndLocal: penEnd,
       dirLocal: [0, 0, 0],
